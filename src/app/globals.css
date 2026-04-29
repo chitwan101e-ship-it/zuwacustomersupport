@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900;
+}
+
+.otp-input {
+  @apply w-12 h-14 text-center text-xl font-semibold border border-gray-200 rounded-xl focus:border-brand-500 focus:ring-4 focus:ring-brand-100 focus:outline-none transition-all;
+}

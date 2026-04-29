@@ -1,0 +1,1934 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Relay — Private Messaging Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #08090d; font-family: 'DM Sans', sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
+  #root { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  ::-webkit-scrollbar { width: 0; background: transparent; }
+  input, textarea, button, select { font-family: 'DM Sans', sans-serif; }
+  input::placeholder, textarea::placeholder { opacity: 0.45; }
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+    30% { transform: translateY(-5px); opacity: 1; }
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+
+// relay-shared.jsx — Theme system, context, mock data, shared UI atoms
+
+const { createContext, useContext, useState, useRef, useEffect, useCallback } = React;
+// Make React hooks globally available to all sibling Babel files
+Object.assign(window, { useState, useRef, useEffect, useContext, useCallback, createContext });
+
+// ─── THEME TOKENS ─────────────────────────────────────────────────────────────
+
+const themeTokens = {
+  dark: {
+    bg: '#0c0e15', card: '#13161f', elevated: '#1a1d2a', inputBg: 'rgba(255,255,255,0.05)',
+    border: 'rgba(255,255,255,0.07)', borderStrong: 'rgba(255,255,255,0.13)',
+    text: '#e2e4ed', muted: '#5e6478', faint: '#1e2135',
+    accent: '#7c5af6', accentHover: '#9175f7', accentGlow: 'rgba(124,90,246,0.25)',
+    selfBubble: '#7c5af6', otherBubble: '#1e2135', otherBubbleText: '#e2e4ed',
+    nav: 'rgba(12,14,21,0.88)', statusBar: '#0c0e15',
+    danger: '#e85555', success: '#3ecf8e', warn: '#f5a623', info: '#4fa8f7',
+    gradientBtn: 'linear-gradient(135deg, #7c5af6, #5a7ff6)',
+    gradientBtnHover: 'linear-gradient(135deg, #9175f7, #6a8ff7)',
+    shadow: '0 8px 32px rgba(0,0,0,0.45)',
+    cardShadow: '0 2px 12px rgba(0,0,0,0.3)',
+  },
+  light: {
+    bg: '#f2f2f7', card: '#ffffff', elevated: '#e9e9f0', inputBg: 'rgba(0,0,0,0.04)',
+    border: 'rgba(0,0,0,0.07)', borderStrong: 'rgba(0,0,0,0.13)',
+    text: '#1a1c2a', muted: '#8890a4', faint: '#e4e4ec',
+    accent: '#7c5af6', accentHover: '#6a49e4', accentGlow: 'rgba(124,90,246,0.15)',
+    selfBubble: '#7c5af6', otherBubble: '#e4e4ec', otherBubbleText: '#1a1c2a',
+    nav: 'rgba(242,242,247,0.9)', statusBar: '#f2f2f7',
+    danger: '#e53e3e', success: '#38a169', warn: '#d69e2e', info: '#3182ce',
+    gradientBtn: 'linear-gradient(135deg, #7c5af6, #5a7ff6)',
+    gradientBtnHover: 'linear-gradient(135deg, #6a49e4, #4a6fe4)',
+    shadow: '0 8px 32px rgba(0,0,0,0.1)',
+    cardShadow: '0 2px 12px rgba(0,0,0,0.06)',
+  },
+  playful: {
+    bg: '#0d0a1a', card: '#16112a', elevated: '#1f1840', inputBg: 'rgba(255,255,255,0.06)',
+    border: 'rgba(224,64,160,0.13)', borderStrong: 'rgba(224,64,160,0.28)',
+    text: '#f0e8ff', muted: '#7a6a9a', faint: '#1e1838',
+    accent: '#e040a0', accentHover: '#f555b5', accentGlow: 'rgba(224,64,160,0.28)',
+    selfBubble: '#e040a0', otherBubble: '#1f1840', otherBubbleText: '#f0e8ff',
+    nav: 'rgba(13,10,26,0.9)', statusBar: '#0d0a1a',
+    danger: '#ff6060', success: '#40cf8e', warn: '#ffb020', info: '#60b0ff',
+    gradientBtn: 'linear-gradient(135deg, #e040a0, #7c5af6)',
+    gradientBtnHover: 'linear-gradient(135deg, #f555b5, #9175f7)',
+    shadow: '0 8px 32px rgba(224,64,160,0.2)',
+    cardShadow: '0 2px 12px rgba(224,64,160,0.1)',
+  },
+};
+
+// ─── CONTEXTS ─────────────────────────────────────────────────────────────────
+
+const ThemeContext = createContext(null);
+function ThemeProvider({ children, value }) {
+  return React.createElement(ThemeContext.Provider, { value }, children);
+}
+const useTheme = () => useContext(ThemeContext);
+
+const AppContext = createContext(null);
+const useApp = () => useContext(AppContext);
+
+// ─── MOCK DATA ────────────────────────────────────────────────────────────────
+
+const MOCK_CUSTOMERS = [
+  { id: 'c1', name: 'Jordan Lee', email: 'jordan@email.com', status: 'approved', joined: '2 days ago', lastActive: '5m ago', unread: 2, lastMsg: 'Also — is there a way to update my profile?' },
+  { id: 'c2', name: 'Maria Santos', email: 'maria@email.com', status: 'approved', joined: '5 days ago', lastActive: '2h ago', unread: 0, lastMsg: 'Thank you so much! Really excited.' },
+  { id: 'c3', name: 'Alex Kim', email: 'alex@email.com', status: 'approved', joined: '1 week ago', lastActive: '1d ago', unread: 1, lastMsg: 'It says "unauthorized access" when I try to open the chat.' },
+  { id: 'c4', name: 'Priya Nair', email: 'priya@email.com', status: 'pending', joined: '1 day ago', request: 'I need support with my account setup. I was referred by a colleague.', lastMsg: '', unread: 0 },
+  { id: 'c5', name: 'Tom Herz', email: 'tom@email.com', status: 'pending', joined: '3 hours ago', request: 'Looking to use Relay for our small team communications.', lastMsg: '', unread: 0 },
+  { id: 'c6', name: 'Dana Reeves', email: 'dana@email.com', status: 'rejected', joined: '4 days ago', lastMsg: '', unread: 0 },
+];
+
+const MOCK_MESSAGES_STORE = {
+  c1: [
+    { id: 'm1', sender: 'customer', body: 'Hi! I just signed up and wanted to say hello 👋', time: '9:12 AM', status: 'seen' },
+    { id: 'm2', sender: 'staff', body: 'Welcome, Jordan! Great to have you here. How can we help you today?', time: '9:14 AM', status: 'seen', staffName: 'Relay Support' },
+    { id: 'm3', sender: 'customer', body: 'I had a question about how notifications work.', time: '9:15 AM', status: 'seen' },
+    { id: 'm4', sender: 'staff', body: 'Of course! You can access your notification center from the bell icon. We\'ll send you replies, announcements, and alerts there.', time: '9:16 AM', status: 'seen', staffName: 'Relay Support' },
+    { id: 'm5', sender: 'customer', body: 'Perfect, thanks!', time: '9:18 AM', status: 'seen' },
+    { id: 'm6', sender: 'customer', body: 'Also — is there a way to update my profile info?', time: '9:19 AM', status: 'delivered' },
+  ],
+  c2: [
+    { id: 'm1', sender: 'staff', body: 'Hi Maria! Your account has been approved. Welcome to Relay 🎉', time: 'Yesterday', status: 'seen', staffName: 'Relay Support' },
+    { id: 'm2', sender: 'customer', body: 'Thank you so much! Really excited to get started.', time: 'Yesterday', status: 'seen' },
+  ],
+  c3: [
+    { id: 'm1', sender: 'customer', body: 'Hello, I\'m getting a login error. Can you help?', time: '2 days ago', status: 'seen' },
+    { id: 'm2', sender: 'staff', body: 'Hi Alex! I\'ll look into that right away. What error message are you seeing?', time: '2 days ago', status: 'seen', staffName: 'Admin' },
+    { id: 'm3', sender: 'customer', body: 'It says "unauthorized access" when I try to open the chat.', time: '2 days ago', status: 'delivered' },
+  ],
+};
+
+const MOCK_NOTIFICATIONS = [
+  { id: 'n1', type: 'announcement', title: 'Relay is now live!', body: 'We\'re excited to announce that Relay has officially launched. Thank you for being an early member.', time: '2h ago', read: false },
+  { id: 'n2', type: 'reply', title: 'New reply from Support', body: 'Of course! You can access your notification center from the bell icon at the top.', time: '9:16 AM', read: false },
+  { id: 'n3', type: 'alert', title: 'Scheduled maintenance', body: 'Routine maintenance tonight from 2–4 AM UTC. Services may be briefly unavailable.', time: 'Yesterday', read: true },
+];
+
+const MOCK_REPORTS = [
+  { id: 'r1', userId: 'c1', userName: 'Jordan Lee', type: 'Technical Issue', desc: 'Notifications are not appearing on my device even though I have them enabled in settings.', status: 'new', time: '1h ago' },
+  { id: 'r2', userId: 'c3', userName: 'Alex Kim', type: 'Login Problem', desc: 'Getting an "unauthorized access" error intermittently when opening the chat screen.', status: 'in-review', time: '2 days ago' },
+  { id: 'r3', userId: 'c2', userName: 'Maria Santos', type: 'Other', desc: 'The interface feels slow on my older Android device. Page transitions lag a bit.', status: 'resolved', time: '3 days ago' },
+];
+
+// ─── SHARED UI ATOMS ──────────────────────────────────────────────────────────
+
+function Avatar({ name, size = 36, online = false }) {
+  const { t } = useTheme();
+  const initials = (name || '?').split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
+  const hues = [260, 195, 330, 155, 28, 285, 12, 180, 310, 220];
+  const hue = hues[(name || 'A').charCodeAt(0) % hues.length];
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      <div style={{
+        width: size, height: size, borderRadius: size / 2,
+        background: `oklch(0.52 0.19 ${hue})`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: size * 0.35, fontWeight: 700, color: '#fff', letterSpacing: '-0.3px',
+        userSelect: 'none',
+      }}>{initials}</div>
+      {online && (
+        <div style={{
+          position: 'absolute', bottom: 1, right: 1,
+          width: size * 0.27, height: size * 0.27, borderRadius: '50%',
+          background: t.success, border: `2px solid ${t.card}`,
+        }} />
+      )}
+    </div>
+  );
+}
+
+function Badge({ count, color, dot = false }) {
+  const { t } = useTheme();
+  if (!count && !dot) return null;
+  if (dot) return (
+    <div style={{ width: 8, height: 8, borderRadius: 4, background: color || t.accent }} />
+  );
+  return (
+    <div style={{
+      background: color || t.accent, color: '#fff',
+      fontSize: 10, fontWeight: 700, minWidth: 18, height: 18,
+      borderRadius: 9, display: 'flex', alignItems: 'center',
+      justifyContent: 'center', padding: '0 5px', flexShrink: 0,
+    }}>{count > 99 ? '99+' : count}</div>
+  );
+}
+
+function Btn({ children, variant = 'primary', size = 'md', onClick, disabled, full = false, style: sx = {} }) {
+  const { t } = useTheme();
+  const [hov, setHov] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const vs = {
+    primary: { background: hov ? t.gradientBtnHover : t.gradientBtn, color: '#fff', border: 'none' },
+    secondary: { background: hov ? t.elevated : t.inputBg, color: t.text, border: `1px solid ${t.border}` },
+    ghost: { background: hov ? t.inputBg : 'transparent', color: t.muted, border: 'none' },
+    danger: { background: hov ? '#c83030' : t.danger, color: '#fff', border: 'none' },
+    success: { background: hov ? '#2da860' : t.success, color: '#fff', border: 'none' },
+    outline: { background: 'transparent', color: t.accent, border: `1.5px solid ${t.accent}` },
+  };
+  const ss = { sm: { p: '6px 12px', fs: 13 }, md: { p: '10px 18px', fs: 14 }, lg: { p: '14px 24px', fs: 15 } };
+  const v = vs[variant] || vs.primary;
+  const s = ss[size] || ss.md;
+  return (
+    <button
+      onClick={onClick} disabled={disabled}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => { setHov(false); setPressed(false); }}
+      onMouseDown={() => setPressed(true)} onMouseUp={() => setPressed(false)}
+      style={{
+        ...v, borderRadius: 12, padding: s.p, fontSize: s.fs, fontWeight: 600,
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.45 : 1,
+        transition: 'all 0.15s ease', fontFamily: 'inherit',
+        width: full ? '100%' : undefined,
+        transform: pressed ? 'scale(0.97)' : 'scale(1)',
+        boxShadow: variant === 'primary' && !disabled ? `0 4px 16px ${t.accentGlow}` : 'none',
+        ...sx,
+      }}
+    >{children}</button>
+  );
+}
+
+function TextInput({ placeholder, value, onChange, type = 'text', multiline = false, label, rows = 3 }) {
+  const { t } = useTheme();
+  const [focused, setFocused] = useState(false);
+  const base = {
+    width: '100%', background: t.inputBg, color: t.text, fontFamily: 'inherit',
+    border: `1.5px solid ${focused ? t.accent : t.border}`,
+    borderRadius: 12, padding: '11px 14px', fontSize: 15, outline: 'none',
+    transition: 'border-color 0.15s', resize: 'none', boxSizing: 'border-box',
+    '::placeholder': { color: t.muted },
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      {label && <label style={{ fontSize: 12, fontWeight: 600, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{label}</label>}
+      {multiline
+        ? <textarea rows={rows} placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} style={base} />
+        : <input placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} type={type} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} style={base} />
+      }
+    </div>
+  );
+}
+
+function StatusDot({ status }) {
+  const { t } = useTheme();
+  const colors = { approved: t.success, pending: t.warn, rejected: t.danger, blocked: t.muted, 'new': t.info, 'in-review': t.warn, resolved: t.success };
+  const labels = { approved: 'Approved', pending: 'Pending', rejected: 'Rejected', blocked: 'Blocked', 'new': 'New', 'in-review': 'In Review', resolved: 'Resolved' };
+  const color = colors[status] || t.muted;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      background: color + '18', color, fontSize: 11, fontWeight: 700,
+      padding: '3px 8px', borderRadius: 20, letterSpacing: '0.3px',
+    }}>
+      <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, display: 'inline-block' }} />
+      {labels[status] || status}
+    </span>
+  );
+}
+
+function Icon({ name, size = 20, color }) {
+  const { t } = useTheme();
+  const c = color || t.muted;
+  const icons = {
+    chat: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
+    bell: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
+    user: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+    users: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+    grid: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>,
+    send: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>,
+    check: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+    checkcheck: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 13 13"/><polyline points="7 11 11 15 3 23"/></svg>,
+    back: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>,
+    flag: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>,
+    inbox: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>,
+    megaphone: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg>,
+    alert: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+    x: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+    more: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>,
+    sun: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>,
+    moon: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>,
+    sparkle: <svg width={size} height={size} viewBox="0 0 24 24" fill={c}><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/></svg>,
+    relay: <svg width={size} height={size} viewBox="0 0 24 24" fill="none"><circle cx="5" cy="12" r="3" fill={c}/><circle cx="19" cy="12" r="3" fill={c} opacity="0.5"/><path d="M8 12 Q12 6 16 12" stroke={c} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>,
+    plus: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  };
+  return icons[name] || null;
+}
+
+function Divider({ label }) {
+  const { t } = useTheme();
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0' }}>
+      <div style={{ flex: 1, height: 1, background: t.border }} />
+      {label && <span style={{ fontSize: 11, color: t.muted, fontWeight: 500 }}>{label}</span>}
+      {label && <div style={{ flex: 1, height: 1, background: t.border }} />}
+    </div>
+  );
+}
+
+function Card({ children, style: sx = {}, onClick }) {
+  const { t } = useTheme();
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => onClick && setHov(true)}
+      onMouseLeave={() => onClick && setHov(false)}
+      style={{
+        background: hov ? t.elevated : t.card,
+        border: `1px solid ${t.border}`,
+        borderRadius: 20, padding: 18,
+        transition: 'all 0.15s ease',
+        cursor: onClick ? 'pointer' : 'default',
+        boxShadow: t.cardShadow,
+        ...sx,
+      }}
+    >{children}</div>
+  );
+}
+
+// Mobile status bar
+function StatusBar() {
+  const { t } = useTheme();
+  return (
+    <div style={{
+      height: 44, background: t.statusBar, display: 'flex',
+      alignItems: 'center', justifyContent: 'space-between',
+      padding: '0 20px', flexShrink: 0,
+    }}>
+      <span style={{ fontSize: 15, fontWeight: 700, color: t.text }}>9:41</span>
+      <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+        <svg width="16" height="11" viewBox="0 0 16 11">
+          {[0,1,2,3].map(i => (
+            <rect key={i} x={i * 4} y={10 - (i+1)*2.5} width="3" height={(i+1)*2.5} rx="0.8" fill={t.text} opacity={i === 3 ? 0.3 : 1} />
+          ))}
+        </svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none">
+          <rect x="0.5" y="0.5" width="12" height="9.5" rx="1.5" stroke={t.text} strokeWidth="1.2"/>
+          <rect x="13" y="3.5" width="1.5" height="3.5" rx="0.75" fill={t.text} opacity="0.4"/>
+          <rect x="1.5" y="1.5" width="9.5" height="7.5" rx="0.8" fill={t.text}/>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, {
+  ThemeProvider, ThemeContext, useTheme,
+  AppContext, useApp,
+  themeTokens,
+  MOCK_CUSTOMERS, MOCK_MESSAGES_STORE, MOCK_NOTIFICATIONS, MOCK_REPORTS,
+  Avatar, Badge, Btn, TextInput, StatusDot, Icon, Divider, Card, StatusBar,
+});
+
+</script>
+
+<script type="text/babel">
+
+// relay-customer.jsx — All customer-side screens for Relay
+const { useState, useEffect, useRef } = React;
+
+// ─── LANDING SCREEN ───────────────────────────────────────────────────────────
+
+function LandingScreen() {
+  const { t, theme } = useTheme();
+  const { nav } = useApp();
+  const [tab, setTab] = useState('signin');
+  const [email, setEmail] = useState('');
+  const [pass, setPass] = useState('');
+  const [name, setName] = useState('');
+  const [reason, setReason] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleAuth = () => {
+    setLoading(true);
+    setTimeout(() => {
+      setLoading(false);
+      if (tab === 'signin') nav('customer-home');
+      else nav('pending');
+    }, 1100);
+  };
+
+  const accentGrad = theme === 'playful'
+    ? 'linear-gradient(135deg, #e040a0 0%, #7c5af6 100%)'
+    : 'linear-gradient(135deg, #7c5af6 0%, #5a7ff6 100%)';
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+      <StatusBar />
+      {/* Hero */}
+      <div style={{ padding: '32px 28px 24px', textAlign: 'center' }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: 20, background: accentGrad,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          margin: '0 auto 16px', boxShadow: `0 8px 24px ${t.accentGlow}`,
+        }}>
+          <Icon name="relay" size={30} color="#fff" />
+        </div>
+        <div style={{ fontSize: 28, fontWeight: 800, color: t.text, letterSpacing: '-0.8px' }}>Relay</div>
+        <div style={{ fontSize: 14, color: t.muted, marginTop: 6, lineHeight: 1.5 }}>
+          Private messaging,<br />beautifully simple.
+        </div>
+        <div style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 12,
+          background: t.warn + '18', color: t.warn, fontSize: 11, fontWeight: 600,
+          padding: '5px 12px', borderRadius: 20,
+        }}>
+          <span style={{ width: 6, height: 6, borderRadius: 3, background: t.warn }} />
+          Access requires staff approval
+        </div>
+      </div>
+
+      {/* Tab toggle */}
+      <div style={{ padding: '0 24px', flexShrink: 0 }}>
+        <div style={{ background: t.inputBg, borderRadius: 14, padding: 4, display: 'flex', border: `1px solid ${t.border}` }}>
+          {['signin', 'signup'].map(tb => (
+            <button key={tb} onClick={() => setTab(tb)} style={{
+              flex: 1, padding: '9px 0', borderRadius: 10, border: 'none', cursor: 'pointer',
+              background: tab === tb ? t.accent : 'transparent',
+              color: tab === tb ? '#fff' : t.muted,
+              fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+              transition: 'all 0.2s ease',
+            }}>{tb === 'signin' ? 'Sign In' : 'Create Account'}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Form */}
+      <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {tab === 'signup' && (
+          <TextInput label="Full Name" placeholder="Your name" value={name} onChange={setName} />
+        )}
+        <TextInput label="Email" placeholder="you@email.com" value={email} onChange={setEmail} type="email" />
+        <TextInput label="Password" placeholder="••••••••" value={pass} onChange={setPass} type="password" />
+        {tab === 'signup' && (
+          <TextInput label="Request message (optional)" placeholder="Tell us why you'd like access…" value={reason} onChange={setReason} multiline rows={2} />
+        )}
+
+        <Btn full onClick={handleAuth} disabled={loading} size="lg" style={{ marginTop: 4 }}>
+          {loading ? '···' : tab === 'signin' ? 'Sign In' : 'Request Access'}
+        </Btn>
+
+        <Divider label="or" />
+
+        <button onClick={() => tab === 'signin' ? nav('customer-home') : nav('pending')} style={{
+          width: '100%', padding: '11px 18px', borderRadius: 12,
+          border: `1.5px solid ${t.border}`, background: t.card,
+          color: t.text, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+          fontFamily: 'inherit', transition: 'background 0.15s',
+        }}>
+          <svg width="18" height="18" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+          Continue with Google
+        </button>
+      </div>
+
+      <div style={{ textAlign: 'center', padding: '8px 24px 24px', color: t.muted, fontSize: 12, lineHeight: 1.6 }}>
+        By signing up, you agree to our Terms of Service.<br />
+        New accounts are reviewed before access is granted.
+      </div>
+    </div>
+  );
+}
+
+// ─── PENDING SCREEN ───────────────────────────────────────────────────────────
+
+function PendingScreen() {
+  const { t } = useTheme();
+  const { nav } = useApp();
+  const [pulse, setPulse] = useState(false);
+  useEffect(() => {
+    const i = setInterval(() => setPulse(p => !p), 1800);
+    return () => clearInterval(i);
+  }, []);
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px 28px', textAlign: 'center' }}>
+        {/* Animated waiting indicator */}
+        <div style={{ position: 'relative', marginBottom: 28 }}>
+          <div style={{
+            width: 80, height: 80, borderRadius: 40,
+            background: t.warn + '15', border: `2px solid ${t.warn}30`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'all 1.8s ease',
+            boxShadow: pulse ? `0 0 0 16px ${t.warn}08` : `0 0 0 0px ${t.warn}08`,
+          }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: 24, background: t.warn + '25',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={t.warn} strokeWidth="2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ fontSize: 22, fontWeight: 800, color: t.text, letterSpacing: '-0.5px', marginBottom: 10 }}>
+          Account Under Review
+        </div>
+        <div style={{ fontSize: 14, color: t.muted, lineHeight: 1.7, maxWidth: 280, marginBottom: 24 }}>
+          Our team is reviewing your request. You'll receive a notification once your account is approved — usually within a few hours.
+        </div>
+
+        <StatusDot status="pending" />
+
+        <div style={{ width: '100%', marginTop: 28, background: t.card, borderRadius: 16, padding: 18, border: `1px solid ${t.border}`, textAlign: 'left' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>What happens next?</div>
+          {[
+            ['🔍', 'Staff review your request'],
+            ['✅', 'You get approved and gain access'],
+            ['💬', 'Start messaging the team directly'],
+          ].map(([em, txt]) => (
+            <div key={txt} style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10 }}>
+              <span style={{ fontSize: 16 }}>{em}</span>
+              <span style={{ fontSize: 13, color: t.muted }}>{txt}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 10, width: '100%' }}>
+          <Btn full variant="secondary">Update Request Message</Btn>
+          <Btn full variant="ghost" onClick={() => nav('landing')}>Sign Out</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CUSTOMER HOME ─────────────────────────────────────────────────────────────
+
+function CustomerHome() {
+  const { t, theme } = useTheme();
+  const { nav, setModal } = useApp();
+  const unread = MOCK_NOTIFICATIONS.filter(n => !n.read).length;
+  const accentGrad = theme === 'playful'
+    ? 'linear-gradient(135deg, #e040a0 0%, #7c5af6 100%)'
+    : 'linear-gradient(135deg, #7c5af6 0%, #5a7ff6 100%)';
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+
+      {/* Top bar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px 10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 10, background: accentGrad,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Icon name="relay" size={16} color="#fff" />
+          </div>
+          <span style={{ fontSize: 18, fontWeight: 800, color: t.text, letterSpacing: '-0.4px' }}>Relay</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <button onClick={() => nav('customer-notifications')} style={{ position: 'relative', background: 'none', border: 'none', cursor: 'pointer', padding: 8 }}>
+            <Icon name="bell" size={22} color={t.muted} />
+            {unread > 0 && <div style={{
+              position: 'absolute', top: 5, right: 5,
+              width: 16, height: 16, borderRadius: 8, background: t.accent,
+              fontSize: 9, fontWeight: 800, color: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: `2px solid ${t.bg}`,
+            }}>{unread}</div>}
+          </button>
+          <button onClick={() => nav('customer-profile')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 6 }}>
+            <Avatar name="Jordan Lee" size={30} online />
+          </button>
+        </div>
+      </div>
+
+      {/* Greeting */}
+      <div style={{ padding: '4px 24px 20px' }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: t.text, letterSpacing: '-0.5px' }}>Good morning, Jordan 👋</div>
+        <div style={{ fontSize: 14, color: t.muted, marginTop: 3 }}>Here's what's happening</div>
+      </div>
+
+      {/* Main chat card */}
+      <div style={{ padding: '0 20px', flex: 1, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
+        <div onClick={() => nav('customer-chat')} style={{
+          background: accentGrad, borderRadius: 22, padding: '20px 20px',
+          cursor: 'pointer', position: 'relative', overflow: 'hidden',
+          boxShadow: `0 8px 28px ${t.accentGlow}`,
+        }}>
+          <div style={{ position: 'absolute', right: -15, top: -15, width: 100, height: 100, borderRadius: '50%', background: 'rgba(255,255,255,0.08)' }} />
+          <div style={{ position: 'absolute', right: 20, bottom: -20, width: 80, height: 80, borderRadius: '50%', background: 'rgba(255,255,255,0.05)' }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+            <div style={{ width: 44, height: 44, borderRadius: 14, background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="chat" size={22} color="#fff" />
+            </div>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Relay Support</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)', marginTop: 1 }}>Team • Online</div>
+            </div>
+            {2 > 0 && <div style={{ marginLeft: 'auto', background: '#fff', color: t.accent, fontSize: 11, fontWeight: 800, width: 22, height: 22, borderRadius: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>2</div>}
+          </div>
+          <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.8)', marginBottom: 14, lineHeight: 1.5 }}>
+            "Also — is there a way to update my profile info?"
+          </div>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: 'rgba(255,255,255,0.18)', borderRadius: 20, padding: '7px 14px',
+          }}>
+            <Icon name="send" size={13} color="#fff" />
+            <span style={{ color: '#fff', fontSize: 13, fontWeight: 600 }}>Open conversation</span>
+          </div>
+        </div>
+
+        {/* Notifications preview */}
+        {MOCK_NOTIFICATIONS.filter(n => !n.read).length > 0 && (
+          <Card onClick={() => nav('customer-notifications')} style={{ padding: '16px 18px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: t.text }}>Unread Notifications</div>
+              <Badge count={unread} />
+            </div>
+            {MOCK_NOTIFICATIONS.filter(n => !n.read).slice(0, 2).map(n => (
+              <div key={n.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 0', borderTop: `1px solid ${t.border}` }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: 10, flexShrink: 0,
+                  background: n.type === 'announcement' ? t.success + '18' : n.type === 'alert' ? t.warn + '18' : t.accent + '18',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <Icon name={n.type === 'announcement' ? 'megaphone' : n.type === 'alert' ? 'alert' : 'bell'} size={15}
+                    color={n.type === 'announcement' ? t.success : n.type === 'alert' ? t.warn : t.accent} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{n.title}</div>
+                  <div style={{ fontSize: 12, color: t.muted, marginTop: 1 }}>{n.time}</div>
+                </div>
+              </div>
+            ))}
+          </Card>
+        )}
+
+        {/* Report shortcut */}
+        <button onClick={() => setModal('report')} style={{
+          width: '100%', background: t.card, border: `1px solid ${t.border}`,
+          borderRadius: 16, padding: '14px 18px', cursor: 'pointer', fontFamily: 'inherit',
+          display: 'flex', alignItems: 'center', gap: 12, textAlign: 'left',
+          transition: 'background 0.15s',
+        }}>
+          <div style={{ width: 38, height: 38, borderRadius: 12, background: t.danger + '15', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="flag" size={18} color={t.danger} />
+          </div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: t.text }}>Report a Problem</div>
+            <div style={{ fontSize: 12, color: t.muted, marginTop: 1 }}>Let us know if something's wrong</div>
+          </div>
+          <div style={{ marginLeft: 'auto' }}>
+            <Icon name="back" size={18} color={t.muted} style={{ transform: 'rotate(180deg)' }} />
+          </div>
+        </button>
+
+        <div style={{ height: 16 }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── CUSTOMER CHAT ─────────────────────────────────────────────────────────────
+
+function CustomerChat() {
+  const { t, theme } = useTheme();
+  const { nav } = useApp();
+  const [messages, setMessages] = useState(MOCK_MESSAGES_STORE['c1']);
+  const [input, setInput] = useState('');
+  const [typing, setTyping] = useState(false);
+  const scrollRef = useRef(null);
+  const accentGrad = theme === 'playful'
+    ? 'linear-gradient(135deg, #e040a0, #7c5af6)'
+    : 'linear-gradient(135deg, #7c5af6, #5a7ff6)';
+
+  const send = () => {
+    if (!input.trim()) return;
+    const msg = { id: 'm' + Date.now(), sender: 'customer', body: input.trim(), time: 'Just now', status: 'sent' };
+    setMessages(ms => [...ms, msg]);
+    setInput('');
+    setTimeout(() => setTyping(true), 600);
+    setTimeout(() => {
+      setTyping(false);
+      setMessages(ms => [...ms, {
+        id: 'm' + Date.now(), sender: 'staff', body: "Thanks for your message! We'll get back to you as soon as possible.", time: 'Just now', status: 'delivered', staffName: 'Relay Support',
+      }]);
+    }, 2200);
+  };
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, typing]);
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px 12px',
+        borderBottom: `1px solid ${t.border}`, background: t.card,
+      }}>
+        <button onClick={() => nav('customer-home')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+          <Icon name="back" size={22} color={t.muted} />
+        </button>
+        <div style={{
+          width: 38, height: 38, borderRadius: 12, background: accentGrad,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Icon name="relay" size={20} color="#fff" />
+        </div>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: t.text }}>Relay Support</div>
+          <div style={{ fontSize: 12, color: t.success }}>● Online</div>
+        </div>
+        <button style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', padding: 6 }}>
+          <Icon name="more" size={20} color={t.muted} />
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '16px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {/* Date divider */}
+        <div style={{ textAlign: 'center', marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: t.muted, background: t.elevated, padding: '3px 10px', borderRadius: 20 }}>Today</span>
+        </div>
+
+        {messages.map((msg, i) => {
+          const isSelf = msg.sender === 'customer';
+          const showAvatar = !isSelf && (i === 0 || messages[i-1]?.sender !== 'staff');
+          return (
+            <div key={msg.id} style={{ display: 'flex', flexDirection: isSelf ? 'row-reverse' : 'row', gap: 8, alignItems: 'flex-end' }}>
+              {!isSelf && <div style={{ width: 28, flexShrink: 0 }}>
+                {showAvatar && <div style={{ width: 28, height: 28, borderRadius: 9, background: accentGrad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Icon name="relay" size={14} color="#fff" />
+                </div>}
+              </div>}
+              <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {!isSelf && showAvatar && <div style={{ fontSize: 11, color: t.muted, marginLeft: 4, fontWeight: 600 }}>{msg.staffName}</div>}
+                <div style={{
+                  background: isSelf ? accentGrad : t.otherBubble,
+                  color: isSelf ? '#fff' : t.otherBubbleText,
+                  padding: '10px 14px', borderRadius: isSelf ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                  fontSize: 14, lineHeight: 1.5,
+                  boxShadow: isSelf ? `0 3px 12px ${t.accentGlow}` : 'none',
+                }}>{msg.body}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: isSelf ? 'flex-end' : 'flex-start', padding: '0 4px' }}>
+                  <span style={{ fontSize: 10, color: t.muted }}>{msg.time}</span>
+                  {isSelf && <span style={{ color: msg.status === 'seen' ? t.info : t.muted }}>
+                    <Icon name={msg.status === 'seen' ? 'checkcheck' : 'check'} size={11} color={msg.status === 'seen' ? t.info : t.muted} />
+                  </span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {typing && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div style={{ width: 28, height: 28, borderRadius: 9, background: accentGrad, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <Icon name="relay" size={14} color="#fff" />
+            </div>
+            <div style={{ background: t.otherBubble, padding: '12px 16px', borderRadius: '18px 18px 18px 4px', display: 'flex', gap: 4, alignItems: 'center' }}>
+              {[0,1,2].map(i => (
+                <div key={i} style={{
+                  width: 6, height: 6, borderRadius: 3, background: t.muted,
+                  animation: `bounce 1.2s ease ${i * 0.2}s infinite`,
+                }} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Input */}
+      <div style={{
+        padding: '10px 14px 20px',
+        background: t.nav, backdropFilter: 'blur(20px)',
+        borderTop: `1px solid ${t.border}`,
+        display: 'flex', gap: 10, alignItems: 'flex-end',
+      }}>
+        <div style={{ flex: 1, background: t.inputBg, borderRadius: 24, border: `1.5px solid ${t.border}`, overflow: 'hidden' }}>
+          <input
+            value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && send()}
+            placeholder="Message Relay Support…"
+            style={{
+              width: '100%', padding: '11px 16px', background: 'none', border: 'none',
+              color: t.text, fontSize: 15, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
+            }}
+          />
+        </div>
+        <button onClick={send} style={{
+          width: 44, height: 44, borderRadius: 22, border: 'none', cursor: 'pointer',
+          background: input.trim() ? accentGrad : t.inputBg,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.2s ease',
+          boxShadow: input.trim() ? `0 4px 14px ${t.accentGlow}` : 'none',
+        }}>
+          <Icon name="send" size={18} color={input.trim() ? '#fff' : t.muted} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── NOTIFICATIONS ─────────────────────────────────────────────────────────────
+
+function CustomerNotifications() {
+  const { t } = useTheme();
+  const { nav } = useApp();
+  const [notifs, setNotifs] = useState(MOCK_NOTIFICATIONS);
+
+  const markAllRead = () => setNotifs(ns => ns.map(n => ({ ...n, read: true })));
+  const markRead = (id) => setNotifs(ns => ns.map(n => n.id === id ? { ...n, read: true } : n));
+
+  const typeConfig = {
+    announcement: { icon: 'megaphone', color: (t) => t.success, label: 'Announcement' },
+    reply: { icon: 'chat', color: (t) => t.accent, label: 'Reply' },
+    alert: { icon: 'alert', color: (t) => t.warn, label: 'Alert' },
+  };
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px 8px', gap: 8 }}>
+        <button onClick={() => nav('customer-home')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+          <Icon name="back" size={22} color={t.muted} />
+        </button>
+        <div style={{ fontSize: 18, fontWeight: 800, color: t.text, letterSpacing: '-0.4px' }}>Notifications</div>
+        <button onClick={markAllRead} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: t.accent, fontFamily: 'inherit', fontWeight: 600 }}>
+          Mark all read
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 16px 24px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {notifs.map(n => {
+          const cfg = typeConfig[n.type] || typeConfig.reply;
+          const color = cfg.color(t);
+          return (
+            <div key={n.id} onClick={() => markRead(n.id)} style={{
+              background: n.read ? t.card : t.card,
+              border: `1px solid ${n.read ? t.border : color + '30'}`,
+              borderRadius: 18, padding: '14px 16px', cursor: 'pointer',
+              display: 'flex', gap: 12, alignItems: 'flex-start',
+              position: 'relative', overflow: 'hidden',
+              boxShadow: n.read ? 'none' : `0 2px 12px ${color}15`,
+            }}>
+              {!n.read && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: color, borderRadius: '3px 0 0 3px' }} />}
+              <div style={{ width: 40, height: 40, borderRadius: 13, background: color + '15', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Icon name={cfg.icon} size={18} color={color} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <span style={{ fontSize: 14, fontWeight: n.read ? 500 : 700, color: t.text }}>{n.title}</span>
+                  {!n.read && <div style={{ width: 7, height: 7, borderRadius: 4, background: color, flexShrink: 0 }} />}
+                </div>
+                <div style={{ fontSize: 13, color: t.muted, lineHeight: 1.5 }}>{n.body}</div>
+                <div style={{ fontSize: 11, color: t.muted, marginTop: 6, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ background: color + '18', color, fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10 }}>{cfg.label}</span>
+                  {n.time}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── REPORT MODAL ─────────────────────────────────────────────────────────────
+
+function ReportModal() {
+  const { t } = useTheme();
+  const { setModal } = useApp();
+  const [type, setType] = useState('');
+  const [desc, setDesc] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const types = ['Technical Issue', 'Login Problem', 'Missing Feature', 'Billing', 'Other'];
+
+  if (submitted) return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, padding: 24, backdropFilter: 'blur(4px)' }}>
+      <div style={{ background: t.card, borderRadius: 24, padding: 32, width: '100%', maxWidth: 360, textAlign: 'center', border: `1px solid ${t.border}` }}>
+        <div style={{ width: 60, height: 60, borderRadius: 30, background: t.success + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+          <Icon name="check" size={28} color={t.success} />
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: t.text, marginBottom: 8 }}>Report Submitted</div>
+        <div style={{ fontSize: 14, color: t.muted, lineHeight: 1.6, marginBottom: 24 }}>Our team will review your report and get back to you via your chat thread.</div>
+        <Btn full onClick={() => setModal(null)}>Done</Btn>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', zIndex: 200, backdropFilter: 'blur(4px)' }}>
+      <div style={{ background: t.card, borderRadius: '24px 24px 0 0', padding: '20px 24px 40px', width: '100%', border: `1px solid ${t.border}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: t.text }}>Report a Problem</div>
+          <button onClick={() => setModal(null)} style={{ background: t.inputBg, border: 'none', borderRadius: 10, width: 30, height: 30, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="x" size={16} color={t.muted} />
+          </button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Problem Type</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+              {types.map(tp => (
+                <button key={tp} onClick={() => setType(tp)} style={{
+                  padding: '7px 13px', borderRadius: 20, border: `1.5px solid ${type === tp ? t.accent : t.border}`,
+                  background: type === tp ? t.accent + '15' : 'transparent', color: type === tp ? t.accent : t.muted,
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s',
+                }}>{tp}</button>
+              ))}
+            </div>
+          </div>
+          <TextInput label="Description" placeholder="Describe what happened…" value={desc} onChange={setDesc} multiline rows={3} />
+          <Btn full onClick={() => setSubmitted(true)} disabled={!type || !desc.trim()} size="lg">Submit Report</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CUSTOMER PROFILE ─────────────────────────────────────────────────────────
+
+function CustomerProfile() {
+  const { t, theme, setTheme } = useTheme();
+  const { nav } = useApp();
+  const themes = [{ id: 'dark', icon: 'moon', label: 'Dark' }, { id: 'light', icon: 'sun', label: 'Light' }, { id: 'playful', icon: 'sparkle', label: 'Playful' }];
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px 8px', gap: 8 }}>
+        <button onClick={() => nav('customer-home')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+          <Icon name="back" size={22} color={t.muted} />
+        </button>
+        <div style={{ fontSize: 18, fontWeight: 800, color: t.text, letterSpacing: '-0.4px' }}>Profile</div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 20px 40px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ textAlign: 'center', padding: '16px 0' }}>
+          <Avatar name="Jordan Lee" size={72} />
+          <div style={{ fontSize: 20, fontWeight: 800, color: t.text, marginTop: 12 }}>Jordan Lee</div>
+          <div style={{ fontSize: 13, color: t.muted, marginTop: 3 }}>jordan@email.com</div>
+          <div style={{ marginTop: 8 }}><StatusDot status="approved" /></div>
+        </div>
+
+        <Card style={{ padding: '16px 18px' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>Appearance</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+            {themes.map(th => (
+              <button key={th.id} onClick={() => setTheme(th.id)} style={{
+                padding: '10px 0', borderRadius: 14, border: `2px solid ${theme === th.id ? t.accent : t.border}`,
+                background: theme === th.id ? t.accent + '15' : t.inputBg, cursor: 'pointer',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, fontFamily: 'inherit',
+                transition: 'all 0.15s',
+              }}>
+                <Icon name={th.icon} size={18} color={theme === th.id ? t.accent : t.muted} />
+                <span style={{ fontSize: 11, fontWeight: 600, color: theme === th.id ? t.accent : t.muted }}>{th.label}</span>
+              </button>
+            ))}
+          </div>
+        </Card>
+
+        <Card style={{ padding: '16px 18px' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>Account</div>
+          {[['Member since', 'April 24, 2026'], ['Status', 'Approved'], ['Messages', '6 total']].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 0', borderBottom: `1px solid ${t.border}` }}>
+              <span style={{ fontSize: 13, color: t.muted }}>{k}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{v}</span>
+            </div>
+          ))}
+        </Card>
+
+        <Btn full variant="ghost" onClick={() => nav('landing')}>Sign Out</Btn>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, {
+  LandingScreen, PendingScreen, CustomerHome, CustomerChat,
+  CustomerNotifications, ReportModal, CustomerProfile,
+});
+
+</script>
+
+<script type="text/babel">
+
+// relay-admin.jsx — All staff/admin screens for Relay
+const { useState, useRef, useEffect } = React;
+
+// ─── ADMIN LOGIN ──────────────────────────────────────────────────────────────
+
+function AdminLogin() {
+  const { t } = useTheme();
+  const { nav } = useApp();
+  const [email, setEmail] = useState('');
+  const [pass, setPass] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = () => {
+    setLoading(true);
+    setTimeout(() => { setLoading(false); nav('admin-dashboard'); }, 1000);
+  };
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '24px 28px' }}>
+        <div style={{ marginBottom: 32 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: t.danger + '15', color: t.danger, fontSize: 11, fontWeight: 700, padding: '5px 12px', borderRadius: 20, marginBottom: 20, letterSpacing: '0.4px' }}>
+            STAFF PORTAL
+          </div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: t.text, letterSpacing: '-0.6px' }}>Admin Sign In</div>
+          <div style={{ fontSize: 14, color: t.muted, marginTop: 5 }}>Restricted to authorized staff only</div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <TextInput label="Staff Email" placeholder="staff@relay.app" value={email} onChange={setEmail} type="email" />
+          <TextInput label="Password" placeholder="••••••••" value={pass} onChange={setPass} type="password" />
+          <Btn full size="lg" onClick={handleLogin} disabled={loading} style={{ marginTop: 4 }}>
+            {loading ? '···' : 'Sign In to Dashboard'}
+          </Btn>
+          <Btn full variant="ghost" onClick={() => nav('landing')}>← Back to customer login</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ADMIN DASHBOARD ──────────────────────────────────────────────────────────
+
+function AdminDashboard() {
+  const { t, theme } = useTheme();
+  const { nav } = useApp();
+  const accentGrad = theme === 'playful'
+    ? 'linear-gradient(135deg, #e040a0, #7c5af6)'
+    : 'linear-gradient(135deg, #7c5af6, #5a7ff6)';
+
+  const stats = [
+    { label: 'Pending', value: 2, color: t.warn, icon: 'user', action: () => nav('admin-users') },
+    { label: 'Unread', value: 3, color: t.accent, icon: 'inbox', action: () => nav('admin-inbox') },
+    { label: 'Reports', value: 1, color: t.danger, icon: 'flag', action: () => nav('admin-reports') },
+    { label: 'Members', value: 3, color: t.success, icon: 'users', action: () => nav('admin-users') },
+  ];
+
+  const activity = [
+    { text: 'Jordan Lee sent a message', time: '5m ago', icon: 'chat', color: t.accent },
+    { text: 'Alex Kim reported a problem', time: '2h ago', icon: 'flag', color: t.danger },
+    { text: 'Priya Nair requested access', time: '1d ago', icon: 'user', color: t.warn },
+    { text: 'Maria Santos was approved', time: '5d ago', icon: 'check', color: t.success },
+  ];
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+
+      {/* Admin header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '14px 20px 10px',
+      }}>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: t.text, letterSpacing: '-0.4px' }}>Dashboard</div>
+          <div style={{ fontSize: 12, color: t.muted, marginTop: 2 }}>Relay Admin · Support Staff</div>
+        </div>
+        <Avatar name="Sam Admin" size={36} />
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 16px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* Stats grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          {stats.map(s => (
+            <div key={s.label} onClick={s.action} style={{
+              background: t.card, border: `1px solid ${t.border}`,
+              borderRadius: 18, padding: '16px 16px', cursor: 'pointer',
+              transition: 'all 0.15s', boxShadow: t.cardShadow,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 11, background: s.color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Icon name={s.icon} size={17} color={s.color} />
+                </div>
+                {s.value > 0 && s.label !== 'Members' && <div style={{ width: 8, height: 8, borderRadius: 4, background: s.color }} />}
+              </div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: t.text, letterSpacing: '-0.5px' }}>{s.value}</div>
+              <div style={{ fontSize: 12, color: t.muted, fontWeight: 500, marginTop: 2 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Quick actions */}
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { label: 'Review Queue', icon: 'user', action: () => nav('admin-users') },
+            { label: 'Open Inbox', icon: 'inbox', action: () => nav('admin-inbox') },
+            { label: 'Send Notif', icon: 'megaphone', action: () => nav('admin-notify') },
+          ].map(a => (
+            <button key={a.label} onClick={a.action} style={{
+              flex: 1, padding: '10px 6px', background: t.card,
+              border: `1px solid ${t.border}`, borderRadius: 14, cursor: 'pointer',
+              fontFamily: 'inherit', display: 'flex', flexDirection: 'column',
+              alignItems: 'center', gap: 6, transition: 'all 0.15s',
+            }}>
+              <Icon name={a.icon} size={18} color={t.accent} />
+              <span style={{ fontSize: 11, fontWeight: 600, color: t.muted }}>{a.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Recent activity */}
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 10 }}>Recent Activity</div>
+          <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 18, overflow: 'hidden' }}>
+            {activity.map((a, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '13px 16px', borderBottom: i < activity.length - 1 ? `1px solid ${t.border}` : 'none' }}>
+                <div style={{ width: 34, height: 34, borderRadius: 10, background: a.color + '15', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Icon name={a.icon} size={15} color={a.color} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, color: t.text, fontWeight: 500 }}>{a.text}</div>
+                  <div style={{ fontSize: 11, color: t.muted, marginTop: 1 }}>{a.time}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom nav */}
+      <AdminBottomNav active="dashboard" />
+    </div>
+  );
+}
+
+// ─── ADMIN USERS ──────────────────────────────────────────────────────────────
+
+function AdminUsers() {
+  const { t } = useTheme();
+  const { nav } = useApp();
+  const [filter, setFilter] = useState('pending');
+  const [users, setUsers] = useState(MOCK_CUSTOMERS);
+  const [search, setSearch] = useState('');
+
+  const filtered = users.filter(u => {
+    const matchFilter = filter === 'all' || u.status === filter;
+    const matchSearch = !search || u.name.toLowerCase().includes(search.toLowerCase()) || u.email.toLowerCase().includes(search.toLowerCase());
+    return matchFilter && matchSearch;
+  });
+
+  const approve = (id) => setUsers(us => us.map(u => u.id === id ? { ...u, status: 'approved' } : u));
+  const reject = (id) => setUsers(us => us.map(u => u.id === id ? { ...u, status: 'rejected' } : u));
+  const block = (id) => setUsers(us => us.map(u => u.id === id ? { ...u, status: 'blocked' } : u));
+
+  const filters = ['pending', 'approved', 'rejected', 'all'];
+  const counts = { pending: users.filter(u => u.status === 'pending').length, approved: users.filter(u => u.status === 'approved').length, rejected: users.filter(u => u.status === 'rejected').length, all: users.length };
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ padding: '14px 20px 0' }}>
+        <div style={{ fontSize: 20, fontWeight: 800, color: t.text, letterSpacing: '-0.4px', marginBottom: 12 }}>Users</div>
+        {/* Search */}
+        <div style={{ position: 'relative', marginBottom: 12 }}>
+          <div style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={t.muted} strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          </div>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search users…" style={{
+            width: '100%', background: t.inputBg, border: `1.5px solid ${t.border}`,
+            borderRadius: 13, padding: '10px 14px 10px 36px', fontSize: 14, color: t.text,
+            fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
+          }} />
+        </div>
+        {/* Filter tabs */}
+        <div style={{ display: 'flex', gap: 6, paddingBottom: 12, overflowX: 'auto' }}>
+          {filters.map(f => (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              padding: '6px 12px', borderRadius: 20, border: `1.5px solid ${filter === f ? t.accent : t.border}`,
+              background: filter === f ? t.accent + '18' : 'transparent',
+              color: filter === f ? t.accent : t.muted,
+              fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+              textTransform: 'capitalize', whiteSpace: 'nowrap',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              {f} {counts[f] > 0 && <span style={{ background: filter === f ? t.accent : t.muted, color: '#fff', fontSize: 9, fontWeight: 800, width: 15, height: 15, borderRadius: 8, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{counts[f]}</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 24px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {filtered.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 40, color: t.muted, fontSize: 14 }}>No users found</div>
+        )}
+        {filtered.map(u => (
+          <div key={u.id} style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 18, padding: '14px 16px', boxShadow: t.cardShadow }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: u.request ? 10 : 0 }}>
+              <Avatar name={u.name} size={42} />
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: t.text }}>{u.name}</span>
+                  <StatusDot status={u.status} />
+                </div>
+                <div style={{ fontSize: 12, color: t.muted, marginTop: 1 }}>{u.email} · {u.joined}</div>
+              </div>
+            </div>
+            {u.request && (
+              <div style={{ background: t.elevated, borderRadius: 12, padding: '9px 12px', marginBottom: 12, borderLeft: `3px solid ${t.warn}` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: t.muted, marginBottom: 3 }}>REQUEST MESSAGE</div>
+                <div style={{ fontSize: 13, color: t.text, lineHeight: 1.5 }}>{u.request}</div>
+              </div>
+            )}
+            {u.status === 'pending' && (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Btn size="sm" variant="success" onClick={() => approve(u.id)} style={{ flex: 1 }}>Approve</Btn>
+                <Btn size="sm" variant="danger" onClick={() => reject(u.id)} style={{ flex: 1 }}>Reject</Btn>
+                <Btn size="sm" variant="secondary" onClick={() => block(u.id)}>Block</Btn>
+              </div>
+            )}
+            {u.status === 'approved' && (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Btn size="sm" variant="secondary" onClick={() => nav('admin-inbox')} style={{ flex: 1 }}>View Chat</Btn>
+                <Btn size="sm" variant="ghost" onClick={() => block(u.id)}>Block</Btn>
+              </div>
+            )}
+            {(u.status === 'rejected' || u.status === 'blocked') && (
+              <Btn size="sm" variant="outline" onClick={() => approve(u.id)} full>Reinstate</Btn>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <AdminBottomNav active="users" />
+    </div>
+  );
+}
+
+// ─── ADMIN INBOX ──────────────────────────────────────────────────────────────
+
+function AdminInbox() {
+  const { t, theme } = useTheme();
+  const { nav } = useApp();
+  const [selected, setSelected] = useState('c1');
+  const [view, setView] = useState('list'); // 'list' | 'chat'
+  const [messagesMap, setMessagesMap] = useState(MOCK_MESSAGES_STORE);
+  const [input, setInput] = useState('');
+  const scrollRef = useRef(null);
+  const approved = MOCK_CUSTOMERS.filter(c => c.status === 'approved');
+  const accentGrad = theme === 'playful'
+    ? 'linear-gradient(135deg, #e040a0, #7c5af6)'
+    : 'linear-gradient(135deg, #7c5af6, #5a7ff6)';
+
+  const send = () => {
+    if (!input.trim()) return;
+    const msg = { id: 'm' + Date.now(), sender: 'staff', body: input.trim(), time: 'Just now', status: 'delivered', staffName: 'Support' };
+    setMessagesMap(mm => ({ ...mm, [selected]: [...(mm[selected] || []), msg] }));
+    setInput('');
+  };
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messagesMap, selected]);
+
+  const selectedUser = approved.find(c => c.id === selected);
+  const msgs = messagesMap[selected] || [];
+
+  // Mobile: show list or chat
+  if (view === 'list') return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ padding: '14px 20px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ fontSize: 20, fontWeight: 800, color: t.text, letterSpacing: '-0.4px' }}>Inbox</div>
+        <Badge count={approved.reduce((s, c) => s + (c.unread || 0), 0)} />
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 24px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {approved.map(c => (
+          <div key={c.id} onClick={() => { setSelected(c.id); setView('chat'); }} style={{
+            background: t.card, border: `1px solid ${c.unread ? t.accent + '30' : t.border}`,
+            borderRadius: 18, padding: '13px 15px', cursor: 'pointer', display: 'flex', gap: 12, alignItems: 'center',
+            boxShadow: c.unread ? `0 2px 12px ${t.accentGlow}` : t.cardShadow,
+          }}>
+            <Avatar name={c.name} size={46} online={c.lastActive === '5m ago'} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: t.text }}>{c.name}</span>
+                <span style={{ fontSize: 11, color: t.muted }}>{c.lastActive}</span>
+              </div>
+              <div style={{ fontSize: 13, color: t.muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.lastMsg || 'No messages yet'}</div>
+            </div>
+            {c.unread > 0 && <Badge count={c.unread} />}
+          </div>
+        ))}
+      </div>
+      <AdminBottomNav active="inbox" />
+    </div>
+  );
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      {/* Chat header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px 12px', borderBottom: `1px solid ${t.border}`, background: t.card }}>
+        <button onClick={() => setView('list')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+          <Icon name="back" size={22} color={t.muted} />
+        </button>
+        {selectedUser && <><Avatar name={selectedUser.name} size={36} online={selectedUser.lastActive === '5m ago'} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: t.text }}>{selectedUser.name}</div>
+          <div style={{ fontSize: 11, color: t.muted }}>{selectedUser.email} · {selectedUser.lastActive}</div>
+        </div></>}
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button onClick={() => nav('admin-notify')} style={{ background: t.inputBg, border: 'none', borderRadius: 10, width: 34, height: 34, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="megaphone" size={16} color={t.muted} />
+          </button>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ textAlign: 'center', marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: t.muted, background: t.elevated, padding: '3px 10px', borderRadius: 20 }}>Conversation with {selectedUser?.name}</span>
+        </div>
+        {msgs.map((msg, i) => {
+          const isStaff = msg.sender === 'staff';
+          return (
+            <div key={msg.id} style={{ display: 'flex', flexDirection: isStaff ? 'row-reverse' : 'row', gap: 8, alignItems: 'flex-end' }}>
+              {!isStaff && <Avatar name={selectedUser?.name || '?'} size={28} />}
+              <div style={{ maxWidth: '72%' }}>
+                {isStaff && i > 0 && msgs[i-1]?.sender !== 'staff' && <div style={{ fontSize: 11, color: t.muted, textAlign: 'right', marginBottom: 3, fontWeight: 600 }}>{msg.staffName || 'Staff'}</div>}
+                <div style={{
+                  background: isStaff ? accentGrad : t.otherBubble,
+                  color: isStaff ? '#fff' : t.otherBubbleText,
+                  padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
+                  borderRadius: isStaff ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                  boxShadow: isStaff ? `0 3px 12px ${t.accentGlow}` : 'none',
+                }}>{msg.body}</div>
+                <div style={{ fontSize: 10, color: t.muted, marginTop: 3, textAlign: isStaff ? 'right' : 'left', padding: '0 4px' }}>{msg.time}</div>
+              </div>
+            </div>
+          );
+        })}
+        {msgs.length === 0 && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, paddingTop: 60 }}>
+            <Icon name="chat" size={36} color={t.faint} />
+            <div style={{ fontSize: 14, color: t.muted }}>No messages yet — say hello!</div>
+          </div>
+        )}
+      </div>
+
+      {/* Internal note toggle + input */}
+      <div style={{ padding: '10px 14px 20px', background: t.nav, backdropFilter: 'blur(20px)', borderTop: `1px solid ${t.border}` }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1, background: t.inputBg, borderRadius: 24, border: `1.5px solid ${t.border}` }}>
+            <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()}
+              placeholder={`Reply to ${selectedUser?.name || 'user'}…`}
+              style={{ width: '100%', padding: '11px 16px', background: 'none', border: 'none', color: t.text, fontSize: 14, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
+          </div>
+          <button onClick={send} style={{
+            width: 44, height: 44, borderRadius: 22, border: 'none', cursor: 'pointer',
+            background: input.trim() ? accentGrad : t.inputBg,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'all 0.2s', boxShadow: input.trim() ? `0 4px 14px ${t.accentGlow}` : 'none',
+          }}>
+            <Icon name="send" size={18} color={input.trim() ? '#fff' : t.muted} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── NOTIFICATION COMPOSER ────────────────────────────────────────────────────
+
+function AdminNotify() {
+  const { t } = useTheme();
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [type, setType] = useState('announcement');
+  const [audience, setAudience] = useState('all');
+  const [preview, setPreview] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const types = [{ id: 'announcement', label: 'Announcement', icon: 'megaphone' }, { id: 'alert', label: 'Alert', icon: 'alert' }, { id: 'update', label: 'Update', icon: 'bell' }];
+  const audiences = [{ id: 'all', label: 'All Members' }, { id: 'selected', label: 'Selected Users' }, { id: 'single', label: 'One User' }];
+
+  if (sent) return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 32, textAlign: 'center' }}>
+      <StatusBar />
+      <div style={{ width: 64, height: 64, borderRadius: 32, background: t.success + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+        <Icon name="check" size={30} color={t.success} />
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: t.text, marginBottom: 8 }}>Notification Sent!</div>
+      <div style={{ fontSize: 14, color: t.muted, lineHeight: 1.6, marginBottom: 28 }}>Your message was delivered to {audience === 'all' ? 'all 3 members' : 'selected recipients'}.</div>
+      <Btn full onClick={() => { setSent(false); setTitle(''); setBody(''); setPreview(false); }}>Send Another</Btn>
+    </div>
+  );
+
+  if (preview) return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ padding: '14px 20px 0', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button onClick={() => setPreview(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+          <Icon name="back" size={22} color={t.muted} />
+        </button>
+        <div style={{ fontSize: 18, fontWeight: 800, color: t.text }}>Preview</div>
+      </div>
+      <div style={{ flex: 1, padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ fontSize: 12, color: t.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>How recipients will see it:</div>
+        <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 18, padding: '16px', overflow: 'hidden', position: 'relative' }}>
+          <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, background: type === 'alert' ? t.warn : type === 'announcement' ? t.success : t.accent }} />
+          <div style={{ paddingLeft: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 10, background: (type === 'alert' ? t.warn : type === 'announcement' ? t.success : t.accent) + '18', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Icon name={type === 'alert' ? 'alert' : 'megaphone'} size={15} color={type === 'alert' ? t.warn : type === 'announcement' ? t.success : t.accent} />
+              </div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: t.text }}>{title || 'Notification title'}</div>
+                <div style={{ fontSize: 11, color: t.muted }}>Just now</div>
+              </div>
+            </div>
+            <div style={{ fontSize: 13, color: t.muted, lineHeight: 1.6 }}>{body || 'Your notification message will appear here.'}</div>
+          </div>
+        </div>
+        <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 16, padding: '14px 16px' }}>
+          {[['Type', types.find(tp => tp.id === type)?.label], ['Audience', audiences.find(a => a.id === audience)?.label], ['Recipients', audience === 'all' ? '3 members' : audience === 'single' ? '1 user' : 'Selected']].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: `1px solid ${t.border}` }}>
+              <span style={{ fontSize: 13, color: t.muted }}>{k}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{v}</span>
+            </div>
+          ))}
+        </div>
+        <Btn full size="lg" onClick={() => setSent(true)}>Send Notification</Btn>
+      </div>
+      <AdminBottomNav active="notify" />
+    </div>
+  );
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ padding: '14px 20px 0' }}>
+        <div style={{ fontSize: 20, fontWeight: 800, color: t.text, letterSpacing: '-0.4px', marginBottom: 2 }}>Send Notification</div>
+        <div style={{ fontSize: 13, color: t.muted, marginBottom: 16 }}>Compose a message for your members</div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* Type */}
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Type</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {types.map(tp => (
+              <button key={tp.id} onClick={() => setType(tp.id)} style={{
+                flex: 1, padding: '10px 6px', borderRadius: 14, border: `2px solid ${type === tp.id ? t.accent : t.border}`,
+                background: type === tp.id ? t.accent + '15' : t.card,
+                cursor: 'pointer', fontFamily: 'inherit',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, transition: 'all 0.15s',
+              }}>
+                <Icon name={tp.icon} size={18} color={type === tp.id ? t.accent : t.muted} />
+                <span style={{ fontSize: 11, fontWeight: 600, color: type === tp.id ? t.accent : t.muted }}>{tp.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Audience */}
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Audience</div>
+          <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 16, overflow: 'hidden' }}>
+            {audiences.map((a, i) => (
+              <button key={a.id} onClick={() => setAudience(a.id)} style={{
+                width: '100%', padding: '12px 16px', background: 'none', border: 'none',
+                borderBottom: i < audiences.length - 1 ? `1px solid ${t.border}` : 'none',
+                cursor: 'pointer', fontFamily: 'inherit',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              }}>
+                <span style={{ fontSize: 14, color: t.text }}>{a.label}</span>
+                <div style={{ width: 20, height: 20, borderRadius: 10, border: `2px solid ${audience === a.id ? t.accent : t.border}`, background: audience === a.id ? t.accent : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {audience === a.id && <div style={{ width: 8, height: 8, borderRadius: 4, background: '#fff' }} />}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <TextInput label="Title" placeholder="e.g. Platform Update" value={title} onChange={setTitle} />
+        <TextInput label="Message" placeholder="Write your notification message…" value={body} onChange={setBody} multiline rows={4} />
+
+        <Btn full size="lg" onClick={() => setPreview(true)} disabled={!title.trim() || !body.trim()}>
+          Preview & Send
+        </Btn>
+      </div>
+      <AdminBottomNav active="notify" />
+    </div>
+  );
+}
+
+// ─── ADMIN REPORTS ─────────────────────────────────────────────────────────────
+
+function AdminReports() {
+  const { t } = useTheme();
+  const { nav } = useApp();
+  const [reports, setReports] = useState(MOCK_REPORTS);
+  const [filter, setFilter] = useState('all');
+  const [selected, setSelected] = useState(null);
+
+  const filtered = filter === 'all' ? reports : reports.filter(r => r.status === filter);
+  const updateStatus = (id, status) => setReports(rs => rs.map(r => r.id === id ? { ...r, status } : r));
+
+  if (selected) {
+    const r = reports.find(rp => rp.id === selected);
+    const statusColor = { 'new': t.info, 'in-review': t.warn, 'resolved': t.success }[r.status] || t.muted;
+    return (
+      <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+        <StatusBar />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px 10px' }}>
+          <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+            <Icon name="back" size={22} color={t.muted} />
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 800, color: t.text }}>Report Detail</div>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 18, padding: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+              <Avatar name={r.userName} size={44} />
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: t.text }}>{r.userName}</div>
+                <div style={{ fontSize: 12, color: t.muted }}>{r.time}</div>
+              </div>
+              <div style={{ marginLeft: 'auto' }}><StatusDot status={r.status} /></div>
+            </div>
+            <div style={{ background: t.elevated, borderRadius: 12, padding: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: t.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{r.type}</div>
+              <div style={{ fontSize: 14, color: t.text, lineHeight: 1.6 }}>{r.desc}</div>
+            </div>
+          </div>
+          {/* Status actions */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Update Status</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {['new', 'in-review', 'resolved'].map(s => (
+                <button key={s} onClick={() => updateStatus(r.id, s)} style={{
+                  flex: 1, padding: '9px 0', borderRadius: 12,
+                  border: `2px solid ${r.status === s ? statusColor : t.border}`,
+                  background: r.status === s ? statusColor + '15' : t.card,
+                  color: r.status === s ? statusColor : t.muted,
+                  fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+                  textTransform: 'capitalize', transition: 'all 0.15s',
+                }}>{s.replace('-', ' ')}</button>
+              ))}
+            </div>
+          </div>
+          <Btn full variant="secondary" onClick={() => nav('admin-inbox')}>Reply via Chat</Btn>
+          {r.status !== 'resolved' && <Btn full variant="success" onClick={() => { updateStatus(r.id, 'resolved'); setSelected(null); }}>Mark Resolved</Btn>}
+        </div>
+        <AdminBottomNav active="reports" />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ height: '100%', background: t.bg, display: 'flex', flexDirection: 'column' }}>
+      <StatusBar />
+      <div style={{ padding: '14px 20px 0' }}>
+        <div style={{ fontSize: 20, fontWeight: 800, color: t.text, letterSpacing: '-0.4px', marginBottom: 14 }}>Reports</div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {['all', 'new', 'in-review', 'resolved'].map(f => (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              padding: '5px 11px', borderRadius: 20,
+              border: `1.5px solid ${filter === f ? t.accent : t.border}`,
+              background: filter === f ? t.accent + '18' : 'transparent',
+              color: filter === f ? t.accent : t.muted,
+              fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+              textTransform: 'capitalize', whiteSpace: 'nowrap',
+            }}>{f.replace('-', ' ')}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 24px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {filtered.map(r => {
+          const col = { 'new': t.info, 'in-review': t.warn, 'resolved': t.success }[r.status] || t.muted;
+          return (
+            <div key={r.id} onClick={() => setSelected(r.id)} style={{
+              background: t.card, border: `1px solid ${r.status === 'new' ? t.info + '30' : t.border}`,
+              borderRadius: 18, padding: '14px 16px', cursor: 'pointer',
+              boxShadow: r.status === 'new' ? `0 2px 12px ${t.info}15` : t.cardShadow,
+              position: 'relative', overflow: 'hidden',
+            }}>
+              <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, background: col, borderRadius: '4px 0 0 4px' }} />
+              <div style={{ paddingLeft: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                  <Avatar name={r.userName} size={32} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>{r.userName}</span>
+                      <StatusDot status={r.status} />
+                    </div>
+                    <div style={{ fontSize: 11, color: t.muted }}>{r.time}</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: col, marginBottom: 3 }}>{r.type}</div>
+                <div style={{ fontSize: 13, color: t.muted, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{r.desc}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <AdminBottomNav active="reports" />
+    </div>
+  );
+}
+
+// ─── ADMIN BOTTOM NAV ─────────────────────────────────────────────────────────
+
+function AdminBottomNav({ active }) {
+  const { t, theme } = useTheme();
+  const { nav } = useApp();
+  const tabs = [
+    { id: 'dashboard', icon: 'grid', label: 'Home', route: 'admin-dashboard' },
+    { id: 'inbox', icon: 'inbox', label: 'Inbox', route: 'admin-inbox', badge: 3 },
+    { id: 'users', icon: 'users', label: 'Users', route: 'admin-users', badge: 2 },
+    { id: 'notify', icon: 'megaphone', label: 'Notify', route: 'admin-notify' },
+    { id: 'reports', icon: 'flag', label: 'Reports', route: 'admin-reports', badge: 1 },
+  ];
+  const accentGrad = theme === 'playful'
+    ? 'linear-gradient(135deg, #e040a0, #7c5af6)'
+    : 'linear-gradient(135deg, #7c5af6, #5a7ff6)';
+  return (
+    <div style={{
+      background: t.nav, backdropFilter: 'blur(20px)',
+      borderTop: `1px solid ${t.border}`,
+      display: 'flex', padding: '8px 0 16px', flexShrink: 0,
+    }}>
+      {tabs.map(tab => {
+        const isActive = active === tab.id;
+        return (
+          <button key={tab.id} onClick={() => nav(tab.route)} style={{
+            flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+            gap: 3, background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0',
+          }}>
+            <div style={{ position: 'relative' }}>
+              {isActive ? (
+                <div style={{ width: 34, height: 34, borderRadius: 11, background: accentGrad, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 3px 10px ${t.accentGlow}` }}>
+                  <Icon name={tab.icon} size={17} color="#fff" />
+                </div>
+              ) : (
+                <div style={{ width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Icon name={tab.icon} size={20} color={t.muted} />
+                </div>
+              )}
+              {!isActive && tab.badge > 0 && (
+                <div style={{ position: 'absolute', top: 2, right: 2, width: 8, height: 8, borderRadius: 4, background: t.accent, border: `2px solid ${t.bg}` }} />
+              )}
+            </div>
+            <span style={{ fontSize: 10, fontWeight: isActive ? 700 : 500, color: isActive ? t.accent : t.muted }}>{tab.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+Object.assign(window, {
+  AdminLogin, AdminDashboard, AdminUsers, AdminInbox,
+  AdminNotify, AdminReports, AdminBottomNav,
+});
+
+</script>
+
+<script type="text/babel">
+
+// relay-app.jsx — Root App, phone frame, and mount
+
+const { useState, useEffect } = React;
+
+// ─── TWEAK DEFAULTS ───────────────────────────────────────────────────────────
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "dark",
+  "startView": "landing"
+}/*EDITMODE-END*/;
+
+// ─── PHONE FRAME ──────────────────────────────────────────────────────────────
+
+function PhoneFrame({ children, theme }) {
+  const frameColor = theme === 'light' ? '#1c1c1e' : '#090a0f';
+  return (
+    <div style={{
+      width: 390, height: 844, borderRadius: 54,
+      background: frameColor, padding: 11,
+      boxShadow: `
+        0 0 0 1.5px #2a2a35,
+        0 0 0 3px #111118,
+        0 50px 120px rgba(0,0,0,0.75),
+        0 20px 50px rgba(0,0,0,0.4),
+        inset 0 1px 0 rgba(255,255,255,0.07)
+      `,
+      position: 'relative', flexShrink: 0,
+    }}>
+      {/* Physical buttons */}
+      <div style={{ position: 'absolute', left: -3, top: 118, width: 3, height: 36, background: '#1e1e24', borderRadius: '2px 0 0 2px' }} />
+      <div style={{ position: 'absolute', left: -3, top: 168, width: 3, height: 62, background: '#1e1e24', borderRadius: '2px 0 0 2px' }} />
+      <div style={{ position: 'absolute', left: -3, top: 242, width: 3, height: 62, background: '#1e1e24', borderRadius: '2px 0 0 2px' }} />
+      <div style={{ position: 'absolute', right: -3, top: 158, width: 3, height: 82, background: '#1e1e24', borderRadius: '0 2px 2px 0' }} />
+
+      {/* Screen */}
+      <div style={{ width: '100%', height: '100%', borderRadius: 44, overflow: 'hidden', position: 'relative', background: '#000' }}>
+        {/* Notch */}
+        <div style={{
+          position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)',
+          width: 118, height: 34, background: frameColor,
+          borderRadius: '0 0 22px 22px', zIndex: 100,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+        }}>
+          <div style={{ width: 11, height: 11, borderRadius: 6, background: '#111', border: '1px solid #2a2a35' }} />
+          <div style={{ width: 7, height: 7, borderRadius: 4, background: '#111' }} />
+        </div>
+        {children}
+      </div>
+
+      {/* Home indicator */}
+      <div style={{
+        position: 'absolute', bottom: 18, left: '50%', transform: 'translateX(-50%)',
+        width: 130, height: 5, background: 'rgba(255,255,255,0.22)', borderRadius: 3,
+      }} />
+    </div>
+  );
+}
+
+// ─── ROOT APP ─────────────────────────────────────────────────────────────────
+
+function App() {
+  const [tweaks, setTweakState] = useState(TWEAK_DEFAULTS);
+  const [open, setOpen] = useState(false);
+
+  // Minimal tweak setter that also persists via postMessage
+  const setTweak = (key, val) => {
+    setTweakState(prev => {
+      const next = { ...prev, [key]: val };
+      window.parent.postMessage({ type: '__edit_mode_set_keys', edits: { [key]: val } }, '*');
+      return next;
+    });
+  };
+
+  const [theme, setThemeState] = useState(tweaks.theme);
+  const [view, setView] = useState(tweaks.startView);
+  const [modal, setModal] = useState(null);
+  const [animKey, setAnimKey] = useState(0);
+
+  const setTheme = (th) => { setThemeState(th); setTweak('theme', th); };
+  const nav = (to) => { setView(to); setAnimKey(k => k + 1); setModal(null); };
+
+  // Tweaks host protocol
+  useEffect(() => {
+    const onMsg = (e) => {
+      const tp = e.data?.type;
+      if (tp === '__activate_edit_mode') setOpen(true);
+      else if (tp === '__deactivate_edit_mode') setOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const t = themeTokens[theme] || themeTokens.dark;
+  const appCtx = { view, nav, modal, setModal };
+  const themeCtx = { theme, setTheme, t };
+  const isAdmin = view.startsWith('admin');
+
+  const screenMap = {
+    landing: LandingScreen,
+    pending: PendingScreen,
+    'customer-home': CustomerHome,
+    'customer-chat': CustomerChat,
+    'customer-notifications': CustomerNotifications,
+    'customer-profile': CustomerProfile,
+    'admin-login': AdminLogin,
+    'admin-dashboard': AdminDashboard,
+    'admin-users': AdminUsers,
+    'admin-inbox': AdminInbox,
+    'admin-notify': AdminNotify,
+    'admin-reports': AdminReports,
+  };
+  const Screen = screenMap[view] || LandingScreen;
+
+  const stageBg = theme === 'playful'
+    ? 'radial-gradient(ellipse at 35% 45%, #1e0a38 0%, #0d0a1a 65%)'
+    : theme === 'light'
+    ? 'radial-gradient(ellipse at 35% 45%, #c8c8dc 0%, #b0b0c8 65%)'
+    : 'radial-gradient(ellipse at 35% 45%, #111328 0%, #08090d 65%)';
+
+  const accentColor = theme === 'playful' ? '#e040a0' : '#7c5af6';
+
+  const navItems = [
+    { label: 'Landing', v: 'landing' },
+    { label: 'Pending', v: 'pending' },
+    { label: 'Home', v: 'customer-home' },
+    { label: 'Chat', v: 'customer-chat' },
+    { label: 'Notifs', v: 'customer-notifications' },
+    { label: '·', v: null },
+    { label: 'Admin Login', v: 'admin-login', admin: true },
+    { label: 'Dashboard', v: 'admin-dashboard', admin: true },
+    { label: 'Inbox', v: 'admin-inbox', admin: true },
+    { label: 'Users', v: 'admin-users', admin: true },
+    { label: 'Notify', v: 'admin-notify', admin: true },
+    { label: 'Reports', v: 'admin-reports', admin: true },
+  ];
+
+  return (
+    <ThemeProvider value={themeCtx}>
+      <AppContext.Provider value={appCtx}>
+        <div style={{
+          width: '100vw', height: '100vh',
+          background: stageBg,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          position: 'relative', overflow: 'hidden',
+        }}>
+          {/* Ambient glows */}
+          <div style={{ position: 'absolute', top: '15%', left: '18%', width: 450, height: 450, borderRadius: '50%', background: accentColor + '07', filter: 'blur(90px)', pointerEvents: 'none' }} />
+          <div style={{ position: 'absolute', bottom: '12%', right: '14%', width: 320, height: 320, borderRadius: '50%', background: (theme === 'playful' ? '#5a7ff6' : '#5a7ff6') + '05', filter: 'blur(70px)', pointerEvents: 'none' }} />
+
+          {/* View badge */}
+          <div style={{
+            position: 'absolute', top: 22, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)',
+            border: '1px solid rgba(255,255,255,0.09)',
+            borderRadius: 20, padding: '5px 14px',
+            display: 'flex', alignItems: 'center', gap: 7,
+          }}>
+            <div style={{ width: 7, height: 7, borderRadius: 4, background: isAdmin ? t.danger : t.success }} />
+            <span style={{ fontSize: 11, color: theme === 'light' ? '#555' : '#999', fontWeight: 600, letterSpacing: '0.3px' }}>
+              {isAdmin ? 'Staff / Admin View' : 'Customer View'} — Relay
+            </span>
+          </div>
+
+          {/* Bottom nav pills */}
+          <div style={{
+            position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+            display: 'flex', gap: 5, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 640,
+          }}>
+            {navItems.map((item, i) => {
+              if (!item.v) return (
+                <div key={i} style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.12)', margin: '0 3px', alignSelf: 'center' }} />
+              );
+              const isActive = view === item.v;
+              const activeColor = item.admin ? t.danger : accentColor;
+              return (
+                <button key={item.v} onClick={() => nav(item.v)} style={{
+                  padding: '5px 12px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                  background: isActive ? activeColor + 'cc' : 'rgba(255,255,255,0.07)',
+                  color: isActive ? '#fff' : theme === 'light' ? '#555' : '#aaa',
+                  fontSize: 11, fontWeight: 600, fontFamily: 'DM Sans, sans-serif',
+                  transition: 'all 0.15s', backdropFilter: 'blur(8px)',
+                  boxShadow: isActive ? `0 3px 10px ${activeColor}40` : 'none',
+                }}>{item.label}</button>
+              );
+            })}
+          </div>
+
+          {/* Phone */}
+          <div key={animKey} style={{ animation: 'fadeIn 0.22s ease' }}>
+            <PhoneFrame theme={theme}>
+              <div style={{ width: '100%', height: '100%' }}>
+                <Screen />
+              </div>
+              {modal === 'report' && <ReportModal />}
+            </PhoneFrame>
+          </div>
+
+          {/* Tweaks panel */}
+          {open && (
+            <div style={{
+              position: 'fixed', bottom: 80, right: 20, zIndex: 1000,
+              background: theme === 'light' ? '#ffffff' : '#1a1d2a',
+              border: `1px solid ${t.border}`,
+              borderRadius: 20, padding: 20, width: 260,
+              boxShadow: t.shadow, fontFamily: 'DM Sans, sans-serif',
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: t.text, marginBottom: 14 }}>Tweaks</div>
+
+              {/* Theme */}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Theme</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {[{id:'dark',label:'Dark'},{id:'light',label:'Light'},{id:'playful',label:'Playful'}].map(th => (
+                    <button key={th.id} onClick={() => setTheme(th.id)} style={{
+                      flex: 1, padding: '7px 0', borderRadius: 10,
+                      border: `2px solid ${theme === th.id ? t.accent : t.border}`,
+                      background: theme === th.id ? t.accent + '18' : 'transparent',
+                      color: theme === th.id ? t.accent : t.muted,
+                      fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+                      transition: 'all 0.15s',
+                    }}>{th.label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Jump to screen */}
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: t.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Jump to Screen</div>
+                <select value={view} onChange={e => nav(e.target.value)} style={{
+                  width: '100%', padding: '9px 12px', borderRadius: 10,
+                  background: t.inputBg, border: `1px solid ${t.border}`,
+                  color: t.text, fontSize: 13, fontFamily: 'inherit', outline: 'none', cursor: 'pointer',
+                }}>
+                  <optgroup label="Customer">
+                    <option value="landing">Landing / Sign In</option>
+                    <option value="pending">Pending Approval</option>
+                    <option value="customer-home">Customer Home</option>
+                    <option value="customer-chat">Customer Chat</option>
+                    <option value="customer-notifications">Notifications</option>
+                    <option value="customer-profile">Profile</option>
+                  </optgroup>
+                  <optgroup label="Admin / Staff">
+                    <option value="admin-login">Admin Login</option>
+                    <option value="admin-dashboard">Dashboard</option>
+                    <option value="admin-inbox">Staff Inbox</option>
+                    <option value="admin-users">User Approval</option>
+                    <option value="admin-notify">Send Notification</option>
+                    <option value="admin-reports">Reports</option>
+                  </optgroup>
+                </select>
+              </div>
+
+              {/* Close */}
+              <button onClick={() => { setOpen(false); window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*'); }} style={{
+                position: 'absolute', top: 16, right: 16, background: t.inputBg,
+                border: 'none', borderRadius: 8, width: 26, height: 26, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: t.muted, fontSize: 16, fontFamily: 'inherit',
+              }}>×</button>
+            </div>
+          )}
+        </div>
+      </AppContext.Provider>
+    </ThemeProvider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+
+</script>
+
+</body>
+</html>
