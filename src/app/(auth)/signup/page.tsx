@@ -1,7 +1,7 @@
 'use client'
 import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import RelayLogo from '@/components/RelayLogo'
 import {
   User, Building2, Crown, Headphones,
   Eye, EyeOff, ArrowLeft, CheckCircle2, Loader2
@@ -133,10 +133,7 @@ export default function SignUpPage() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
 
-      // Auto sign-in after registration
-      const supabase = createClient()
-      await supabase.auth.signInWithPassword({ email: form.email, password: form.password })
-
+      // Stay logged out until a business admin approves the customer (login checks account_status).
       setStep(5)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Registration failed')
@@ -166,8 +163,7 @@ export default function SignUpPage() {
       <main className="flex-1 flex items-center justify-center p-4">
         <div className="bg-[#0b1020]/95 rounded-3xl shadow-2xl border border-white/10 w-full max-w-lg p-8">
           <div className="text-center mb-6">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#8d63ff] to-[#5a7ff6] mx-auto mb-4" />
-            <h1 className="font-display font-bold text-5xl text-white tracking-tight mb-2">Relay</h1>
+            <RelayLogo size="lg" className="justify-center mb-2" />
             <p className="text-[#7f8bad] text-sm">Private messaging, beautifully simple.</p>
             <div className="inline-flex items-center gap-2 mt-4 px-4 py-2 rounded-full bg-[#2c220f] text-[#f6b332] text-sm font-semibold">
               <span className="w-2 h-2 rounded-full bg-[#f6b332]" />
@@ -441,15 +437,12 @@ export default function SignUpPage() {
                 <CheckCircle2 className="w-10 h-10 text-green-500" />
               </div>
               <h2 className="font-display font-bold text-2xl mb-2">
-                {role === 'business' && bizRole === 'admin' ? 'Welcome, Admin!' :
-                 role === 'business' ? 'Welcome, Agent!' : 'Welcome aboard!'}
+                Request submitted
               </h2>
               <p className="text-gray-500 text-sm mb-6">
-                {role === 'business' && bizRole === 'admin'
-                  ? `Your business is live at ${displaySlug}.${ROOT}`
-                  : role === 'business'
-                  ? "You're all set to handle customer inquiries."
-                  : 'Your account is ready. Start exploring Relay.'}
+                {role === 'business'
+                  ? 'Your staff account is pending approval. Sign in once an admin approves it.'
+                  : 'Your account is waiting for approval from the team. After approval, sign in with the same email and password to open the customer portal.'}
               </p>
               <div className="bg-gray-50 rounded-xl p-4 text-left space-y-2 text-sm mb-6">
                 {role === 'business' && bizRole === 'admin' ? <>
@@ -466,12 +459,11 @@ export default function SignUpPage() {
                   <NextStep>Start a conversation with a business</NextStep>
                 </>}
               </div>
-              <button onClick={() => router.push(
-                role === 'business'
-                  ? `/dashboard`
-                  : `/feed`
-              )} className="w-full py-3 rounded-xl bg-gradient-to-r from-[#7c5af6] to-[#5a7ff6] text-white font-semibold hover:opacity-90 transition-opacity">
-                Go to my dashboard →
+              <button
+                onClick={() => router.push('/login')}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-[#7c5af6] to-[#5a7ff6] text-white font-semibold hover:opacity-90 transition-opacity"
+              >
+                Go to sign in
               </button>
             </div>
           )}

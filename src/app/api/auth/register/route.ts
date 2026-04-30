@@ -60,11 +60,12 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 2. Check username uniqueness ───────────────────────────────────────────
+    const cleanUsername = username.replace(/^@/, '')
     const { data: existingUser } = await supabase
       .from('profiles')
       .select('id')
-      .eq('username', username.replace(/^@/, ''))
-      .single()
+      .eq('username', cleanUsername)
+      .maybeSingle()
 
     if (existingUser) {
       return NextResponse.json({ error: 'Username already taken' }, { status: 400 })
@@ -100,7 +101,7 @@ export async function POST(req: NextRequest) {
         .from('businesses')
         .select('id')
         .eq('slug', finalSlug)
-        .single()
+        .maybeSingle()
 
       if (existingBiz) {
         // Clean up auth user
@@ -124,7 +125,7 @@ export async function POST(req: NextRequest) {
           .from('businesses')
           .select('id')
           .eq('slug', finalSlug)
-          .single()
+          .maybeSingle()
 
         if (!biz) {
           await supabase.auth.admin.deleteUser(userId)
@@ -146,16 +147,32 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    if (role === 'business' && businessRole === 'admin' && businessId) {
+      const { count: adminCount } = await supabase
+        .from('profiles')
+        .select('*', { count: 'exact', head: true })
+        .eq('business_id', businessId)
+        .eq('business_role', 'admin')
+
+      if ((adminCount ?? 0) >= 1) {
+        await supabase.auth.admin.deleteUser(userId)
+        return NextResponse.json({ error: 'This business already has an admin account.' }, { status: 400 })
+      }
+    }
+
     // ── 5. Create profile ──────────────────────────────────────────────────────
+    // Self-service signups start as pending; a business admin approves customers via /dashboard.
+    // Staff created manually in Supabase + SQL/seed can be inserted as approved.
     const { error: profileErr } = await supabase.from('profiles').insert({
       id: userId,
-      username: username.replace(/^@/, ''),
+      username: cleanUsername,
       first_name: firstName,
       last_name: lastName,
       phone: phone || null,
       role,
       business_id: businessId,
       business_role: role === 'business' ? businessRole : null,
+      account_status: 'pending',
       email_verified: true,
     })
 

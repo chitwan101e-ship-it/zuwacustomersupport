@@ -4,7 +4,11 @@ import { Resend } from 'resend'
 import { createServiceClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+function getResend() {
+  const key = process.env.RESEND_API_KEY
+  if (!key) throw new Error('RESEND_API_KEY is not configured')
+  return new Resend(key)
+}
 
 function hashToken(token: string) {
   return crypto.createHash('sha256').update(token).digest('hex')
@@ -41,7 +45,7 @@ export async function POST(req: NextRequest) {
     if (dbError) throw dbError
 
     // Send email via Resend
-    const { error: emailError } = await resend.emails.send({
+    const { error: emailError } = await getResend().emails.send({
       from: process.env.RESEND_FROM_EMAIL || 'noreply@jbcoms.com',
       to: email,
       subject: 'Your JBComs verification code',

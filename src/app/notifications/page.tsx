@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { Bell, ArrowLeft, Loader2, CheckCheck } from 'lucide-react'
 
-type ProfileRow = { id: string; role: 'customer' | 'business' }
+type ProfileRow = { id: string; role: 'customer' | 'business'; account_status?: string }
 type NotificationRow = {
   id: string
   type: string
@@ -65,7 +65,7 @@ export default function NotificationsPage() {
 
       const { data: prof, error } = await supabase
         .from('profiles')
-        .select('id, role')
+        .select('id, role, account_status, deleted_at')
         .eq('id', session.user.id)
         .single()
 
@@ -74,8 +74,25 @@ export default function NotificationsPage() {
         return
       }
 
-      if ((prof as ProfileRow).role !== 'customer') {
+      const p = prof as ProfileRow & { deleted_at?: string | null }
+      if (p.role !== 'customer') {
         router.replace('/dashboard')
+        return
+      }
+
+      if (p.deleted_at) {
+        await supabase.auth.signOut()
+        router.replace('/login')
+        return
+      }
+
+      if (p.account_status === 'suspended') {
+        router.replace('/account-suspended')
+        return
+      }
+
+      if (p.account_status !== 'approved') {
+        router.replace('/pending-approval')
         return
       }
 
@@ -89,6 +106,33 @@ export default function NotificationsPage() {
       cancelled = true
     }
   }, [router, supabase, load])
+
+  useEffect(() => {
+    if (loading) return
+    let active = true
+    let channel: ReturnType<typeof supabase.channel> | null = null
+
+    async function subscribeRealtime() {
+      const { data } = await supabase.auth.getSession()
+      const uid = data.session?.user?.id
+      if (!uid || !active) return
+      channel = supabase
+        .channel(`notifications-${uid}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+          () => void load(uid)
+        )
+        .subscribe()
+    }
+
+    void subscribeRealtime()
+
+    return () => {
+      active = false
+      if (channel) void supabase.removeChannel(channel)
+    }
+  }, [loading, supabase, load])
 
   async function markOne(id: string) {
     setBusy(id)

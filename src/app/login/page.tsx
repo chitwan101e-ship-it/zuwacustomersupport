@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import RelayLogo from '@/components/RelayLogo'
 import { Loader2, Eye, EyeOff } from 'lucide-react'
 
 const inp =
@@ -37,16 +38,59 @@ export default function LoginPage() {
 
       const { data: prof, error: pErr } = await supabase
         .from('profiles')
-        .select('role')
+        .select('role, business_role, account_status, deleted_at')
         .eq('id', user.id)
         .single()
 
       if (pErr || !prof) {
-        router.replace('/feed')
+        await supabase.auth.signOut()
+        throw new Error(
+          'No profile row for this account. Staff accounts must be linked in public.profiles (Supabase); customers complete Create Account first.'
+        )
+      }
+
+      if ((prof as { deleted_at?: string | null }).deleted_at) {
+        await supabase.auth.signOut()
+        throw new Error('This account has been removed.')
+      }
+
+      if (prof.role === 'customer' && prof.account_status === 'suspended') {
+        router.replace('/account-suspended')
         return
       }
 
-      router.replace(prof.role === 'business' ? '/dashboard' : '/feed')
+      // Customers waiting on admin approval → dedicated screen (session kept).
+      if (prof.role === 'customer' && prof.account_status !== 'approved') {
+        router.replace('/pending-approval')
+        return
+      }
+
+      if (prof.account_status !== 'approved') {
+        await supabase.auth.signOut()
+        throw new Error(
+          prof.account_status === 'pending'
+            ? 'Your staff account is pending approval.'
+            : prof.account_status === 'rejected'
+              ? 'Your access request was rejected.'
+              : prof.account_status === 'suspended'
+                ? 'Your account is suspended. Contact support.'
+                : 'Your account is blocked. Contact support.'
+        )
+      }
+
+      if (prof.role === 'business' && prof.business_role) {
+        router.replace('/dashboard')
+        return
+      }
+
+      if (prof.role === 'business' && !prof.business_role) {
+        await supabase.auth.signOut()
+        throw new Error(
+          'Staff profile is incomplete: set business_role to admin or support and business_id in public.profiles (Supabase).'
+        )
+      }
+
+      router.replace('/feed')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Sign in failed')
     } finally {
@@ -59,8 +103,7 @@ export default function LoginPage() {
       <main className="flex-1 flex items-center justify-center p-4">
         <div className="bg-[#0b1020]/95 rounded-3xl shadow-2xl border border-white/10 w-full max-w-lg p-8">
           <div className="text-center mb-6">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#8d63ff] to-[#5a7ff6] mx-auto mb-4" />
-            <h1 className="font-display font-bold text-5xl text-white tracking-tight mb-2">Relay</h1>
+            <RelayLogo size="lg" className="justify-center mb-2" />
             <p className="text-[#7f8bad] text-sm">Private messaging, beautifully simple.</p>
             <div className="inline-flex items-center gap-2 mt-4 px-4 py-2 rounded-full bg-[#2c220f] text-[#f6b332] text-sm font-semibold">
               <span className="w-2 h-2 rounded-full bg-[#f6b332]" />

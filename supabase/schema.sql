@@ -1,14 +1,18 @@
--- ============================================================
--- JBCOMS — Full Supabase Schema
--- Run this in your Supabase SQL editor (Database > SQL Editor)
+﻿-- ============================================================
+-- JBCOMS â€” Full Supabase Schema
+-- Fresh database bootstrap only.
+-- Run this ONLY on a brand-new database.
+--
+-- If your database already exists, do NOT run this file again unless you
+-- intentionally reset: run `supabase/migrations/000_reset_app_schema.sql` first.
 -- ============================================================
 
 -- Enable UUID extension
 create extension if not exists "uuid-ossp";
 
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- 1. BUSINESSES
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.businesses (
   id            uuid primary key default uuid_generate_v4(),
   name          text not null,
@@ -21,11 +25,12 @@ create table public.businesses (
 -- Index for fast subdomain lookups
 create index idx_businesses_slug on public.businesses(slug);
 
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- 2. PROFILES  (extends Supabase auth.users 1-to-1)
--- ────────────────────────────────────────────────────────────
-create type public.user_role    as enum ('customer', 'business');
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+create type public.user_role     as enum ('customer', 'business');
 create type public.business_role as enum ('admin', 'support');
+create type public.account_status as enum ('pending', 'approved', 'rejected', 'blocked', 'suspended');
 
 create table public.profiles (
   id            uuid primary key references auth.users(id) on delete cascade,
@@ -38,6 +43,7 @@ create table public.profiles (
   -- business-specific (null for customers)
   business_id   uuid references public.businesses(id) on delete set null,
   business_role public.business_role,
+  account_status public.account_status not null default 'pending',
   email_verified boolean default false,
   created_at    timestamptz default now(),
   -- constraints
@@ -50,10 +56,11 @@ create table public.profiles (
 
 create index idx_profiles_business on public.profiles(business_id);
 create index idx_profiles_username  on public.profiles(username);
+create index idx_profiles_status    on public.profiles(account_status);
 
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- 3. OTP TOKENS  (for email verification via Resend)
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.otp_tokens (
   id         uuid primary key default uuid_generate_v4(),
   email      text not null,
@@ -65,12 +72,9 @@ create table public.otp_tokens (
 
 create index idx_otp_email on public.otp_tokens(email);
 
--- Auto-delete used/expired tokens after 1 hour (optional cron approach)
--- Alternatively, use Supabase's pg_cron extension.
-
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- 4. ANNOUNCEMENTS
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.announcements (
   id          uuid primary key default uuid_generate_v4(),
   business_id uuid not null references public.businesses(id) on delete cascade,
@@ -86,9 +90,9 @@ create table public.announcements (
 create index idx_announcements_business on public.announcements(business_id);
 create index idx_announcements_created  on public.announcements(created_at desc);
 
--- ────────────────────────────────────────────────────────────
--- 5. REACTIONS  (like, helpful, etc.)
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 5. REACTIONS
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create type public.reaction_type as enum ('like', 'helpful', 'love', 'question');
 
 create table public.reactions (
@@ -97,12 +101,12 @@ create table public.reactions (
   user_id         uuid not null references public.profiles(id) on delete cascade,
   reaction        public.reaction_type not null default 'like',
   created_at      timestamptz default now(),
-  unique (announcement_id, user_id)             -- one reaction per user per post
+  unique (announcement_id, user_id)
 );
 
--- ────────────────────────────────────────────────────────────
--- 6. COMMENTS on announcements
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 6. COMMENTS
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.comments (
   id              uuid primary key default uuid_generate_v4(),
   announcement_id uuid not null references public.announcements(id) on delete cascade,
@@ -113,27 +117,27 @@ create table public.comments (
 
 create index idx_comments_announcement on public.comments(announcement_id);
 
--- ────────────────────────────────────────────────────────────
--- 7. CONVERSATIONS  (customer ↔ business thread)
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 7. CONVERSATIONS
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.conversations (
   id            uuid primary key default uuid_generate_v4(),
   business_id   uuid not null references public.businesses(id) on delete cascade,
   customer_id   uuid not null references public.profiles(id) on delete cascade,
-  assigned_to   uuid references public.profiles(id) on delete set null,  -- support agent
-  status        text not null default 'open',   -- open | closed | pending
+  assigned_to   uuid references public.profiles(id) on delete set null,
+  status        text not null default 'open',
   created_at    timestamptz default now(),
   updated_at    timestamptz default now(),
-  unique (business_id, customer_id)             -- one thread per customer per business
+  unique (business_id, customer_id)
 );
 
 create index idx_conversations_business  on public.conversations(business_id);
 create index idx_conversations_customer  on public.conversations(customer_id);
 create index idx_conversations_assigned  on public.conversations(assigned_to);
 
--- ────────────────────────────────────────────────────────────
--- 8. MESSAGES within a conversation
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 8. MESSAGES
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.messages (
   id              uuid primary key default uuid_generate_v4(),
   conversation_id uuid not null references public.conversations(id) on delete cascade,
@@ -146,9 +150,9 @@ create table public.messages (
 create index idx_messages_conversation on public.messages(conversation_id);
 create index idx_messages_created      on public.messages(created_at asc);
 
--- ────────────────────────────────────────────────────────────
--- 9. BUSINESS FOLLOWERS (customers who follow a business)
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 9. FOLLOWS
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create table public.follows (
   user_id     uuid not null references public.profiles(id) on delete cascade,
   business_id uuid not null references public.businesses(id) on delete cascade,
@@ -156,9 +160,9 @@ create table public.follows (
   primary key (user_id, business_id)
 );
 
--- ────────────────────────────────────────────────────────────
--- 10. ADMIN REPORTS (staff support queue)
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 10. ADMIN REPORTS
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create type public.admin_report_status as enum ('new', 'in_review', 'resolved');
 
 create table public.admin_reports (
@@ -177,11 +181,23 @@ create table public.admin_reports (
 create index idx_admin_reports_business on public.admin_reports(business_id);
 create index idx_admin_reports_status on public.admin_reports(status);
 
--- ────────────────────────────────────────────────────────────
--- 11. ROW LEVEL SECURITY
--- ────────────────────────────────────────────────────────────
+-- Moderation: suspend / unsuspend audit (matches migration 005)
+create table public.moderation_suspension_events (
+  id            uuid primary key default uuid_generate_v4(),
+  profile_id    uuid not null references public.profiles(id) on delete cascade,
+  business_id   uuid not null references public.businesses(id) on delete set null,
+  actor_id      uuid not null,
+  action        text not null check (action in ('suspend', 'unsuspend')),
+  reason        text,
+  created_at    timestamptz not null default now()
+);
 
--- Helper: get current user's profile row
+create index idx_moderation_suspension_profile on public.moderation_suspension_events (profile_id);
+create index idx_moderation_suspension_created on public.moderation_suspension_events (created_at desc);
+
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 11. HELPERS + RLS
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create or replace function public.my_profile()
 returns public.profiles
 language sql security definer stable
@@ -189,7 +205,6 @@ as $$
   select * from public.profiles where id = auth.uid();
 $$;
 
--- Helper: is current user admin of a business?
 create or replace function public.is_business_admin(bid uuid)
 returns boolean
 language sql security definer stable
@@ -202,7 +217,6 @@ as $$
   );
 $$;
 
--- Helper: is current user a member (admin or support) of a business?
 create or replace function public.is_business_member(bid uuid)
 returns boolean
 language sql security definer stable
@@ -215,7 +229,67 @@ as $$
   );
 $$;
 
--- Enable RLS on all tables
+create or replace function public.is_approved_user()
+returns boolean
+language sql security definer stable
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = auth.uid()
+      and account_status = 'approved'
+  );
+$$;
+
+create or replace function public.promote_user_to_business_admin(
+  user_email text,
+  target_business_slug text
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_user_id uuid;
+  target_business_id uuid;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only service role can call promote_user_to_business_admin';
+  end if;
+
+  select id into target_user_id
+  from auth.users
+  where lower(email) = lower(user_email)
+  limit 1;
+
+  if target_user_id is null then
+    raise exception 'User not found for email: %', user_email;
+  end if;
+
+  select id into target_business_id
+  from public.businesses
+  where slug = target_business_slug
+  limit 1;
+
+  if target_business_id is null then
+    raise exception 'Business not found for slug: %', target_business_slug;
+  end if;
+
+  update public.profiles
+  set role = 'business',
+      business_id = target_business_id,
+      business_role = 'admin',
+      account_status = 'approved'
+  where id = target_user_id;
+
+  if not found then
+    raise exception 'Profile row not found for user: %', user_email;
+  end if;
+
+  return target_user_id;
+end;
+$$;
+
 alter table public.businesses     enable row level security;
 alter table public.profiles       enable row level security;
 alter table public.otp_tokens     enable row level security;
@@ -226,63 +300,63 @@ alter table public.conversations  enable row level security;
 alter table public.messages       enable row level security;
 alter table public.follows        enable row level security;
 alter table public.admin_reports  enable row level security;
+alter table public.moderation_suspension_events enable row level security;
 
--- BUSINESSES: anyone can read, service role only for insert
 create policy "businesses_read"   on public.businesses for select using (true);
-create policy "businesses_insert" on public.businesses for insert with check (false); -- via service role API only
+create policy "businesses_insert" on public.businesses for insert with check (false);
 
--- PROFILES: own row full access; others can read public fields
 create policy "profiles_own"      on public.profiles for all    using (id = auth.uid());
 create policy "profiles_read"     on public.profiles for select using (true);
 
--- OTP TOKENS: only service role (API route) touches these
 create policy "otp_none"          on public.otp_tokens for all  using (false);
 
--- ANNOUNCEMENTS: anyone can read; only business admin can insert/update/delete
 create policy "announce_read"     on public.announcements for select using (true);
-create policy "announce_insert"   on public.announcements for insert
-  with check (public.is_business_admin(business_id));
-create policy "announce_update"   on public.announcements for update
-  using (public.is_business_admin(business_id));
-create policy "announce_delete"   on public.announcements for delete
-  using (public.is_business_admin(business_id));
+create policy "announce_insert"   on public.announcements for insert with check (public.is_business_admin(business_id));
+create policy "announce_update"   on public.announcements for update using (public.is_business_admin(business_id));
+create policy "announce_delete"   on public.announcements for delete using (public.is_business_admin(business_id));
 
--- REACTIONS: anyone can read; authenticated users manage their own
 create policy "reactions_read"    on public.reactions for select using (true);
 create policy "reactions_own"     on public.reactions for all    using (user_id = auth.uid());
 
--- COMMENTS: anyone can read; authenticated users manage their own
 create policy "comments_read"     on public.comments for select using (true);
 create policy "comments_own"      on public.comments for all    using (user_id = auth.uid());
 
--- CONVERSATIONS: customer sees own; business members see their business's
-create policy "convo_customer"    on public.conversations for select
-  using (customer_id = auth.uid());
-create policy "convo_business"    on public.conversations for select
-  using (public.is_business_member(business_id));
-create policy "convo_insert"      on public.conversations for insert
-  with check (customer_id = auth.uid());
-create policy "convo_update_biz"  on public.conversations for update
-  using (public.is_business_member(business_id));
+create policy "convo_customer"    on public.conversations for select using (customer_id = auth.uid());
+create policy "convo_business"    on public.conversations for select using (public.is_business_member(business_id));
+create policy "convo_insert"      on public.conversations for insert with check (customer_id = auth.uid());
+create policy "convo_update_biz"  on public.conversations for update using (public.is_business_member(business_id));
 
--- MESSAGES: visible to conversation participants only
 create policy "msg_read"          on public.messages for select
+using (
+  sender_id = auth.uid()
+  or exists (
+    select 1 from public.conversations c
+    where c.id = conversation_id
+      and (c.customer_id = auth.uid() or public.is_business_member(c.business_id))
+  )
+);
+create policy "msg_insert"        on public.messages for insert with check (sender_id = auth.uid());
+
+create policy "msg_update_business_member"
+  on public.messages for update
   using (
-    sender_id = auth.uid()
-    or exists (
+    exists (
       select 1 from public.conversations c
-      where c.id = conversation_id
-        and (c.customer_id = auth.uid() or public.is_business_member(c.business_id))
+      where c.id = messages.conversation_id
+        and public.is_business_member(c.business_id)
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.conversations c
+      where c.id = messages.conversation_id
+        and public.is_business_member(c.business_id)
     )
   );
-create policy "msg_insert"        on public.messages for insert
-  with check (sender_id = auth.uid());
 
--- FOLLOWS: users manage their own
 create policy "follows_read"      on public.follows for select using (true);
 create policy "follows_own"       on public.follows for all    using (user_id = auth.uid());
 
--- ADMIN REPORTS: only business members can read/update, customers can create their own
 create policy "admin_reports_select" on public.admin_reports for select
   using (public.is_business_member(business_id) or reporter_id = auth.uid());
 create policy "admin_reports_insert" on public.admin_reports for insert
@@ -290,15 +364,12 @@ create policy "admin_reports_insert" on public.admin_reports for insert
 create policy "admin_reports_update" on public.admin_reports for update
   using (public.is_business_member(business_id));
 
--- ────────────────────────────────────────────────────────────
--- 12. REALTIME (enable for live messaging & announcements)
--- ────────────────────────────────────────────────────────────
--- Run in Supabase Dashboard → Database → Replication
--- and enable realtime for: messages, conversations, announcements
+create policy "moderation_suspension_events_none"
+  on public.moderation_suspension_events for all using (false);
 
--- ────────────────────────────────────────────────────────────
--- 13. AUTO-UPDATE updated_at
--- ────────────────────────────────────────────────────────────
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+-- 12. AUTO-UPDATE updated_at
+-- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 create or replace function public.set_updated_at()
 returns trigger language plpgsql as $$
 begin
@@ -318,3 +389,17 @@ create trigger set_conversations_updated_at
 create trigger set_admin_reports_updated_at
   before update on public.admin_reports
   for each row execute function public.set_updated_at();
+
+-- ────────────────────────────────────────────────────────────
+-- 13. REALTIME (manual, optional)
+-- ────────────────────────────────────────────────────────────
+-- Supabase Dashboard → Database → Replication:
+-- enable for: messages, conversations, announcements (if you want live updates).
+
+-- ────────────────────────────────────────────────────────────
+-- TROUBLESHOOTING: relation already exists
+-- ────────────────────────────────────────────────────────────
+-- Your database still has tables from an earlier run. In SQL Editor, run once:
+--   supabase/migrations/000_reset_app_schema.sql
+-- Then run this schema again, then 002_message_images_storage.sql, 003_notifications.sql,
+-- 004_deleted_users_touch_inbox.sql, 005_suspension_patch_for_existing_db.sql, and 006_messages_staff_mark_read.sql as needed.
