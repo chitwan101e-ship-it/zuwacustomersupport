@@ -17,6 +17,20 @@ function hashToken(token: string) {
   return crypto.createHash('sha256').update(token).digest('hex')
 }
 
+/** Resend and some SDKs return plain objects, not `Error` — avoid `[object Object]` in logs and responses. */
+function thrownMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const m = (err as { message?: unknown }).message
+    if (typeof m === 'string' && m.trim()) return m
+  }
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return String(err)
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const otpEnabled = process.env.ENABLE_OTP === 'true'
@@ -89,7 +103,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true })
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
+    const message = thrownMessage(err)
     console.error('[send-otp]', err)
 
     if (message.includes('RESEND_API_KEY is not configured')) {
@@ -101,11 +115,29 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    if (message.toLowerCase().includes('domain') || message.toLowerCase().includes('from')) {
+    const lower = message.toLowerCase()
+    if (lower.includes('api key is invalid') || lower.includes('invalid api key')) {
+      return NextResponse.json(
+        {
+          error:
+            'Resend rejected the API key (invalid or revoked). Create a new key at resend.com, put it in RESEND_API_KEY in .env.local, then restart `npm run dev`.',
+        },
+        { status: 500 }
+      )
+    }
+
+    if (lower.includes('domain') || lower.includes('from')) {
       return NextResponse.json(
         {
           error: 'Email sender is not verified in Resend. Check RESEND_FROM_EMAIL and your verified sending domain.',
         },
+        { status: 500 }
+      )
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      return NextResponse.json(
+        { error: `Failed to send OTP (dev detail): ${message}` },
         { status: 500 }
       )
     }

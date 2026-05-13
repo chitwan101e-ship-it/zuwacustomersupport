@@ -1700,51 +1700,47 @@ export default function FeedPage() {
         </div>
       )}
 
-      {/* Primary messaging entry — matched to HTML mock FAB */}
-      <div className="fixed z-50 flex flex-col items-end gap-1.5 right-[max(14px,env(safe-area-inset-right))] max-[899px]:bottom-[calc(5.75rem+env(safe-area-inset-bottom))] min-[900px]:bottom-4">
-        {chatUnreadCount > 0 && !supportOpen ? (
-          <span className="max-w-[calc(100vw-2rem)] truncate rounded-full bg-[#ff3b5c] px-[11px] py-[5px] text-[10px] font-bold text-white shadow-[0_4px_14px_rgba(255,59,92,0.5)] animate-pulse">
-            New team message
-          </span>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => onMessagesEntryClick()}
-          className="group relative flex h-[58px] w-[58px] items-center justify-center rounded-full text-white transition-transform duration-200 hover:scale-[1.06] hover:-translate-y-0.5 active:scale-[0.97]"
-          style={{
-            background: 'linear-gradient(135deg, #7c5af6, #5a7ff6)',
-            boxShadow: '0 8px 28px -6px rgba(124,90,246,0.7)',
-          }}
-          aria-label={supportOpen ? 'Close messages' : 'Open messages'}
-          aria-expanded={supportOpen}
-        >
-          {supportOpen ? (
-            <X className="w-8 h-8" strokeWidth={2.5} />
-          ) : (
-            <>
-              <svg
-                width="30"
-                height="30"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="white"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden
-                className="select-none pointer-events-none transition-transform duration-200 ease-out group-hover:scale-[1.06] group-hover:-translate-y-0.5"
-              >
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
-              {chatUnreadCount > 0 ? (
-                <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border-2 border-[#050814] bg-[#ff3b5c] px-1 text-[9px] font-extrabold leading-none text-white">
-                  {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
-                </span>
-              ) : null}
-            </>
-          )}
-        </button>
-      </div>
+      {/* Primary messaging entry — FAB only when panel closed (avoid a second X beside composer; close from header). */}
+      {!supportOpen ? (
+        <div className="fixed z-50 flex flex-col items-end gap-1.5 right-[max(14px,env(safe-area-inset-right))] max-[899px]:bottom-[calc(5.75rem+env(safe-area-inset-bottom))] min-[900px]:bottom-4">
+          {chatUnreadCount > 0 ? (
+            <span className="max-w-[calc(100vw-2rem)] truncate rounded-full bg-[#ff3b5c] px-[11px] py-[5px] text-[10px] font-bold text-white shadow-[0_4px_14px_rgba(255,59,92,0.5)] animate-pulse">
+              New team message
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => onMessagesEntryClick()}
+            className="group relative flex h-[58px] w-[58px] items-center justify-center rounded-full text-white transition-transform duration-200 hover:scale-[1.06] hover:-translate-y-0.5 active:scale-[0.97]"
+            style={{
+              background: 'linear-gradient(135deg, #7c5af6, #5a7ff6)',
+              boxShadow: '0 8px 28px -6px rgba(124,90,246,0.7)',
+            }}
+            aria-label="Open messages"
+            aria-expanded={false}
+          >
+            <svg
+              width="30"
+              height="30"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="white"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+              className="select-none pointer-events-none transition-transform duration-200 ease-out group-hover:scale-[1.06] group-hover:-translate-y-0.5"
+            >
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+            {chatUnreadCount > 0 ? (
+              <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border-2 border-[#050814] bg-[#ff3b5c] px-1 text-[9px] font-extrabold leading-none text-white">
+                {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+              </span>
+            ) : null}
+          </button>
+        </div>
+      ) : null}
 
       {toast ? (
         <div
