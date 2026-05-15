@@ -14,3 +14,11 @@ export function isValidStaffUsername(raw: string): boolean {
 export function normalizeStaffUsername(raw: string): string {
   return raw.trim().replace(/^@+/, '').toLowerCase()
 }
+
+/** True when the auth email is the synthetic staff inbox (cannot receive Resend OTP). */
+export function isSyntheticStaffAuthEmail(email: string): boolean {
+  const lower = email.trim().toLowerCase()
+  const domain =
+    (typeof process !== 'undefined' && process.env.STAFF_AUTH_EMAIL_DOMAIN?.trim()) || 'relay-staff.jbcoms'
+  return lower.endsWith(`@${domain}`)
+}

@@ -80,6 +80,8 @@ export default function PublicBusinessPage() {
         .from('announcements')
         .select('id, title, body, image_url, created_at')
         .eq('business_id', (b as Biz).id)
+        .is('deleted_at', null)
+        .is('hidden_at', null)
         .order('created_at', { ascending: false })
         .limit(30)
 
@@ -113,7 +115,7 @@ export default function PublicBusinessPage() {
 
   async function toggleFollow() {
     if (!uid || !biz || !isCustomer) {
-      router.push('/signup')
+      router.push('/login')
       return
     }
     setFollowBusy(true)

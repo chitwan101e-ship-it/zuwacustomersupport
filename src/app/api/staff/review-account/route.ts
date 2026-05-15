@@ -94,7 +94,11 @@ export async function POST(req: NextRequest) {
     // Approved customers automatically follow this business (feed + messaging without a manual Follow step).
     if (decision === 'approve') {
       const bid = staff.business_id as string | null
+      let businessName = 'your team'
       if (bid) {
+        const { data: biz } = await admin.from('businesses').select('name').eq('id', bid).maybeSingle()
+        if (biz?.name) businessName = biz.name as string
+
         const { error: fErr } = await admin.from('follows').insert({
           user_id: targetUserId,
           business_id: bid,
@@ -102,6 +106,16 @@ export async function POST(req: NextRequest) {
         if (fErr && fErr.code !== '23505') {
           console.error('[review-account] follow insert:', fErr)
         }
+
+        const { error: nErr } = await admin.from('notifications').insert({
+          user_id: targetUserId,
+          business_id: bid,
+          type: 'account_approved',
+          title: 'Your account is approved',
+          body: `You're all set. Open your feed for updates from ${businessName}.`,
+          link: '/feed',
+        })
+        if (nErr) console.error('[review-account] customer notification:', nErr)
       }
     }
 

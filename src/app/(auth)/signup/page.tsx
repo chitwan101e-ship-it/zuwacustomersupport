@@ -1,6 +1,8 @@
 'use client'
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
+import { redirectIfAuthenticated } from '@/lib/authRouting'
 import RelayLogo from '@/components/RelayLogo'
 import { User, Eye, EyeOff, ArrowLeft, CheckCircle2, Loader2 } from 'lucide-react'
 import clsx from 'clsx'
@@ -28,6 +30,7 @@ export default function SignUpPage() {
   const showTurnstile = Boolean(turnstileSiteKey)
 
   const router = useRouter()
+  const supabase = useMemo(() => createClient(), [])
   const [step, setStep] = useState<Step>(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -53,6 +56,17 @@ export default function SignUpPage() {
   const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }))
 
   const otpEnabled = process.env.NEXT_PUBLIC_ENABLE_OTP === 'true'
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (cancelled) return
+      await redirectIfAuthenticated(supabase, router)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [router, supabase])
 
   useEffect(() => {
     if (!showTurnstile) return
@@ -207,7 +221,17 @@ export default function SignUpPage() {
         }
         throw new Error(data.error)
       }
-      setStep(4)
+
+      const { error: signErr } = await supabase.auth.signInWithPassword({
+        email: form.email.trim().toLowerCase(),
+        password: form.password,
+      })
+      if (signErr) {
+        setStep(4)
+        return
+      }
+
+      router.replace('/pending-approval')
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Registration failed')
     } finally {
@@ -592,8 +616,8 @@ export default function SignUpPage() {
               </div>
               <h2 className="font-display font-bold text-2xl mb-2 text-white">Request submitted</h2>
               <p className="text-[#7f8bad] text-sm mb-6">
-                Your account is waiting for approval from the team. After approval, sign in with the same email and
-                password to open the customer portal.
+                Your account is waiting for approval from the team. If you are not redirected automatically, sign in with
+                the same email and password — you will land on a page that updates when you are approved.
               </p>
               <div className="rounded-xl border border-white/10 bg-[#11172a] p-4 text-left space-y-2 text-sm mb-6">
                 <NextStep>Follow businesses you care about</NextStep>

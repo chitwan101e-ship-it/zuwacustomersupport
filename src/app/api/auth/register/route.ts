@@ -96,15 +96,18 @@ export async function POST(req: NextRequest) {
 
     // ── 1. Verify OTP (optional via env flag) ────────────────────────────────
     if (otpEnabled) {
+      const emailKey = String(email).trim().toLowerCase()
       const hashedOtp = hashToken(otp as string)
       const { data: tokenRow, error: tokenErr } = await supabase
         .from('otp_tokens')
-        .select('*')
-        .eq('email', email)
+        .select('id')
+        .eq('email', emailKey)
         .eq('token', hashedOtp)
         .eq('used', false)
+        .eq('purpose', 'signup')
+        .not('verified_at', 'is', null)
         .gte('expires_at', new Date().toISOString())
-        .single()
+        .maybeSingle()
 
       if (tokenErr || !tokenRow) {
         return NextResponse.json({ error: SIGNUP_OTP_VERIFICATION_FAILED }, { status: 400 })

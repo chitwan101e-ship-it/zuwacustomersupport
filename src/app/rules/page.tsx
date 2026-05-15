@@ -31,7 +31,7 @@ export default function RulesPage() {
         data: { session },
       } = await supabase.auth.getSession()
       if (!session?.user) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
       const { data: prof, error } = await supabase
@@ -40,7 +40,7 @@ export default function RulesPage() {
         .eq('id', session.user.id)
         .single()
       if (error || !prof) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
       const row = prof as { role: string; account_status?: string; deleted_at?: string | null }

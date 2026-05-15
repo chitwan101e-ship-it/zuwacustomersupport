@@ -35,8 +35,9 @@ export async function POST(req: NextRequest) {
   try {
     const otpEnabled = process.env.ENABLE_OTP === 'true'
     const body = await req.json()
-    const { email, turnstileToken } = body as { email?: string; turnstileToken?: string }
-    if (!email) return NextResponse.json({ error: 'Email required' }, { status: 400 })
+    const { email: emailRaw, turnstileToken } = body as { email?: string; turnstileToken?: string }
+    if (!emailRaw) return NextResponse.json({ error: 'Email required' }, { status: 400 })
+    const email = emailRaw.trim().toLowerCase()
 
     const ip = getClientIp(req)
 
@@ -65,12 +66,13 @@ export async function POST(req: NextRequest) {
 
     const supabase = createServiceClient()
 
-    // Invalidate previous tokens for this email
+    // Invalidate previous tokens for this email (signup only)
     await supabase
       .from('otp_tokens')
       .update({ used: true })
       .eq('email', email)
       .eq('used', false)
+      .eq('purpose', 'signup')
 
     // Store hashed OTP
     const { error: dbError } = await supabase.from('otp_tokens').insert({
@@ -78,6 +80,7 @@ export async function POST(req: NextRequest) {
       token: hashedOtp,
       expires_at: expiresAt,
       used: false,
+      purpose: 'signup',
     })
     if (dbError) throw dbError
 

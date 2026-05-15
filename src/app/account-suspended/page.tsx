@@ -31,7 +31,7 @@ export default function AccountSuspendedPage() {
         .single()
 
       if (error || !prof) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
       if ((prof as { deleted_at?: string | null }).deleted_at) {

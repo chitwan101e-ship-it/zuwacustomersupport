@@ -55,7 +55,7 @@ export default function ProfilePage() {
       } = await supabase.auth.getSession()
 
       if (!session?.user) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
@@ -68,7 +68,7 @@ export default function ProfilePage() {
         .single()
 
       if (error || !data) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 

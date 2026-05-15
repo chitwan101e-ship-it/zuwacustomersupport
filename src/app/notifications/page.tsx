@@ -1,10 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { CustomerMobileFooterNav } from '@/components/CustomerMobileFooterNav'
+import { CustomerRefreshButton } from '@/components/CustomerRefreshButton'
 import { Bell, ArrowLeft, Loader2, CheckCheck, Home, User } from 'lucide-react'
 
 type ProfileRow = { id: string; role: 'customer' | 'business'; account_status?: string | null }
@@ -34,7 +35,9 @@ export default function NotificationsPage() {
   const [loading, setLoading] = useState(true)
   const [items, setItems] = useState<NotificationRow[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const [listRefreshing, setListRefreshing] = useState(false)
   const [portalRole, setPortalRole] = useState<'customer' | 'business' | null>(null)
+  const userIdRef = useRef<string | null>(null)
 
   const load = useCallback(
     async (uid: string) => {
@@ -62,7 +65,7 @@ export default function NotificationsPage() {
         data: { session },
       } = await supabase.auth.getSession()
       if (!session?.user) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
@@ -73,13 +76,13 @@ export default function NotificationsPage() {
         .single()
 
       if (error || !prof) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
       const p = prof as ProfileRow & { deleted_at?: string | null }
       if (p.role !== 'customer' && p.role !== 'business') {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
@@ -100,6 +103,7 @@ export default function NotificationsPage() {
       }
 
       setPortalRole(p.role)
+      userIdRef.current = session.user.id
       await load(session.user.id)
       if (cancelled) return
       setLoading(false)
@@ -160,6 +164,17 @@ export default function NotificationsPage() {
       if (timer) window.clearInterval(timer)
     }
   }, [loading, supabase, load])
+
+  async function refreshList() {
+    const uid = userIdRef.current
+    if (!uid || listRefreshing) return
+    setListRefreshing(true)
+    try {
+      await load(uid)
+    } finally {
+      setListRefreshing(false)
+    }
+  }
 
   async function markOne(id: string) {
     setBusy(id)
@@ -230,15 +245,23 @@ export default function NotificationsPage() {
           </button>
           <Bell className="w-5 h-5 text-[#8d63ff]" />
           <h1 className="font-semibold text-white">Notifications</h1>
-          <span className="text-xs text-[#7f8bad] ml-1">{unreadCount} unread</span>
-          <button
-            type="button"
-            onClick={() => void markAll()}
-            disabled={busy === 'all' || unreadCount === 0}
-            className="ml-auto text-sm font-medium text-[#8d63ff] disabled:opacity-40"
-          >
-            {busy === 'all' ? 'Marking...' : 'Mark all read'}
-          </button>
+          <span className="text-xs text-[#7f8bad] ml-1 hidden sm:inline">{unreadCount} unread</span>
+          <div className="ml-auto flex items-center gap-1">
+            <CustomerRefreshButton
+              variant="plain"
+              busy={listRefreshing}
+              onRefresh={refreshList}
+              aria-label="Refresh notifications"
+            />
+            <button
+              type="button"
+              onClick={() => void markAll()}
+              disabled={busy === 'all' || unreadCount === 0}
+              className="text-sm font-medium text-[#8d63ff] disabled:opacity-40 px-2 py-1"
+            >
+              {busy === 'all' ? 'Marking...' : 'Mark all read'}
+            </button>
+          </div>
         </div>
       </header>
 

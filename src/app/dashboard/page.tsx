@@ -26,9 +26,9 @@ import {
   Shield,
   Tag,
   BookMarked,
-  Pencil,
   Ban,
   Eye,
+  Pencil,
   EyeOff,
   Trash2,
   ThumbsUp,
@@ -38,6 +38,7 @@ import {
   UserCog,
   X,
 } from 'lucide-react'
+import { ContentModerationMenu } from '@/components/ContentModerationMenu'
 
 type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
 type UsersPanelTab = 'pending' | 'active' | 'suspended'
@@ -77,6 +78,13 @@ type ConvoListItem = {
   labels: InboxLabelRow[]
 }
 
+type ThreadMessageSenderEmbed = {
+  username: string
+  first_name: string
+  last_name: string
+  business_role: 'admin' | 'support' | null
+}
+
 type ThreadMessage = {
   id: string
   sender_id: string
@@ -85,6 +93,24 @@ type ThreadMessage = {
   image_url?: string | null
   read?: boolean | null
   read_at?: string | null
+  profiles?: ThreadMessageSenderEmbed | ThreadMessageSenderEmbed[] | null
+}
+
+const THREAD_MESSAGE_SELECT =
+  'id, sender_id, body, created_at, image_url, read, read_at, profiles ( username, first_name, last_name, business_role )'
+
+function oneEmbed<T>(v: T | T[] | null | undefined): T | null {
+  if (v == null) return null
+  return Array.isArray(v) ? v[0] ?? null : v
+}
+
+function formatTeamSenderLine(embed: ThreadMessageSenderEmbed | null): string | null {
+  if (!embed) return null
+  const name = [embed.first_name, embed.last_name].filter(Boolean).join(' ').trim() || `@${embed.username}`
+  const role =
+    embed.business_role === 'admin' ? 'Admin' : embed.business_role === 'support' ? 'Support' : null
+  const handle = `@${embed.username}`
+  return role ? `${name} · ${handle} · ${role}` : `${name} · ${handle}`
 }
 
 type PendingCustomer = {
@@ -122,6 +148,7 @@ type OwnAnnouncementRow = {
   body: string
   image_url?: string | null
   created_at: string
+  hidden_at?: string | null
 }
 
 type BasicProfile = {
@@ -146,8 +173,21 @@ type EngagementComment = {
   parent_comment_id: string | null
   body: string
   created_at: string
+  hidden_at?: string | null
   userName: string
   userAvatar: string | null
+}
+
+function formatModerationError(e: unknown, action: string): string {
+  const err = e as { message?: string; code?: string; details?: string }
+  if (err?.code === '42703') {
+    return `${action} failed: moderation columns are missing. Run migration 018 in Supabase SQL.`
+  }
+  if (err?.code === '42501' || err?.message?.toLowerCase().includes('permission')) {
+    return `${action} failed: permission denied (RLS). Run migration 019_fix_moderation_rls_select.sql in Supabase SQL, then refresh and retry.`
+  }
+  if (err?.message) return `${action} failed: ${err.message}`
+  return `${action} failed. Try again.`
 }
 
 function engagementCommentsByParent(list: EngagementComment[]) {
@@ -333,6 +373,14 @@ export default function DashboardPage() {
   const [engagementOpen, setEngagementOpen] = useState<{ postId: string; mode: 'likes' | 'comments' } | null>(null)
   const [staffCommentReplyDrafts, setStaffCommentReplyDrafts] = useState<Record<string, string>>({})
   const [staffReplyBusyPostId, setStaffReplyBusyPostId] = useState<string | null>(null)
+  const [editingPostId, setEditingPostId] = useState<string | null>(null)
+  const [editPostTitle, setEditPostTitle] = useState('')
+  const [editPostBody, setEditPostBody] = useState('')
+  const [editPostBusy, setEditPostBusy] = useState(false)
+  const [postModerationBusyId, setPostModerationBusyId] = useState<string | null>(null)
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
+  const [editCommentBody, setEditCommentBody] = useState('')
+  const [commentModerationBusyId, setCommentModerationBusyId] = useState<string | null>(null)
 
   const [loadError, setLoadError] = useState<string | null>(null)
   const [businessInfo, setBusinessInfo] = useState<{ name: string; slug: string } | null>(null)
@@ -710,8 +758,9 @@ export default function DashboardPage() {
       try {
         const { data: ann, error } = await supabase
           .from('announcements')
-          .select('id, title, body, image_url, created_at')
+          .select('id, title, body, image_url, created_at, hidden_at')
           .eq('business_id', businessId)
+          .is('deleted_at', null)
           .order('created_at', { ascending: false })
           .limit(50)
 
@@ -726,7 +775,11 @@ export default function DashboardPage() {
 
         const [{ data: likes }, { data: coms }] = await Promise.all([
           supabase.from('reactions').select('announcement_id, user_id').in('announcement_id', ids).eq('reaction', 'like'),
-          supabase.from('comments').select('id, announcement_id, user_id, parent_comment_id, body, created_at').in('announcement_id', ids),
+          supabase
+            .from('comments')
+            .select('id, announcement_id, user_id, parent_comment_id, body, created_at, hidden_at')
+            .in('announcement_id', ids)
+            .is('deleted_at', null),
         ])
 
         const userIds = new Set<string>()
@@ -798,6 +851,7 @@ export default function DashboardPage() {
               parent_comment_id: row.parent_comment_id ?? null,
               body: row.body,
               created_at: row.created_at,
+              hidden_at: (row as { hidden_at?: string | null }).hidden_at ?? null,
               userName: name,
               userAvatar: profileMap.get(row.user_id)?.avatar_url ?? null,
             })
@@ -819,6 +873,143 @@ export default function DashboardPage() {
     },
     [supabase]
   )
+
+  function beginEditPost(a: OwnAnnouncementRow) {
+    setEditingPostId(a.id)
+    setEditPostTitle(a.title)
+    setEditPostBody(a.body)
+  }
+
+  async function saveEditPost() {
+    const p = profileRef.current
+    if (!p?.business_id || !editingPostId) return
+    const title = editPostTitle.trim()
+    const body = editPostBody.trim()
+    if (!title || !body) return
+    setEditPostBusy(true)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .update({ title, body })
+        .eq('id', editingPostId)
+        .eq('business_id', p.business_id)
+      if (error) throw error
+      setEditingPostId(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Save post'))
+    } finally {
+      setEditPostBusy(false)
+    }
+  }
+
+  async function togglePostHidden(postId: string, currentlyHidden: boolean) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setPostModerationBusyId(postId)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .update({ hidden_at: currentlyHidden ? null : new Date().toISOString() })
+        .eq('id', postId)
+        .eq('business_id', p.business_id)
+      if (error) throw error
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Update post visibility'))
+    } finally {
+      setPostModerationBusyId(null)
+    }
+  }
+
+  async function deletePost(postId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    if (!window.confirm('Delete this post? Customers will no longer see it.')) return
+    setPostModerationBusyId(postId)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', postId)
+        .eq('business_id', p.business_id)
+      if (error) throw error
+      if (editingPostId === postId) setEditingPostId(null)
+      if (engagementOpen?.postId === postId) setEngagementOpen(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Delete post'))
+    } finally {
+      setPostModerationBusyId(null)
+    }
+  }
+
+  function beginEditComment(c: EngagementComment) {
+    setEditingCommentId(c.id)
+    setEditCommentBody(c.body)
+  }
+
+  async function saveEditComment() {
+    const p = profileRef.current
+    if (!p?.business_id || !editingCommentId) return
+    const body = editCommentBody.trim()
+    if (!body) return
+    setCommentModerationBusyId(editingCommentId)
+    try {
+      const { error } = await supabase.from('comments').update({ body }).eq('id', editingCommentId)
+      if (error) throw error
+      setEditingCommentId(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Save comment'))
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function toggleCommentHidden(commentId: string, currentlyHidden: boolean) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setCommentModerationBusyId(commentId)
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .update({ hidden_at: currentlyHidden ? null : new Date().toISOString() })
+        .eq('id', commentId)
+      if (error) throw error
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Update comment visibility'))
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function deleteComment(commentId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    if (!window.confirm('Delete this comment?')) return
+    setCommentModerationBusyId(commentId)
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', commentId)
+      if (error) throw error
+      if (editingCommentId === commentId) setEditingCommentId(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Delete comment'))
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
 
   async function submitStaffCommentReply(postId: string, parentCommentId: string) {
     const p = profileRef.current
@@ -854,21 +1045,21 @@ export default function DashboardPage() {
     let cancelled = false
     async function init() {
       const {
-        data: { session },
-      } = await supabase.auth.getSession()
-      if (!session?.user) {
-        router.replace('/signup')
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        router.replace('/login')
         return
       }
 
       const { data: prof, error } = await supabase
         .from('profiles')
         .select('id, role, username, avatar_url, business_id, business_role, deleted_at, account_status')
-        .eq('id', session.user.id)
+        .eq('id', user.id)
         .single()
 
       if (error || !prof) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
@@ -1517,7 +1708,7 @@ export default function DashboardPage() {
 
       const { data, error } = await supabase
         .from('messages')
-        .select('id, sender_id, body, created_at, image_url, read, read_at')
+        .select(THREAD_MESSAGE_SELECT)
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
       if (error) throw error
@@ -1601,7 +1792,7 @@ export default function DashboardPage() {
           body,
           image_url: imageUrl,
         })
-        .select('id, sender_id, body, created_at, image_url, read, read_at')
+        .select(THREAD_MESSAGE_SELECT)
         .single()
       if (error) throw error
       setThreadMessages((prev) => [...prev, data as ThreadMessage])
@@ -1983,7 +2174,7 @@ export default function DashboardPage() {
   async function signOut() {
     if (!window.confirm('Are you sure you want to sign out?')) return
     await supabase.auth.signOut()
-    router.replace('/signup')
+    router.replace('/login')
   }
 
   const metrics = useMemo(() => {
@@ -2027,16 +2218,16 @@ export default function DashboardPage() {
   }, [cannedReplies, cannedPickerQuery])
 
   const threadSeenIndexes = useMemo(() => {
-    const uid = profile?.id
-    if (!uid || threadMessages.length === 0) return { lastStaff: -1, lastOther: -1 }
+    const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
+    if (!customerId || threadMessages.length === 0) return { lastStaff: -1, lastOther: -1 }
     let lastStaff = -1
     let lastOther = -1
     for (let i = threadMessages.length - 1; i >= 0; i--) {
-      if (lastStaff < 0 && threadMessages[i].sender_id === uid) lastStaff = i
-      if (lastOther < 0 && threadMessages[i].sender_id !== uid) lastOther = i
+      if (lastStaff < 0 && threadMessages[i].sender_id !== customerId) lastStaff = i
+      if (lastOther < 0 && threadMessages[i].sender_id === customerId) lastOther = i
     }
     return { lastStaff, lastOther }
-  }, [threadMessages, profile?.id])
+  }, [threadMessages, selectedConvoId, convoList])
 
   const selectableRecipients = useMemo(() => {
     const map = new Map<string, ActiveMember>()
@@ -2251,6 +2442,14 @@ export default function DashboardPage() {
               <RefreshCw className={`w-4 h-4 ${dashRefreshing ? 'animate-spin' : ''}`} />
               Refresh
             </button>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="lg:hidden inline-flex h-[34px] w-[34px] items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.06] text-[#c4cbe6] hover:bg-white/[0.10] hover:text-white"
+              aria-label="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
         </header>
 
@@ -2433,14 +2632,61 @@ export default function DashboardPage() {
                         className="rounded-2xl border border-white/10 bg-[#0d1428]/90 overflow-hidden shadow-[0_16px_40px_-28px_rgba(30,49,112,0.95)]"
                       >
                         <div className="p-3">
-                          <div className="flex items-center justify-between gap-2 text-xs text-[#7d86a8] mb-2">
-                            <span>{timeAgo(a.created_at)}</span>
-                            <span className="text-[#5c647e] font-mono text-[10px] truncate max-w-[40%]" title={a.id}>
-                              {a.id.slice(0, 8)}…
-                            </span>
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="flex flex-wrap items-center gap-2 text-xs text-[#7d86a8] min-w-0">
+                              <span>{timeAgo(a.created_at)}</span>
+                              {a.hidden_at ? (
+                                <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                                  Hidden
+                                </span>
+                              ) : null}
+                            </div>
+                            <ContentModerationMenu
+                              isHidden={Boolean(a.hidden_at)}
+                              busy={postModerationBusyId === a.id}
+                              onEdit={() => beginEditPost(a)}
+                              onHide={() => void togglePostHidden(a.id, Boolean(a.hidden_at))}
+                              onDelete={() => void deletePost(a.id)}
+                            />
                           </div>
-                          <p className="font-semibold text-white">{a.title}</p>
-                          <p className="text-sm text-[#c4cbe6] mt-1 whitespace-pre-wrap line-clamp-6">{a.body}</p>
+                          {editingPostId === a.id ? (
+                            <div className="space-y-2">
+                              <input
+                                className="w-full rounded-xl border border-white/10 bg-[#111a31] px-3 py-2 text-sm text-white outline-none focus:border-[#6f54ff]"
+                                value={editPostTitle}
+                                onChange={(e) => setEditPostTitle(e.target.value)}
+                                placeholder="Title"
+                              />
+                              <textarea
+                                className="w-full min-h-20 rounded-xl border border-white/10 bg-[#111a31] px-3 py-2 text-sm text-white outline-none focus:border-[#6f54ff]"
+                                value={editPostBody}
+                                onChange={(e) => setEditPostBody(e.target.value)}
+                                placeholder="Body"
+                              />
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={editPostBusy || !editPostTitle.trim() || !editPostBody.trim()}
+                                  onClick={() => void saveEditPost()}
+                                  className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-3 py-2 text-xs font-semibold disabled:opacity-40"
+                                >
+                                  {editPostBusy ? 'Saving…' : 'Save'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingPostId(null)}
+                                  className="rounded-lg border border-white/10 px-3 py-2 text-xs font-medium text-[#c4cbe6] hover:bg-white/[0.06]"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="font-semibold text-white">{a.title}</p>
+                              <p className="text-sm text-[#c4cbe6] mt-1 whitespace-pre-wrap line-clamp-6">{a.body}</p>
+                            </>
+                          )}
                         </div>
                         {a.image_url ? (
                           <div className="px-4 pb-3">
@@ -2528,8 +2774,51 @@ export default function DashboardPage() {
                                         )}
                                         <div className="min-w-0 flex-1 space-y-2">
                                           <div className="rounded-2xl border border-white/10 bg-[#131d3d] px-3 py-2">
-                                            <p className="text-sm text-white font-medium leading-tight">{c.userName}</p>
-                                            <p className="text-sm text-[#c4cbe6] mt-0.5 break-words whitespace-pre-wrap">{c.body}</p>
+                                            <div className="flex items-start justify-between gap-2">
+                                              <div className="min-w-0 flex-1">
+                                                <p className="text-sm text-white font-medium leading-tight">{c.userName}</p>
+                                                {c.hidden_at ? (
+                                                  <span className="mt-0.5 inline-block rounded border border-amber-500/30 bg-amber-500/10 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-200">
+                                                    Hidden
+                                                  </span>
+                                                ) : null}
+                                              </div>
+                                              <ContentModerationMenu
+                                                isHidden={Boolean(c.hidden_at)}
+                                                busy={commentModerationBusyId === c.id}
+                                                onEdit={() => beginEditComment(c)}
+                                                onHide={() => void toggleCommentHidden(c.id, Boolean(c.hidden_at))}
+                                                onDelete={() => void deleteComment(c.id)}
+                                              />
+                                            </div>
+                                            {editingCommentId === c.id ? (
+                                              <div className="mt-2 space-y-2">
+                                                <textarea
+                                                  className="w-full min-h-16 rounded-xl border border-white/10 bg-[#111a31] px-2.5 py-2 text-sm text-white outline-none focus:border-[#6f54ff]"
+                                                  value={editCommentBody}
+                                                  onChange={(e) => setEditCommentBody(e.target.value)}
+                                                />
+                                                <div className="flex flex-wrap gap-2">
+                                                  <button
+                                                    type="button"
+                                                    disabled={commentModerationBusyId === c.id || !editCommentBody.trim()}
+                                                    onClick={() => void saveEditComment()}
+                                                    className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
+                                                  >
+                                                    Save
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => setEditingCommentId(null)}
+                                                    className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-[#c4cbe6]"
+                                                  >
+                                                    Cancel
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            ) : (
+                                              <p className="text-sm text-[#c4cbe6] mt-0.5 break-words whitespace-pre-wrap">{c.body}</p>
+                                            )}
                                             <p className="text-[11px] text-[#7d86a8] mt-1">{timeAgo(c.created_at)}</p>
                                           </div>
                                           <div className="flex flex-wrap items-center gap-2">
@@ -2945,25 +3234,40 @@ export default function DashboardPage() {
                           <p className="text-sm text-[#7d86a8] py-6 text-center">No messages yet. Say hello below.</p>
                         ) : (
                           threadMessages.map((m, i) => {
-                            const mine = m.sender_id === profile.id
+                            const isFromTeam = m.sender_id !== selectedConvo.customer_id
+                            const teamLine = isFromTeam
+                              ? formatTeamSenderLine(oneEmbed(m.profiles))
+                              : null
                             const showText = Boolean(m.body?.trim()) && m.body !== '📷'
                             const showSeen =
                               m.read === true &&
                               m.read_at &&
-                              ((mine && i === threadSeenIndexes.lastStaff) || (!mine && i === threadSeenIndexes.lastOther))
+                              ((isFromTeam && i === threadSeenIndexes.lastStaff) ||
+                                (!isFromTeam && i === threadSeenIndexes.lastOther))
                             return (
-                              <div key={m.id} className={`flex flex-col w-full min-w-0 ${mine ? 'items-end' : 'items-start'}`}>
-                                <div className={`flex w-full min-w-0 ${mine ? 'justify-end' : 'justify-start'}`}>
+                              <div
+                                key={m.id}
+                                className={`flex flex-col w-full min-w-0 ${isFromTeam ? 'items-end' : 'items-start'}`}
+                              >
+                                {teamLine ? (
+                                  <p
+                                    className="text-[10px] text-[#7d86a8] px-1 pb-0.5 font-medium truncate max-w-full text-right"
+                                    title={teamLine}
+                                  >
+                                    {teamLine}
+                                  </p>
+                                ) : null}
+                                <div className={`flex w-full min-w-0 ${isFromTeam ? 'justify-end' : 'justify-start'}`}>
                                   <div
                                     className={`w-fit max-w-[min(85%,24rem)] shrink-0 rounded-2xl px-3 py-2 text-sm ${
-                                      mine ? 'bg-[#6f54ff] text-white' : 'bg-[#151d39] text-[#e2e6f5]'
+                                      isFromTeam ? 'bg-[#6f54ff] text-white' : 'bg-[#151d39] text-[#e2e6f5]'
                                     }`}
                                   >
                                     {m.image_url ? (
                                       <img src={m.image_url} alt="" className="rounded-lg max-h-40 mb-1 max-w-full w-full object-cover" />
                                     ) : null}
                                     {showText ? <p className="whitespace-pre-wrap break-words">{m.body}</p> : null}
-                                    <p className={`text-[10px] mt-1 ${mine ? 'text-white/70' : 'text-[#7d86a8]'}`}>
+                                    <p className={`text-[10px] mt-1 ${isFromTeam ? 'text-white/70' : 'text-[#7d86a8]'}`}>
                                       {timeAgo(m.created_at)}
                                     </p>
                                   </div>
@@ -3409,16 +3713,16 @@ export default function DashboardPage() {
         {activeTab === 'team' && isAdmin ? (
           <section className="space-y-4 max-w-3xl">
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
-              Everyone on the business team shares this dashboard: inbox, users, posts, and reports. Customers see each agent&apos;s name and
-              @handle in support threads. Only admins can add or remove support accounts below.
+              Everyone on the business team shares this dashboard: inbox, users, posts, and reports. Customers see who sent each reply; in your
+              inbox you see the same for every admin and support agent. Only admins can add or remove support accounts below.
             </p>
             {isAdmin ? (
               <div className="rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] p-4 space-y-3">
                 <h3 className="text-sm font-semibold text-white">Add support staff</h3>
                 <p className="text-[11px] text-[#8892b0]">
                   They sign in at Relay with <strong className="text-[#c4cbe6]">email + password</strong> (same login page as you). Username is their
-                  public <strong className="text-[#c4cbe6]">@handle</strong> in threads (lowercase, digits, underscore; 3–30 chars). Only{' '}
-                  <strong className="text-[#c4cbe6]">first name</strong> is collected here (display name in chat). Up to 4 support agents per business.
+                  public <strong className="text-[#c4cbe6]">@handle</strong> for sign-in (lowercase, digits, underscore; 3–30 chars). Only{' '}
+                  <strong className="text-[#c4cbe6]">first name</strong> is collected here for your records. Up to 4 support agents per business.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <input

@@ -1,9 +1,10 @@
 ﻿'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { finalizeSessionAfterSignIn, redirectIfAuthenticated } from '@/lib/authRouting'
 import RelayLogo from '@/components/RelayLogo'
 import { Loader2, Eye, EyeOff } from 'lucide-react'
 
@@ -20,8 +21,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
-  const [resetBusy, setResetBusy] = useState(false)
-  const [resetSent, setResetSent] = useState(false)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -31,90 +30,16 @@ export default function LoginPage() {
     if (q.get('reset') === 'ok') setInfo('Password updated. Sign in with your new password.')
   }, [])
 
-  const finalizeSessionRouting = useCallback(async () => {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) throw new Error('No user after sign-in')
-
-    const { data: prof, error: pErr } = await supabase
-      .from('profiles')
-      .select('role, business_role, account_status, deleted_at')
-      .eq('id', user.id)
-      .single()
-
-    if (pErr || !prof) {
-      await supabase.auth.signOut()
-      throw new Error(
-        'No profile found for this account. If you are staff, your admin should add you from the dashboard. Customers should complete Create Account first.'
-      )
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (cancelled) return
+      await redirectIfAuthenticated(supabase, router)
+    })()
+    return () => {
+      cancelled = true
     }
-
-    if ((prof as { deleted_at?: string | null }).deleted_at) {
-      await supabase.auth.signOut()
-      throw new Error('This account has been removed.')
-    }
-
-    if (prof.role === 'customer' && prof.account_status === 'suspended') {
-      router.replace('/account-suspended')
-      return
-    }
-
-    if (prof.role === 'customer' && prof.account_status !== 'approved') {
-      router.replace('/pending-approval')
-      return
-    }
-
-    if (prof.account_status !== 'approved') {
-      await supabase.auth.signOut()
-      throw new Error(
-        prof.account_status === 'pending'
-          ? 'Your staff account is pending approval.'
-          : prof.account_status === 'rejected'
-            ? 'Your access request was rejected.'
-            : prof.account_status === 'suspended'
-              ? 'Your account is suspended. Contact support.'
-              : 'Your account is blocked. Contact support.'
-      )
-    }
-
-    if (prof.role === 'business' && prof.business_role) {
-      router.replace('/dashboard')
-      return
-    }
-
-    if (prof.role === 'business' && !prof.business_role) {
-      await supabase.auth.signOut()
-      throw new Error(
-        'Your staff profile is incomplete. Ask your business admin to fix your account or recreate it from the dashboard Team tab.'
-      )
-    }
-
-    router.replace('/feed')
   }, [router, supabase])
-
-  async function sendPasswordReset() {
-    const em = email.trim()
-    if (!em.includes('@')) {
-      setError('Password reset only works with an email address. Legacy staff-only IDs cannot use this link.')
-      return
-    }
-    setError('')
-    setInfo('')
-    setResetBusy(true)
-    try {
-      const { error: rErr } = await supabase.auth.resetPasswordForEmail(em, {
-        redirectTo: `${window.location.origin}/auth/callback?next=/update-password`,
-      })
-      if (rErr) throw rErr
-      setResetSent(true)
-      setInfo('Check your email for a reset link.')
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Could not send reset email.')
-    } finally {
-      setResetBusy(false)
-    }
-  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -146,7 +71,7 @@ export default function LoginPage() {
         if (signErr) throw signErr
       }
 
-      await finalizeSessionRouting()
+      await finalizeSessionAfterSignIn(supabase, router)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Sign in failed')
     } finally {
@@ -217,17 +142,14 @@ export default function LoginPage() {
 
             {error ? <p className="text-red-400 text-sm">{error}</p> : null}
             {info ? <p className="text-emerald-400/90 text-sm">{info}</p> : null}
-            {resetSent ? <p className="text-[#7f8bad] text-sm">If an account exists for that email, a reset link is on the way.</p> : null}
 
             <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={() => void sendPasswordReset()}
-                disabled={resetBusy}
-                className="text-sm text-[#8d63ff] hover:underline disabled:opacity-50"
+              <Link
+                href={email.trim() ? `/reset-password?i=${encodeURIComponent(email.trim())}` : '/reset-password'}
+                className="text-sm text-[#8d63ff] hover:underline"
               >
-                {resetBusy ? 'Sending…' : 'Forgot password?'}
-              </button>
+                Forgot password?
+              </Link>
             </div>
 
             <button

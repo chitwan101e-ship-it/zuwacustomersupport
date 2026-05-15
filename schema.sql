@@ -60,10 +60,28 @@ create table public.otp_tokens (
   token      text not null,                  -- 6-digit code (hashed)
   expires_at timestamptz not null,
   used       boolean default false,
+  purpose    text not null default 'signup' check (purpose in ('signup', 'password_reset')),
   created_at timestamptz default now()
 );
 
 create index idx_otp_email on public.otp_tokens(email);
+create index idx_otp_tokens_email_purpose_active on public.otp_tokens (email, purpose) where used = false;
+
+create or replace function public.relay_auth_user_id_for_email(p_email text)
+returns uuid
+language sql
+security definer
+set search_path = auth
+stable
+as $$
+  select u.id
+  from auth.users u
+  where lower(trim(u.email::text)) = lower(trim(p_email))
+  limit 1;
+$$;
+
+revoke all on function public.relay_auth_user_id_for_email(text) from public;
+grant execute on function public.relay_auth_user_id_for_email(text) to service_role;
 
 -- Auto-delete used/expired tokens after 1 hour (optional cron approach)
 -- Alternatively, use Supabase's pg_cron extension.
@@ -194,6 +212,21 @@ as $$
   );
 $$;
 
+create or replace function public.is_business_user()
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = auth.uid()
+      and role = 'business'
+      and business_id is not null
+  );
+$$;
+
 -- Enable RLS on all tables
 alter table public.businesses     enable row level security;
 alter table public.profiles       enable row level security;
@@ -209,9 +242,45 @@ alter table public.follows        enable row level security;
 create policy "businesses_read"   on public.businesses for select using (true);
 create policy "businesses_insert" on public.businesses for insert with check (false); -- via service role API only
 
--- PROFILES: own row full access; others can read public fields
-create policy "profiles_own"      on public.profiles for all    using (id = auth.uid());
-create policy "profiles_read"     on public.profiles for select using (true);
+-- PROFILES: least-privilege RLS (see migration 020_harden_profiles_rls.sql)
+create policy "profiles_select_own" on public.profiles for select using (id = auth.uid());
+create policy "profiles_select_business_team" on public.profiles for select
+  using (role = 'business' and business_id is not null and public.is_business_member(business_id));
+create policy "profiles_select_business_customers" on public.profiles for select
+  using (
+    role = 'customer'
+    and account_status in ('approved', 'suspended')
+    and deleted_at is null
+    and (
+      exists (
+        select 1 from public.conversations c
+        where c.customer_id = profiles.id and public.is_business_member(c.business_id)
+      )
+      or exists (
+        select 1 from public.follows f
+        where f.user_id = profiles.id and public.is_business_member(f.business_id)
+      )
+    )
+  );
+create policy "profiles_select_business_broadcast" on public.profiles for select
+  using (
+    role = 'customer' and account_status = 'approved' and deleted_at is null and public.is_business_user()
+  );
+create policy "profiles_select_display" on public.profiles for select
+  using (
+    auth.uid() is not null
+    and deleted_at is null
+    and (role = 'business' or (role = 'customer' and account_status = 'approved'))
+  );
+create policy "profiles_update_avatar_own" on public.profiles for update
+  using (id = auth.uid())
+  with check (id = auth.uid());
+
+revoke all on table public.profiles from anon;
+revoke update on table public.profiles from anon, authenticated;
+grant select on table public.profiles to authenticated;
+revoke select (phone, phone_normalized) on table public.profiles from authenticated;
+grant update (avatar_url) on table public.profiles to authenticated;
 
 -- OTP TOKENS: only service role (API route) touches these
 create policy "otp_none"          on public.otp_tokens for all  using (false);
@@ -239,7 +308,7 @@ create policy "convo_customer"    on public.conversations for select
 create policy "convo_business"    on public.conversations for select
   using (public.is_business_member(business_id));
 create policy "convo_insert"      on public.conversations for insert
-  with check (customer_id = auth.uid());
+  with check (customer_id = auth.uid() and public.is_approved_user());
 create policy "convo_update_biz"  on public.conversations for update
   using (public.is_business_member(business_id));
 
@@ -254,11 +323,14 @@ create policy "msg_read"          on public.messages for select
     )
   );
 create policy "msg_insert"        on public.messages for insert
-  with check (sender_id = auth.uid());
+  with check (sender_id = auth.uid() and public.is_approved_user());
 
--- FOLLOWS: users manage their own
+-- FOLLOWS: approved customers may follow/unfollow; staff approval inserts use service role
 create policy "follows_read"      on public.follows for select using (true);
-create policy "follows_own"       on public.follows for all    using (user_id = auth.uid());
+create policy "follows_insert_approved" on public.follows for insert
+  with check (user_id = auth.uid() and public.is_approved_user());
+create policy "follows_delete_own" on public.follows for delete
+  using (user_id = auth.uid());
 
 -- ────────────────────────────────────────────────────────────
 -- 11. REALTIME (enable for live messaging & announcements)

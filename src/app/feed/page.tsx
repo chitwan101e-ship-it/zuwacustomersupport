@@ -13,6 +13,7 @@ import {
 } from '@/lib/customerMessaging'
 import RelayLogo from '@/components/RelayLogo'
 import { CustomerMobileFooterNav } from '@/components/CustomerMobileFooterNav'
+import { CustomerRefreshButton } from '@/components/CustomerRefreshButton'
 import clsx from 'clsx'
 import {
   ThumbsUp,
@@ -31,6 +32,7 @@ import {
   Check,
   CheckCheck,
 } from 'lucide-react'
+import { ContentModerationMenu } from '@/components/ContentModerationMenu'
 
 type ProfileRow = {
   id: string
@@ -59,6 +61,7 @@ type CommentRow = {
   body: string
   created_at: string
   user_id: string
+  hidden_at?: string | null
   profiles: ProfileEmbed | ProfileEmbed[] | null
 }
 type ConversationRow = { id: string; business_id: string; customer_id: string; status: string }
@@ -173,6 +176,9 @@ export default function FeedPage() {
   const [busyAnn, setBusyAnn] = useState<string | null>(null)
   const [replyThreadTarget, setReplyThreadTarget] = useState<{ annId: string; parentId: string } | null>(null)
   const [replyThreadDraft, setReplyThreadDraft] = useState('')
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
+  const [editCommentBody, setEditCommentBody] = useState('')
+  const [commentModerationBusyId, setCommentModerationBusyId] = useState<string | null>(null)
 
   const [businesses, setBusinesses] = useState<BusinessRow[]>([])
   const [supportBizId, setSupportBizId] = useState<string>('')
@@ -186,6 +192,8 @@ export default function FeedPage() {
   const [chatPreviews, setChatPreviews] = useState<Map<string, ChatPreview>>(new Map())
   const [followedBusinessIds, setFollowedBusinessIds] = useState<string[]>([])
   const [toast, setToast] = useState<string | null>(null)
+  const [feedRefreshing, setFeedRefreshing] = useState(false)
+  const [messagesRefreshing, setMessagesRefreshing] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
   const [supportPanelView, setSupportPanelView] = useState<'list' | 'chat'>('list')
   const [appearance, setAppearance] = useState<AppearanceMode>(() => getStoredAppearance())
@@ -241,6 +249,8 @@ export default function FeedPage() {
         `
         )
         .in('business_id', followIds)
+        .is('deleted_at', null)
+        .is('hidden_at', null)
         .order('created_at', { ascending: false })
 
       if (annErr) {
@@ -287,10 +297,12 @@ export default function FeedPage() {
           body,
           created_at,
           user_id,
+          hidden_at,
           profiles ( username, first_name, last_name, avatar_url )
         `
         )
         .in('announcement_id', ids)
+        .is('deleted_at', null)
         .order('created_at', { ascending: true })
 
       if (comErr) {
@@ -336,6 +348,38 @@ export default function FeedPage() {
     [supabase]
   )
 
+  const refreshFeed = useCallback(async () => {
+    const uid = profile?.id
+    if (!uid || feedRefreshing) return
+    setFeedRefreshing(true)
+    try {
+      const { data: followsRows } = await supabase.from('follows').select('business_id').eq('user_id', uid)
+      const fids = (followsRows || []).map((r) => (r as { business_id: string }).business_id)
+      followedBusinessIdsRef.current = fids
+      setFollowedBusinessIds(fids)
+      await Promise.all([
+        loadAnnouncements(uid, fids),
+        loadUnreadNotifications(uid),
+        refreshMessagingUI(uid),
+      ])
+      setToast('Feed updated')
+      window.setTimeout(() => setToast(null), 2200)
+    } catch (e) {
+      console.error(e)
+      showToast('Could not refresh feed. Try again.')
+    } finally {
+      setFeedRefreshing(false)
+    }
+  }, [
+    profile?.id,
+    feedRefreshing,
+    supabase,
+    loadAnnouncements,
+    loadUnreadNotifications,
+    refreshMessagingUI,
+    showToast,
+  ])
+
   useEffect(() => {
     let cancelled = false
 
@@ -345,7 +389,7 @@ export default function FeedPage() {
         data: { session },
       } = await supabase.auth.getSession()
       if (!session?.user) {
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
@@ -357,7 +401,7 @@ export default function FeedPage() {
 
       if (pErr || !prof) {
         console.error(pErr)
-        router.replace('/signup')
+        router.replace('/login')
         return
       }
 
@@ -525,6 +569,88 @@ export default function FeedPage() {
     }
   }
 
+  function beginEditComment(c: CommentRow) {
+    setEditingCommentId(c.id)
+    setEditCommentBody(c.body)
+  }
+
+  async function saveEditComment(announcementId: string) {
+    if (!profile || !editingCommentId) return
+    const body = editCommentBody.trim()
+    if (!body) return
+    setCommentModerationBusyId(editingCommentId)
+    try {
+      const { error } = await supabase.from('comments').update({ body }).eq('id', editingCommentId).eq('user_id', profile.id)
+      if (error) throw error
+      setCommentsByAnn((prev) => ({
+        ...prev,
+        [announcementId]: (prev[announcementId] || []).map((c) => (c.id === editingCommentId ? { ...c, body } : c)),
+      }))
+      setEditingCommentId(null)
+    } catch (e) {
+      console.error(e)
+      showToast('Could not save comment.')
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function toggleCommentHidden(announcementId: string, commentId: string, currentlyHidden: boolean) {
+    if (!profile) return
+    setCommentModerationBusyId(commentId)
+    const hidden_at = currentlyHidden ? null : new Date().toISOString()
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .update({ hidden_at })
+        .eq('id', commentId)
+        .eq('user_id', profile.id)
+      if (error) throw error
+      if (hidden_at) {
+        setCommentsByAnn((prev) => ({
+          ...prev,
+          [announcementId]: (prev[announcementId] || []).map((c) => (c.id === commentId ? { ...c, hidden_at } : c)),
+        }))
+      } else {
+        setCommentsByAnn((prev) => ({
+          ...prev,
+          [announcementId]: (prev[announcementId] || []).map((c) =>
+            c.id === commentId ? { ...c, hidden_at: null } : c
+          ),
+        }))
+      }
+    } catch (e) {
+      console.error(e)
+      showToast('Could not update comment visibility.')
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function deleteComment(announcementId: string, commentId: string) {
+    if (!profile) return
+    if (!window.confirm('Delete this comment?')) return
+    setCommentModerationBusyId(commentId)
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', commentId)
+        .eq('user_id', profile.id)
+      if (error) throw error
+      setCommentsByAnn((prev) => ({
+        ...prev,
+        [announcementId]: (prev[announcementId] || []).filter((c) => c.id !== commentId),
+      }))
+      if (editingCommentId === commentId) setEditingCommentId(null)
+    } catch (e) {
+      console.error(e)
+      showToast('Could not delete comment.')
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
   async function submitCommentReply(announcementId: string, parentCommentId: string) {
     if (!profile) return
     const text = replyThreadDraft.trim()
@@ -600,6 +726,32 @@ export default function FeedPage() {
     },
     [supabase, profile?.id, refreshMessagingUI, loadUnreadNotifications]
   )
+
+  const refreshMessagesPanel = useCallback(async () => {
+    const uid = profile?.id
+    if (!uid || messagesRefreshing) return
+    setMessagesRefreshing(true)
+    try {
+      const tasks: Promise<unknown>[] = [refreshMessagingUI(uid)]
+      if (supportPanelView === 'chat' && conversation?.id) {
+        tasks.push(loadConversationMessages(conversation.id))
+      }
+      await Promise.all(tasks)
+    } catch (e) {
+      console.error(e)
+      showToast('Could not refresh messages. Try again.')
+    } finally {
+      setMessagesRefreshing(false)
+    }
+  }, [
+    profile?.id,
+    messagesRefreshing,
+    supportPanelView,
+    conversation?.id,
+    refreshMessagingUI,
+    loadConversationMessages,
+    showToast,
+  ])
 
   /**
    * Which business receives footer / primary Support chat.
@@ -1145,10 +1297,16 @@ export default function FeedPage() {
               <RelayLogo theme={isLight ? 'light' : 'dark'} size="md" className="min-w-0" />
             </div>
             <div
-              className={`flex items-center gap-1.5 shrink-0 rounded-full p-1 ${
+              className={`flex items-center gap-1.5 shrink-0 overflow-visible rounded-full p-1 pr-1.5 ${
                 isLight ? 'bg-slate-100/80 ring-1 ring-slate-200/80' : 'bg-black/20 ring-1 ring-white/[0.07]'
               }`}
             >
+              <CustomerRefreshButton
+                busy={feedRefreshing}
+                isLight={isLight}
+                onRefresh={refreshFeed}
+                aria-label="Refresh feed"
+              />
               <button
                 type="button"
                 onClick={() => router.push('/notifications')}
@@ -1169,24 +1327,27 @@ export default function FeedPage() {
               <button
                 type="button"
                 onClick={() => router.push('/profile')}
-                className="relative flex h-10 w-10 items-center justify-center rounded-full overflow-hidden ring-1 ring-white/15"
+                className="relative h-10 w-10 shrink-0"
                 aria-label="Open profile"
               >
-                {profile.avatar_url ? (
-                  <img
-                    src={profile.avatar_url}
-                    alt={`${profile.username} avatar`}
-                    className="w-full h-full rounded-full object-cover"
-                  />
-                ) : (
-                  <div className="w-full h-full rounded-full bg-[#d23a34] text-white flex items-center justify-center text-xs font-bold">
-                    {initials(profile.username)}
-                  </div>
-                )}
+                <span className="block h-10 w-10 overflow-hidden rounded-full ring-1 ring-white/15">
+                  {profile.avatar_url ? (
+                    <img
+                      src={profile.avatar_url}
+                      alt={`${profile.username} avatar`}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <span className="flex h-full w-full items-center justify-center rounded-full bg-[#d23a34] text-xs font-bold text-white">
+                      {initials(profile.username)}
+                    </span>
+                  )}
+                </span>
                 <span
-                  className={`pointer-events-none absolute bottom-0.5 right-0.5 w-2.5 h-2.5 rounded-full bg-[#2fd17f] ring-[2.5px] ${
-                    isLight ? 'ring-white' : 'ring-[#0b1228]'
+                  className={`pointer-events-none absolute bottom-0 right-0 box-border h-3 w-3 rounded-full border-2 bg-[#22c55e] shadow-[0_0_0_1px_rgba(0,0,0,0.2)] ${
+                    isLight ? 'border-white' : 'border-[#0b1228]'
                   }`}
+                  aria-hidden
                 />
               </button>
             </div>
@@ -1324,6 +1485,7 @@ export default function FeedPage() {
                 const who = p ? `${p.first_name} ${p.last_name}`.trim() || p.username : 'Member'
                 const kids = byParent.get(c.id) || []
                 const isReplying = replyThreadTarget?.annId === a.id && replyThreadTarget?.parentId === c.id
+                const isOwn = profile?.id === c.user_id
                 return (
                   <li key={c.id} className="flex gap-2 text-sm">
                     {p?.avatar_url ? (
@@ -1342,12 +1504,67 @@ export default function FeedPage() {
                     )}
                     <div className="min-w-0 flex-1">
                       <div
-                        className={`inline-block max-w-full rounded-2xl px-3 py-2 border ${
+                        className={`max-w-full rounded-2xl px-3 py-2 border ${
                           isLight ? 'bg-white border-slate-200' : 'bg-[#131d3d] border-white/10'
-                        }`}
+                        } ${c.hidden_at ? 'opacity-70' : ''}`}
                       >
-                        <span className={`font-semibold ${isLight ? 'text-slate-900' : 'text-white'}`}>{who}</span>
-                        <p className={`mt-0.5 whitespace-pre-wrap ${isLight ? 'text-slate-700' : 'text-[#d4dbf0]'}`}>{c.body}</p>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className={`font-semibold ${isLight ? 'text-slate-900' : 'text-white'}`}>{who}</span>
+                            {c.hidden_at ? (
+                              <span
+                                className={`ml-2 text-[10px] font-semibold uppercase ${
+                                  isLight ? 'text-amber-700' : 'text-amber-200'
+                                }`}
+                              >
+                                Hidden
+                              </span>
+                            ) : null}
+                          </div>
+                          {isOwn ? (
+                            <ContentModerationMenu
+                              isHidden={Boolean(c.hidden_at)}
+                              busy={commentModerationBusyId === c.id}
+                              onEdit={() => beginEditComment(c)}
+                              onHide={() => void toggleCommentHidden(a.id, c.id, Boolean(c.hidden_at))}
+                              onDelete={() => void deleteComment(a.id, c.id)}
+                              className="shrink-0"
+                            />
+                          ) : null}
+                        </div>
+                        {editingCommentId === c.id ? (
+                          <div className="mt-2 space-y-2">
+                            <textarea
+                              className={`w-full min-h-14 rounded-xl border px-2.5 py-2 text-sm outline-none ${
+                                isLight ? 'border-slate-200 bg-slate-50 text-slate-900' : 'border-white/10 bg-[#0f1a38] text-white'
+                              }`}
+                              value={editCommentBody}
+                              onChange={(e) => setEditCommentBody(e.target.value)}
+                            />
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                disabled={commentModerationBusyId === c.id || !editCommentBody.trim()}
+                                onClick={() => void saveEditComment(a.id)}
+                                className="rounded-lg px-2.5 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                                style={{ backgroundColor: fbBlue }}
+                              >
+                                Save
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingCommentId(null)}
+                                className={`rounded-lg border px-2.5 py-1 text-xs font-medium ${
+                                  isLight ? 'border-slate-200 text-slate-600' : 'border-white/10 text-[#c4cbe6]'
+                                }`}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className={`mt-0.5 whitespace-pre-wrap ${isLight ? 'text-slate-700' : 'text-[#d4dbf0]'}`}>{c.body}</p>
+                        )}
                       </div>
                       <div className="mt-1 ml-1 flex flex-wrap items-center gap-2">
                         <p className={`text-[11px] ${mutedText}`}>{timeAgo(c.created_at)}</p>
@@ -1611,14 +1828,24 @@ export default function FeedPage() {
                 </div>
               </>
             )}
-            <button
-              type="button"
-              onClick={() => closeMessagesPanel()}
-              className="p-2 rounded-full hover:bg-white/20 shrink-0 ml-auto"
-              aria-label="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-0.5 shrink-0 ml-auto">
+              <CustomerRefreshButton
+                variant="panel"
+                busy={messagesRefreshing}
+                onRefresh={refreshMessagesPanel}
+                aria-label={
+                  supportPanelView === 'chat' ? 'Refresh conversation' : 'Refresh message list'
+                }
+              />
+              <button
+                type="button"
+                onClick={() => closeMessagesPanel()}
+                className="p-2 rounded-full hover:bg-white/20 shrink-0"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {supportPanelView === 'list' && (
@@ -1716,7 +1943,10 @@ export default function FeedPage() {
                         )}
                       >
                         {teamLine ? (
-                          <p className="text-[10px] text-[#aeb7d6] px-1 pb-0.5 font-medium truncate max-w-full" title={teamLine}>
+                          <p
+                            className="text-[10px] text-[#aeb7d6] px-1 pb-0.5 font-medium truncate max-w-full"
+                            title={teamLine}
+                          >
                             {teamLine}
                           </p>
                         ) : null}
