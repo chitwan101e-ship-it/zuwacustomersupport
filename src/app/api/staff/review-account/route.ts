@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { sendApprovalWelcomeMessage } from '@/lib/approvalWelcomeMessage'
 import { notifyBusinessTeamAdmins } from '@/lib/notifyStaffAdmins'
+import { sendAccountApprovedEmail } from '@/lib/sendApprovalEmail'
 
 export async function POST(req: NextRequest) {
   try {
@@ -116,6 +118,24 @@ export async function POST(req: NextRequest) {
           link: '/feed',
         })
         if (nErr) console.error('[review-account] customer notification:', nErr)
+
+        await sendApprovalWelcomeMessage(admin, {
+          businessId: bid,
+          customerId: targetUserId,
+          staffSenderId: user.id,
+          customerName: name,
+          username: t.username,
+          businessName,
+        })
+
+        if (email && email !== '—' && email.includes('@')) {
+          await sendAccountApprovedEmail({
+            to: email,
+            customerName: name,
+            username: t.username,
+            businessName,
+          })
+        }
       }
     }
 

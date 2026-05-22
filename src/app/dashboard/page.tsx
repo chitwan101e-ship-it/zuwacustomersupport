@@ -132,6 +132,7 @@ type ActiveMember = {
   last_name: string
   username: string
   account_status: string
+  avatar_url?: string | null
 }
 
 type ReportItem = {
@@ -388,6 +389,8 @@ export default function DashboardPage() {
   const [suspendedMembers, setSuspendedMembers] = useState<ActiveMember[]>([])
   const [usersPanelTab, setUsersPanelTab] = useState<UsersPanelTab>('pending')
   const [modBusyId, setModBusyId] = useState<string | null>(null)
+  const [memberMessageDrafts, setMemberMessageDrafts] = useState<Record<string, string>>({})
+  const [memberSendBusyId, setMemberSendBusyId] = useState<string | null>(null)
   const [dashRefreshing, setDashRefreshing] = useState(false)
   const [inboxContactOpen, setInboxContactOpen] = useState(false)
   const [staffNotifyUnread, setStaffNotifyUnread] = useState(0)
@@ -733,7 +736,7 @@ export default function DashboardPage() {
       } else {
         const { data: memberRows, error: me } = await supabase
           .from('profiles')
-          .select('id, first_name, last_name, username, account_status')
+          .select('id, first_name, last_name, username, account_status, avatar_url')
           .in('id', merged)
           .eq('role', 'customer')
           .in('account_status', ['approved', 'suspended'])
@@ -1746,6 +1749,86 @@ export default function DashboardPage() {
     }
   }
 
+  async function insertStaffMessageToConversation(
+    conversationId: string,
+    rawText: string,
+    pendingImage: { blob: Blob; previewUrl: string } | null
+  ): Promise<ThreadMessage | null> {
+    const p = profileRef.current
+    if (!p) return null
+    const text = rawText.trim()
+    const hasImage = !!pendingImage
+    if (!text && !hasImage) return null
+
+    let imageUrl: string | null = null
+    if (hasImage && pendingImage) {
+      const path = `${p.id}/${conversationId}/${crypto.randomUUID()}.jpg`
+      const { error: upErr } = await supabase.storage
+        .from('message-images')
+        .upload(path, pendingImage.blob, {
+          contentType: 'image/jpeg',
+          upsert: false,
+        })
+      if (upErr) throw upErr
+      const { data: pub } = supabase.storage.from('message-images').getPublicUrl(path)
+      imageUrl = pub.publicUrl
+    }
+
+    const body = text || (imageUrl ? '📷' : ' ')
+
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: conversationId,
+        sender_id: p.id,
+        body,
+        image_url: imageUrl,
+      })
+      .select(THREAD_MESSAGE_SELECT)
+      .single()
+    if (error) throw error
+
+    const msg = data as ThreadMessage
+    if (selectedConvoIdRef.current === conversationId) {
+      setThreadMessages((prev) => [...prev, msg])
+    }
+
+    await supabase.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversationId)
+
+    const row = data as { body: string }
+    let preview = (row.body ?? '').trim().slice(0, 160)
+    if (!preview) preview = '📷 Reply'
+    void fetch('/api/staff/notify-customer-reply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId, preview }),
+    }).then(async (res) => {
+      if (res.ok) return
+      const j = (await res.json().catch(() => ({}))) as { error?: string }
+      console.error('notify-customer-reply failed:', res.status, j.error ?? j)
+      if (!p.business_id) return
+      const { data: convo, error: convoErr } = await supabase
+        .from('conversations')
+        .select('customer_id')
+        .eq('id', conversationId)
+        .single()
+      if (convoErr || !(convo as { customer_id?: string } | null)?.customer_id) return
+      const customerId = (convo as { customer_id: string }).customer_id
+      const { error: nErr } = await supabase.from('notifications').insert({
+        user_id: customerId,
+        business_id: p.business_id,
+        type: 'support_reply',
+        title: 'New reply from the team',
+        body: preview,
+        link: '/feed',
+        conversation_id: conversationId,
+      })
+      if (nErr) console.error('fallback customer notification insert:', nErr)
+    })
+
+    return msg
+  }
+
   async function sendReply() {
     if (!profile || !selectedConvoId) return
     const text = replyDraft.trim()
@@ -1768,74 +1851,10 @@ export default function DashboardPage() {
 
     setReplyBusy(true)
     try {
-      let imageUrl: string | null = null
-      if (hasImage && replyPendingImage) {
-        const path = `${profile.id}/${selectedConvoId}/${crypto.randomUUID()}.jpg`
-        const { error: upErr } = await supabase.storage
-          .from('message-images')
-          .upload(path, replyPendingImage.blob, {
-            contentType: 'image/jpeg',
-            upsert: false,
-          })
-        if (upErr) throw upErr
-        const { data: pub } = supabase.storage.from('message-images').getPublicUrl(path)
-        imageUrl = pub.publicUrl
-      }
-
-      const body = text || (imageUrl ? '📷' : ' ')
-
-      const { data, error } = await supabase
-        .from('messages')
-        .insert({
-          conversation_id: selectedConvoId,
-          sender_id: profile.id,
-          body,
-          image_url: imageUrl,
-        })
-        .select(THREAD_MESSAGE_SELECT)
-        .single()
-      if (error) throw error
-      setThreadMessages((prev) => [...prev, data as ThreadMessage])
+      const msg = await insertStaffMessageToConversation(selectedConvoId, replyDraft, replyPendingImage)
+      if (!msg) return
       setReplyDraft('')
       clearReplyPendingImage()
-      await supabase.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', selectedConvoId)
-
-      {
-        const row = data as { body: string }
-        let preview = (row.body ?? '').trim().slice(0, 160)
-        if (!preview) preview = '📷 Reply'
-        void fetch('/api/staff/notify-customer-reply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversationId: selectedConvoId, preview }),
-        }).then(async (res) => {
-          if (res.ok) return
-          const j = (await res.json().catch(() => ({}))) as { error?: string }
-          console.error('notify-customer-reply failed:', res.status, j.error ?? j)
-          // If the server has no service role key, try RLS insert as the signed-in staff user.
-          const p = profileRef.current
-          const convoId = selectedConvoIdRef.current
-          if (!p?.business_id || !convoId) return
-          const { data: convo, error: convoErr } = await supabase
-            .from('conversations')
-            .select('customer_id')
-            .eq('id', convoId)
-            .single()
-          if (convoErr || !(convo as { customer_id?: string } | null)?.customer_id) return
-          const customerId = (convo as { customer_id: string }).customer_id
-          const { error: nErr } = await supabase.from('notifications').insert({
-            user_id: customerId,
-            business_id: p.business_id,
-            type: 'support_reply',
-            title: 'New reply from the team',
-            body: preview,
-            link: '/feed',
-            conversation_id: convoId,
-          })
-          if (nErr) console.error('fallback customer notification insert:', nErr)
-        })
-      }
-
       await refreshDashboard(profileRef.current!)
     } catch (e) {
       console.error(e)
@@ -1844,6 +1863,33 @@ export default function DashboardPage() {
       )
     } finally {
       setReplyBusy(false)
+    }
+  }
+
+  async function sendMessageToActiveMember(customerId: string) {
+    const conversationId = convoIdByCustomerId.get(customerId)
+    if (!conversationId) {
+      alert('This member has not started a support chat yet. They need to message you first.')
+      return
+    }
+    const draft = (memberMessageDrafts[customerId] ?? '').trim()
+    if (!draft) return
+
+    setMemberSendBusyId(customerId)
+    try {
+      const msg = await insertStaffMessageToConversation(conversationId, draft, null)
+      if (!msg) return
+      setMemberMessageDrafts((prev) => {
+        const next = { ...prev }
+        delete next[customerId]
+        return next
+      })
+      await refreshDashboard(profileRef.current!)
+    } catch (e) {
+      console.error(e)
+      alert('Could not send message. Check you are signed in and try again.')
+    } finally {
+      setMemberSendBusyId(null)
     }
   }
 
@@ -2228,6 +2274,12 @@ export default function DashboardPage() {
     }
     return { lastStaff, lastOther }
   }, [threadMessages, selectedConvoId, convoList])
+
+  const convoIdByCustomerId = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const c of convoList) map.set(c.customer_id, c.id)
+    return map
+  }, [convoList])
 
   const selectableRecipients = useMemo(() => {
     const map = new Map<string, ActiveMember>()
@@ -3650,13 +3702,34 @@ export default function DashboardPage() {
                     ) : (
                       activeMembers.map((m) => {
                         const label = `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim() || m.username
+                        const memberInitials = label.slice(0, 2).toUpperCase()
+                        const memberConvoId = convoIdByCustomerId.get(m.id)
+                        const memberDraft = memberMessageDrafts[m.id] ?? ''
+                        const memberSending = memberSendBusyId === m.id
                         return (
-                          <div key={m.id} className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2.5">
-                            <div className="min-w-0">
-                              <p className="font-medium truncate text-[14px]">{label}</p>
-                              <p className="text-[13px] text-[#7d86a8] truncate">@{m.username}</p>
-                            </div>
-                            <button
+                          <div key={m.id} className="px-3 py-2.5 space-y-2">
+                            <div className="flex items-center justify-between gap-2.5">
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                {m.avatar_url ? (
+                                  <img
+                                    src={m.avatar_url}
+                                    alt={`${label} avatar`}
+                                    className="w-9 h-9 rounded-full object-cover border border-white/10 shrink-0"
+                                  />
+                                ) : (
+                                  <div
+                                    className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 border border-white/10"
+                                    style={{ backgroundColor: '#606770' }}
+                                  >
+                                    {memberInitials}
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate text-[14px]">{label}</p>
+                                  <p className="text-[13px] text-[#7d86a8] truncate">@{m.username}</p>
+                                </div>
+                              </div>
+                              <button
                                 type="button"
                                 disabled={modBusyId === m.id}
                                 onClick={() => void moderateSuspension(m.id, 'suspend', label)}
@@ -3665,6 +3738,43 @@ export default function DashboardPage() {
                                 <Ban className="w-4 h-4 shrink-0" />
                                 {modBusyId === m.id ? '…' : 'Suspend'}
                               </button>
+                            </div>
+                            {memberConvoId ? (
+                              <div className="flex gap-2 pl-12">
+                                <input
+                                  className="flex-1 min-w-0 bg-[#111a31] border border-white/10 rounded-xl px-3 py-2 text-sm outline-none focus:border-[#6f54ff] disabled:opacity-50"
+                                  placeholder="Type a message…"
+                                  value={memberDraft}
+                                  disabled={memberSending}
+                                  onChange={(e) =>
+                                    setMemberMessageDrafts((prev) => ({ ...prev, [m.id]: e.target.value }))
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                      e.preventDefault()
+                                      void sendMessageToActiveMember(m.id)
+                                    }
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  disabled={memberSending || !memberDraft.trim()}
+                                  onClick={() => void sendMessageToActiveMember(m.id)}
+                                  className="shrink-0 inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
+                                >
+                                  {memberSending ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <Send className="w-4 h-4" />
+                                  )}
+                                  Send
+                                </button>
+                              </div>
+                            ) : (
+                              <p className="text-[11px] text-[#7d86a8] pl-12">
+                                No message thread yet — they must contact you first.
+                              </p>
+                            )}
                           </div>
                         )
                       })
