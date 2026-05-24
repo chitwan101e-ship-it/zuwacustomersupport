@@ -44,6 +44,7 @@ export default function SignUpPage() {
     lastName: '',
     username: '',
     email: '',
+    question: '',
     referral: '',
     password: '',
   })
@@ -211,6 +212,7 @@ export default function SignUpPage() {
           username: form.username,
           phone: combineInternationalPhone(phoneCountryIso, phoneNational),
           referralUsername: form.referral,
+          signupQuestion: form.question,
           turnstileToken: showTurnstile ? turnstileOtpToken ?? undefined : undefined,
         }),
       })
@@ -426,6 +428,20 @@ export default function SignUpPage() {
                 )}
               </Field>
 
+              <Field label="Question (optional)">
+                <textarea
+                  value={form.question}
+                  onChange={(e) => set('question', e.target.value)}
+                  placeholder="Anything you'd like us to know before we review your account?"
+                  rows={3}
+                  maxLength={500}
+                  className={clsx(inp, 'resize-y min-h-[4.5rem]')}
+                />
+                <p className="text-[11px] text-[#6f7896] mt-1.5">
+                  Optional — ask a question or share context for the team reviewing your signup.
+                </p>
+              </Field>
+
               <Field label="Referral (optional)">
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6f7896] text-sm">@</span>
@@ -580,6 +596,7 @@ export default function SignUpPage() {
                 <ReviewRow label="Username" value={`@${form.username}`} />
                 <ReviewRow label="Email" value={form.email} />
                 <ReviewRow label="Phone" value={fullInternationalPhone || '—'} />
+                <ReviewRow label="Question" value={form.question.trim() || '—'} />
                 <ReviewRow label="Referral" value={form.referral ? `@${form.referral}` : '—'} />
                 <ReviewRow label="Account type" value="Customer" />
                 <ReviewRow label="Email verified" value={otpEnabled ? 'Yes (code entered)' : 'Later (not required yet)'} />

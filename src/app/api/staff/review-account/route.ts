@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
     const admin = createServiceClient()
     const { data: target, error: targetErr } = await admin
       .from('profiles')
-      .select('id, role, first_name, last_name, username, phone, referral_username')
+      .select('id, role, first_name, last_name, username, phone, referral_username, signup_question')
       .eq('id', targetUserId)
       .single()
 
@@ -77,17 +77,21 @@ export async function POST(req: NextRequest) {
       username: string
       phone: string | null
       referral_username: string | null
+      signup_question: string | null
     }
     const name = `${t.first_name ?? ''} ${t.last_name ?? ''}`.trim() || t.username
     const actionWord = decision === 'approve' ? 'Approved' : decision === 'reject' ? 'Rejected' : 'Blocked'
     const phoneLine = t.phone?.trim() ? `Phone: ${t.phone.trim()}` : 'Phone: —'
     const refLine = t.referral_username ? `Referral: @${t.referral_username}` : 'Referral: —'
+    const questionLine = t.signup_question?.trim()
+      ? `Question: ${t.signup_question.trim()}`
+      : 'Question: —'
     await notifyBusinessTeamAdmins(
       admin,
       staff.business_id as string,
       {
         title: `Customer ${decision}`,
-        body: `${actionWord} ${name} (@${t.username}, ${email}). ${phoneLine}. ${refLine}.`,
+        body: `${actionWord} ${name} (@${t.username}, ${email}). ${phoneLine}. ${refLine}. ${questionLine}.`,
         link: '/notifications',
       },
       { excludeUserId: user.id }

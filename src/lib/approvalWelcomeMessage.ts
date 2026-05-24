@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { ensureSupportConversation } from '@/lib/ensureSupportConversation'
 
 export const DEFAULT_APPROVAL_WELCOME_TEMPLATE =
   "Welcome, {customer_name}! Your account has been approved. We're glad to have you at Juwa Bros. Message us here anytime if you need help."
@@ -31,46 +32,22 @@ export async function sendApprovalWelcomeMessage(
   const { businessId, customerId, staffSenderId, customerName, username, businessName } = opts
 
   try {
-    const { data: existing, error: exErr } = await admin
-      .from('conversations')
-      .select('id')
-      .eq('business_id', businessId)
-      .eq('customer_id', customerId)
-      .maybeSingle()
-
-    if (exErr) {
-      console.error('[approval-welcome] conversation lookup:', exErr.message)
+    const ensured = await ensureSupportConversation(admin, businessId, customerId)
+    if ('error' in ensured) {
+      console.error('[approval-welcome] conversation:', ensured.error)
       return
     }
+    const conversationId = ensured.conversationId
 
-    let conversationId = existing?.id as string | undefined
-
-    if (conversationId) {
-      const { count, error: countErr } = await admin
-        .from('messages')
-        .select('*', { count: 'exact', head: true })
-        .eq('conversation_id', conversationId)
-      if (countErr) {
-        console.error('[approval-welcome] message count:', countErr.message)
-        return
-      }
-      if ((count ?? 0) > 0) return
-    } else {
-      const { data: created, error: crErr } = await admin
-        .from('conversations')
-        .insert({
-          business_id: businessId,
-          customer_id: customerId,
-          status: 'open',
-        })
-        .select('id')
-        .single()
-      if (crErr) {
-        console.error('[approval-welcome] conversation insert:', crErr.message)
-        return
-      }
-      conversationId = created.id as string
+    const { count, error: countErr } = await admin
+      .from('messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('conversation_id', conversationId)
+    if (countErr) {
+      console.error('[approval-welcome] message count:', countErr.message)
+      return
     }
+    if ((count ?? 0) > 0) return
 
     const body = renderApprovalWelcomeMessage({ customerName, username, businessName })
     const preview = body.trim().slice(0, 160)

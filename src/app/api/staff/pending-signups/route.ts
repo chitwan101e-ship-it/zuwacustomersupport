@@ -49,7 +49,7 @@ export async function GET() {
     const { data: profiles, error: profErr } = await withTimeout(
       admin
         .from('profiles')
-        .select('id, first_name, last_name, username, phone, referral_username, created_at, account_status')
+        .select('id, first_name, last_name, username, phone, referral_username, signup_question, created_at, account_status')
         .eq('role', 'customer')
         .eq('account_status', 'pending')
         .is('deleted_at', null)
@@ -71,6 +71,7 @@ export async function GET() {
       username: string
       phone: string | null
       referral_username: string | null
+      signup_question: string | null
       created_at: string
       account_status: string
       email: string | null
@@ -102,6 +103,7 @@ export async function GET() {
             username: (p.username as string) ?? '',
             phone: (p.phone as string | null) ?? null,
             referral_username: (p.referral_username as string | null) ?? null,
+            signup_question: (p.signup_question as string | null) ?? null,
             created_at: p.created_at as string,
             account_status: p.account_status as string,
             email,

@@ -40,6 +40,7 @@ create table public.profiles (
   phone         text,
   phone_normalized text,
   referral_username text,
+  signup_question text,
   avatar_url    text,
   role          public.user_role not null default 'customer',
   -- business-specific (null for customers)

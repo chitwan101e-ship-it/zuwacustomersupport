@@ -1,3 +1,4 @@
+import { escapeHtml } from '@/lib/emailHtml'
 import { renderApprovalWelcomeMessage } from '@/lib/approvalWelcomeMessage'
 import { getPublicSiteUrl } from '@/lib/publicSiteUrl'
 import { getResend, getResendFromAddress } from '@/lib/resend'
@@ -49,12 +50,4 @@ export async function sendAccountApprovedEmail(opts: {
   })
 
   if (error) console.error('[approval-email]', error)
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
 }

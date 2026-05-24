@@ -20,6 +20,13 @@ function cleanReferralUsername(raw: unknown): string | null {
   return s.slice(0, 30)
 }
 
+function cleanSignupQuestion(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim().replace(/\s+/g, ' ')
+  if (!s) return null
+  return s.slice(0, 500)
+}
+
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req)
@@ -45,6 +52,7 @@ export async function POST(req: NextRequest) {
       username,
       phone,
       referralUsername,
+      signupQuestion,
       turnstileToken,
     } = body
 
@@ -77,6 +85,7 @@ export async function POST(req: NextRequest) {
     }
 
     const referral = cleanReferralUsername(referralUsername)
+    const question = cleanSignupQuestion(signupQuestion)
     const supabase = createServiceClient()
     const clientIp = ip !== 'unknown' ? ip : null
     const userAgent = req.headers.get('user-agent') || null
@@ -176,6 +185,7 @@ export async function POST(req: NextRequest) {
       phone: String(phone).trim(),
       phone_normalized: phoneNorm,
       referral_username: referral,
+      signup_question: question,
       role: 'customer',
       business_id: null,
       business_role: null,
@@ -200,7 +210,7 @@ export async function POST(req: NextRequest) {
 
     await notifyEveryBusinessAdmin(supabase, {
       title: 'New customer signup pending',
-      body: `@${cleanUsername} (${firstName} ${lastName}) — phone: ${String(phone).trim()}${referral ? ` — referral: @${referral}` : ''}. Review pending accounts in the dashboard.`,
+      body: `@${cleanUsername} (${firstName} ${lastName}) — phone: ${String(phone).trim()}${referral ? ` — referral: @${referral}` : ''}${question ? ` — question: "${question.slice(0, 120)}${question.length > 120 ? '…' : ''}"` : ''}. Review pending accounts in the dashboard.`,
       link: '/notifications',
     })
 

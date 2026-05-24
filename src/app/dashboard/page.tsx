@@ -120,6 +120,7 @@ type PendingCustomer = {
   username: string
   phone: string | null
   referral_username: string | null
+  signup_question: string | null
   created_at: string
   account_status: string
   email: string | null
@@ -338,6 +339,10 @@ export default function DashboardPage() {
   const [notifyTitle, setNotifyTitle] = useState('')
   const [notifyBody, setNotifyBody] = useState('')
   const [oneUserQuery, setOneUserQuery] = useState('')
+  const [notifySearchResults, setNotifySearchResults] = useState<
+    { id: string; username: string; first_name: string | null; last_name: string | null; email: string | null }[]
+  >([])
+  const [notifySearchBusy, setNotifySearchBusy] = useState(false)
   const [notifyBusy, setNotifyBusy] = useState(false)
   const [reportBusyId, setReportBusyId] = useState<string | null>(null)
 
@@ -391,6 +396,8 @@ export default function DashboardPage() {
   const [modBusyId, setModBusyId] = useState<string | null>(null)
   const [memberMessageDrafts, setMemberMessageDrafts] = useState<Record<string, string>>({})
   const [memberSendBusyId, setMemberSendBusyId] = useState<string | null>(null)
+  const [memberComposeOpenId, setMemberComposeOpenId] = useState<string | null>(null)
+  const [activeMemberQuery, setActiveMemberQuery] = useState('')
   const [dashRefreshing, setDashRefreshing] = useState(false)
   const [inboxContactOpen, setInboxContactOpen] = useState(false)
   const [staffNotifyUnread, setStaffNotifyUnread] = useState(0)
@@ -1328,6 +1335,36 @@ export default function DashboardPage() {
     }
   }, [profile, activeTab])
 
+  useEffect(() => {
+    if (activeTab !== 'notify' || audience !== 'selected') {
+      setNotifySearchResults([])
+      return
+    }
+    const q = notifyRecipientQuery.trim()
+    if (!q) {
+      setNotifySearchResults([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setNotifySearchBusy(true)
+        try {
+          const res = await fetch(`/api/staff/search-customers?q=${encodeURIComponent(q)}`)
+          const j = (await res.json().catch(() => ({}))) as {
+            results?: { id: string; username: string; first_name: string | null; last_name: string | null; email: string | null }[]
+          }
+          if (res.ok) setNotifySearchResults(j.results ?? [])
+          else setNotifySearchResults([])
+        } catch {
+          setNotifySearchResults([])
+        } finally {
+          setNotifySearchBusy(false)
+        }
+      })()
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [activeTab, audience, notifyRecipientQuery])
+
   async function manualRefresh() {
     const p = profileRef.current
     if (!p?.business_id) return
@@ -1867,16 +1904,24 @@ export default function DashboardPage() {
   }
 
   async function sendMessageToActiveMember(customerId: string) {
-    const conversationId = convoIdByCustomerId.get(customerId)
-    if (!conversationId) {
-      alert('This member has not started a support chat yet. They need to message you first.')
-      return
-    }
     const draft = (memberMessageDrafts[customerId] ?? '').trim()
     if (!draft) return
 
     setMemberSendBusyId(customerId)
     try {
+      let conversationId = convoIdByCustomerId.get(customerId)
+      if (!conversationId) {
+        const res = await fetch('/api/staff/ensure-conversation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customerId }),
+        })
+        const j = (await res.json()) as { conversationId?: string; error?: string }
+        if (!res.ok) throw new Error(j.error || 'Could not start conversation')
+        conversationId = j.conversationId
+      }
+      if (!conversationId) throw new Error('Could not start conversation')
+
       const msg = await insertStaffMessageToConversation(conversationId, draft, null)
       if (!msg) return
       setMemberMessageDrafts((prev) => {
@@ -1884,10 +1929,11 @@ export default function DashboardPage() {
         delete next[customerId]
         return next
       })
+      setMemberComposeOpenId(null)
       await refreshDashboard(profileRef.current!)
     } catch (e) {
       console.error(e)
-      alert('Could not send message. Check you are signed in and try again.')
+      alert(e instanceof Error ? e.message : 'Could not send message. Check you are signed in and try again.')
     } finally {
       setMemberSendBusyId(null)
     }
@@ -1944,6 +1990,39 @@ export default function DashboardPage() {
       if (prev) URL.revokeObjectURL(prev.previewUrl)
       return null
     })
+  }
+
+  async function sendBulkNotificationEmails(payload: {
+    userIds: string[]
+    subject: string
+    title: string
+    body: string
+    linkPath: string
+    ctaLabel?: string
+  }): Promise<{ sent: number; skipped: number; failed: number } | null> {
+    if (payload.userIds.length === 0) return null
+    try {
+      const brandName = businessInfo?.name || 'Juwa Bros'
+      const res = await fetch('/api/staff/send-bulk-notification-emails', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, brandName }),
+      })
+      const j = (await res.json().catch(() => ({}))) as {
+        sent?: number
+        skipped?: number
+        failed?: number
+        error?: string
+      }
+      if (!res.ok) {
+        console.error('[send-bulk-notification-emails]', j.error || res.status)
+        return null
+      }
+      return { sent: j.sent ?? 0, skipped: j.skipped ?? 0, failed: j.failed ?? 0 }
+    } catch (e) {
+      console.error(e)
+      return null
+    }
   }
 
   async function publishAnnouncement() {
@@ -2018,6 +2097,20 @@ export default function DashboardPage() {
             break
           }
         }
+
+        const customerIds = (customers || []).map((row: { id: string }) => row.id)
+        const emailTitle = `New post: ${title}`
+        const emailResult = await sendBulkNotificationEmails({
+          userIds: customerIds,
+          subject: emailTitle,
+          title: emailTitle,
+          body: preview,
+          linkPath: `/feed?post=${announcementId}`,
+          ctaLabel: 'View post',
+        })
+        if (emailResult && emailResult.failed > 0) {
+          console.warn('[publishAnnouncement] some notification emails failed', emailResult)
+        }
       }
 
       setPostTitle('')
@@ -2030,7 +2123,9 @@ export default function DashboardPage() {
           'Announcement published on the feed. In-app notifications could not all be sent — check the console or Supabase notifications policies.'
         )
       } else if (notified > 0) {
-        alert(`Announcement posted. ${notified} approved customer(s) were notified in-app.`)
+        alert(
+          `Announcement posted. ${notified} approved customer(s) were notified in-app and by email (where an address is on file).`
+        )
       } else {
         alert('Announcement posted. No approved customers to notify yet.')
       }
@@ -2064,26 +2159,32 @@ export default function DashboardPage() {
       } else if (audience === 'one') {
         const raw = oneUserQuery.trim()
         if (!raw) {
-          alert('Enter a username or user UUID for One user.')
+          alert('Enter a username, email, or user UUID for One user.')
           setNotifyBusy(false)
           return
         }
-        if (/^[0-9a-f-]{36}$/i.test(raw)) {
-          recipientIds.add(raw)
-        } else {
-          const { data: u, error } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('username', raw)
-            .eq('role', 'customer')
-            .maybeSingle()
-          if (error || !u) {
-            alert('No customer found with that username.')
-            setNotifyBusy(false)
-            return
-          }
-          recipientIds.add((u as { id: string }).id)
+        const res = await fetch('/api/staff/search-customers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: raw }),
+        })
+        const j = (await res.json().catch(() => ({}))) as {
+          customer?: { id: string; username: string; account_status: string }
+          error?: string
         }
+        if (!res.ok || !j.customer) {
+          alert(j.error || 'No customer found with that username or email.')
+          setNotifyBusy(false)
+          return
+        }
+        if (j.customer.account_status !== 'approved') {
+          alert(
+            `@${j.customer.username} is "${j.customer.account_status}". Only approved customers can receive notifications.`
+          )
+          setNotifyBusy(false)
+          return
+        }
+        recipientIds.add(j.customer.id)
       } else if (audience === 'labels') {
         if (notifyAudienceLabelIds.length === 0) {
           alert('Choose at least one inbox label. Recipients are customers with a labeled thread for your business.')
@@ -2161,14 +2262,31 @@ export default function DashboardPage() {
         if (error) throw error
       }
 
+      const notifySubjectPrefix =
+        announcementType === 'alert' ? 'Alert' : announcementType === 'update' ? 'Update' : 'Announcement'
+      const emailResult = await sendBulkNotificationEmails({
+        userIds: approvedIds,
+        subject: `${notifySubjectPrefix}: ${title}`,
+        title,
+        body,
+        linkPath: '/notifications',
+        ctaLabel: 'View notification',
+      })
+      if (emailResult && emailResult.failed > 0) {
+        console.warn('[sendMemberNotifications] some notification emails failed', emailResult)
+      }
+
       setNotifyTitle('')
       setNotifyBody('')
       setOneUserQuery('')
       setSelectedRecipientIds([])
       setNotifyAudienceLabelIds([])
       setNotifyRecipientQuery('')
+      const emailNote = emailResult
+        ? ` ${emailResult.sent} email(s) sent${emailResult.skipped ? ` (${emailResult.skipped} skipped — no address)` : ''}.`
+        : ''
       alert(
-        `Sent ${rows.length} in-app notification(s). Customers see these under the bell on the feed — not SMS or DM.`
+        `Sent ${rows.length} in-app notification(s). Customers also receive email where an address is on file.${emailNote}`
       )
     } catch (e) {
       console.error(e)
@@ -2281,6 +2399,18 @@ export default function DashboardPage() {
     return map
   }, [convoList])
 
+  const filteredActiveMembers = useMemo(() => {
+    const q = activeMemberQuery.trim().toLowerCase().replace(/^@+/, '')
+    if (!q) return activeMembers
+    return activeMembers.filter((m) => {
+      const first = (m.first_name ?? '').toLowerCase()
+      const last = (m.last_name ?? '').toLowerCase()
+      const label = `${first} ${last}`.trim()
+      const username = (m.username ?? '').toLowerCase().replace(/^@+/, '')
+      return label.includes(q) || first.includes(q) || last.includes(q) || username.includes(q)
+    })
+  }, [activeMembers, activeMemberQuery])
+
   const selectableRecipients = useMemo(() => {
     const map = new Map<string, ActiveMember>()
     for (const member of activeMembers) map.set(member.id, member)
@@ -2289,12 +2419,18 @@ export default function DashboardPage() {
 
   const filteredSelectableRecipients = useMemo(() => {
     const q = notifyRecipientQuery.trim().toLowerCase()
-    if (!q) return selectableRecipients
-    return selectableRecipients.filter((m) => {
-      const name = `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim().toLowerCase()
-      return name.includes(q) || (m.username || '').toLowerCase().includes(q)
-    })
-  }, [selectableRecipients, notifyRecipientQuery])
+    if (q) {
+      return notifySearchResults.map((r) => ({
+        id: r.id,
+        first_name: r.first_name ?? '',
+        last_name: r.last_name ?? '',
+        username: r.username,
+        account_status: 'approved' as const,
+        email: r.email,
+      }))
+    }
+    return selectableRecipients.map((m) => ({ ...m, email: null as string | null }))
+  }, [selectableRecipients, notifyRecipientQuery, notifySearchResults])
 
   function toggleSelectedRecipient(userId: string) {
     setSelectedRecipientIds((prev) =>
@@ -2598,7 +2734,7 @@ export default function DashboardPage() {
         {activeTab === 'post' ? (
           <section className="space-y-3 max-w-4xl">
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
-              Goes to the public feed for all approved customers. They can like and comment. Approved customers get an in-app notification when you
+              Goes to the public feed for all approved customers. They can like and comment. Approved customers get an in-app notification and email when you
               publish.
             </p>
 
@@ -3571,7 +3707,10 @@ export default function DashboardPage() {
               <div className="flex gap-0.5 rounded-[10px] bg-[#0f1834] p-0.5">
                 <button
                   type="button"
-                  onClick={() => setUsersPanelTab('pending')}
+                  onClick={() => {
+                    setUsersPanelTab('pending')
+                    setActiveMemberQuery('')
+                  }}
                   className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold transition-colors ${
                     usersPanelTab === 'pending' ? 'bg-[rgba(141,99,255,0.15)] text-[#8d63ff]' : 'text-[#8892b0] hover:text-[#c4cbe6]'
                   }`}
@@ -3589,7 +3728,10 @@ export default function DashboardPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setUsersPanelTab('suspended')}
+                  onClick={() => {
+                    setUsersPanelTab('suspended')
+                    setActiveMemberQuery('')
+                  }}
                   className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold transition-colors ${
                     usersPanelTab === 'suspended' ? 'bg-[rgba(141,99,255,0.15)] text-[#8d63ff]' : 'text-[#8892b0] hover:text-[#c4cbe6]'
                   }`}
@@ -3649,6 +3791,11 @@ export default function DashboardPage() {
                                   <span className="text-[#7d86a8]">—</span>
                                 )}
                               </p>
+                              {cust.signup_question?.trim() ? (
+                                <p className="break-words sm:col-span-2 rounded-lg border border-white/10 bg-[#0d1220] px-3 py-2 text-[#c4cbe6]">
+                                  <span className="text-[#7d86a8]">Question:</span> {cust.signup_question.trim()}
+                                </p>
+                              ) : null}
                               <p className="break-all sm:col-span-2">
                                 <span className="text-[#7d86a8]">Signed up:</span>{' '}
                                 {new Date(cust.created_at).toLocaleString()} ({timeAgo(cust.created_at)})
@@ -3694,18 +3841,45 @@ export default function DashboardPage() {
                   <p className="text-[#7d86a8] text-xs">
                     Customers approved for the platform who follow your business or have a support thread with you.
                   </p>
+                  {activeMembers.length > 0 ? (
+                    <div className="space-y-1">
+                      <div className="relative">
+                        <Search
+                          className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c647e]"
+                          aria-hidden
+                        />
+                        <input
+                          type="search"
+                          className="w-full rounded-xl border border-white/10 bg-[#0d1428] py-2 pl-8 pr-2 text-sm text-[#e2e6f5] outline-none focus:border-[#6f54ff]/50"
+                          placeholder="Search by name or @username…"
+                          value={activeMemberQuery}
+                          onChange={(e) => setActiveMemberQuery(e.target.value)}
+                          aria-label="Search active members"
+                        />
+                      </div>
+                      {activeMemberQuery.trim() ? (
+                        <p className="text-[10px] text-[#5c647e] px-0.5">
+                          {filteredActiveMembers.length} match{filteredActiveMembers.length === 1 ? '' : 'es'} for your
+                          search
+                          {filteredActiveMembers.length === 0 ? ' — try another name or @handle' : ''}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="rounded-2xl border border-white/10 bg-[#0d1428]/90 divide-y divide-white/10 shadow-[0_20px_50px_-35px_rgba(30,49,112,0.95)] max-h-[380px] overflow-y-auto">
                     {activeMembers.length === 0 ? (
                       <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">
                         No active members linked to this business yet — approve customers and have them follow or message you.
                       </p>
+                    ) : filteredActiveMembers.length === 0 ? (
+                      <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">No members match your search.</p>
                     ) : (
-                      activeMembers.map((m) => {
+                      filteredActiveMembers.map((m) => {
                         const label = `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim() || m.username
                         const memberInitials = label.slice(0, 2).toUpperCase()
-                        const memberConvoId = convoIdByCustomerId.get(m.id)
                         const memberDraft = memberMessageDrafts[m.id] ?? ''
                         const memberSending = memberSendBusyId === m.id
+                        const composeOpen = memberComposeOpenId === m.id
                         return (
                           <div key={m.id} className="px-3 py-2.5 space-y-2">
                             <div className="flex items-center justify-between gap-2.5">
@@ -3729,23 +3903,41 @@ export default function DashboardPage() {
                                   <p className="text-[13px] text-[#7d86a8] truncate">@{m.username}</p>
                                 </div>
                               </div>
-                              <button
-                                type="button"
-                                disabled={modBusyId === m.id}
-                                onClick={() => void moderateSuspension(m.id, 'suspend', label)}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[13px] text-amber-200 hover:bg-amber-500/20 disabled:opacity-40"
-                              >
-                                <Ban className="w-4 h-4 shrink-0" />
-                                {modBusyId === m.id ? '…' : 'Suspend'}
-                              </button>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={memberSending}
+                                  onClick={() =>
+                                    setMemberComposeOpenId((prev) => (prev === m.id ? null : m.id))
+                                  }
+                                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] disabled:opacity-40 ${
+                                    composeOpen
+                                      ? 'border-[#6f54ff]/50 bg-[#6f54ff]/15 text-[#c4b8ff]'
+                                      : 'border-[#6f54ff]/40 bg-[#6f54ff]/10 text-[#b8adff] hover:bg-[#6f54ff]/20'
+                                  }`}
+                                >
+                                  <Send className="w-4 h-4 shrink-0" />
+                                  Send
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={modBusyId === m.id}
+                                  onClick={() => void moderateSuspension(m.id, 'suspend', label)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[13px] text-amber-200 hover:bg-amber-500/20 disabled:opacity-40"
+                                >
+                                  <Ban className="w-4 h-4 shrink-0" />
+                                  {modBusyId === m.id ? '…' : 'Suspend'}
+                                </button>
+                              </div>
                             </div>
-                            {memberConvoId ? (
+                            {composeOpen ? (
                               <div className="flex gap-2 pl-12">
                                 <input
                                   className="flex-1 min-w-0 bg-[#111a31] border border-white/10 rounded-xl px-3 py-2 text-sm outline-none focus:border-[#6f54ff] disabled:opacity-50"
                                   placeholder="Type a message…"
                                   value={memberDraft}
                                   disabled={memberSending}
+                                  autoFocus
                                   onChange={(e) =>
                                     setMemberMessageDrafts((prev) => ({ ...prev, [m.id]: e.target.value }))
                                   }
@@ -3770,11 +3962,7 @@ export default function DashboardPage() {
                                   Send
                                 </button>
                               </div>
-                            ) : (
-                              <p className="text-[11px] text-[#7d86a8] pl-12">
-                                No message thread yet — they must contact you first.
-                              </p>
-                            )}
+                            ) : null}
                           </div>
                         )
                       })
@@ -3951,7 +4139,7 @@ export default function DashboardPage() {
         {activeTab === 'notify' ? (
           <section className="space-y-3 max-w-3xl">
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
-              Sends an <strong className="text-[#c4cbe6]">in-app notification</strong> to each recipient (bell / Notifications screen).{' '}
+              Sends an <strong className="text-[#c4cbe6]">in-app notification</strong> and <strong className="text-[#c4cbe6]">email</strong> to each recipient (bell / Notifications screen).{' '}
               This is <strong className="text-[#c4cbe6]">not</strong> SMS, email, or a DM in their support thread — only the notifications list.
             </p>
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
@@ -4046,7 +4234,7 @@ export default function DashboardPage() {
                         <input
                           type="search"
                           className="w-full rounded-lg border border-white/10 bg-[#0c1428] py-2 pl-8 pr-2 text-[12px] text-[#e2e6f5] outline-none focus:border-[#6f54ff]/50"
-                          placeholder="Search by name or @username…"
+                          placeholder="Search by name, @username, or email…"
                           value={notifyRecipientQuery}
                           onChange={(e) => setNotifyRecipientQuery(e.target.value)}
                           aria-label="Filter members for notify"
@@ -4081,9 +4269,16 @@ export default function DashboardPage() {
                           {selectedRecipientIds.length} selected
                         </span>
                       </div>
-                      {notifyRecipientQuery.trim() && filteredSelectableRecipients.length < selectableRecipients.length ? (
+                      {notifySearchBusy ? (
+                        <p className="text-[10px] text-[#8892b0] px-0.5 flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" aria-hidden />
+                          Searching…
+                        </p>
+                      ) : null}
+                      {notifyRecipientQuery.trim() && !notifySearchBusy ? (
                         <p className="text-[10px] text-[#5c647e] px-0.5">
-                          Showing {filteredSelectableRecipients.length} of {selectableRecipients.length} — Select all still selects everyone.
+                          {filteredSelectableRecipients.length} match{filteredSelectableRecipients.length === 1 ? '' : 'es'} for your search
+                          {filteredSelectableRecipients.length === 0 ? ' — try @username or full email' : ''}
                         </p>
                       ) : null}
                       <div className="max-h-56 overflow-y-auto space-y-1">
@@ -4108,6 +4303,9 @@ export default function DashboardPage() {
                                 <span className="min-w-0 flex-1">
                                   <span className="text-sm font-medium truncate block">{label}</span>
                                   <span className="text-xs text-[#7d86a8] truncate block">@{member.username}</span>
+                                  {member.email ? (
+                                    <span className="text-[10px] text-[#5c647e] truncate block">{member.email}</span>
+                                  ) : null}
                                 </span>
                               </button>
                             )
@@ -4121,7 +4319,7 @@ export default function DashboardPage() {
               {audience === 'one' ? (
                 <input
                   className="w-full bg-[#111a31] border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff]"
-                  placeholder="Username or user UUID"
+                  placeholder="Username, email, or user UUID"
                   value={oneUserQuery}
                   onChange={(e) => setOneUserQuery(e.target.value)}
                 />
