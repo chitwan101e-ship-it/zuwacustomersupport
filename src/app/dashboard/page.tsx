@@ -2709,8 +2709,8 @@ export default function DashboardPage() {
       out.push({
         id: activeMemberLookup.id,
         username: activeMemberLookup.username,
-        first_name: activeMemberLookup.first_name,
-        last_name: activeMemberLookup.last_name,
+        first_name: activeMemberLookup.first_name ?? '',
+        last_name: activeMemberLookup.last_name ?? '',
         account_status: activeMemberLookup.account_status,
         avatar_url: null,
       })
