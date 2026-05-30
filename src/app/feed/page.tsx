@@ -31,8 +31,10 @@ import {
   ImagePlus,
   Check,
   CheckCheck,
+  Share2,
 } from 'lucide-react'
 import { ContentModerationMenu } from '@/components/ContentModerationMenu'
+import { sharePostLink } from '@/lib/sharePostLink'
 import { ChatMessageImage } from '@/components/ChatMessageImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
 
@@ -485,10 +487,32 @@ export default function FeedPage() {
     const postId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('post') : null
     if (!postId) return
     const t = window.setTimeout(() => {
-      document.getElementById(`announcement-${postId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      const el = document.getElementById(`announcement-${postId}`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      if (el) {
+        el.classList.add('ring-2', 'ring-[#8d63ff]', 'ring-offset-2', 'ring-offset-[#050814]')
+        window.setTimeout(() => {
+          el.classList.remove('ring-2', 'ring-[#8d63ff]', 'ring-offset-2', 'ring-offset-[#050814]')
+        }, 2800)
+      }
     }, 150)
     return () => window.clearTimeout(t)
   }, [loading, announcements])
+
+  async function shareAnnouncement(a: AnnouncementRow, bizName: string) {
+    try {
+      const result = await sharePostLink({
+        announcementId: a.id,
+        title: a.title,
+        text: `${bizName}: ${a.title}`,
+      })
+      showToast(result === 'shared' ? 'Post shared' : 'Post link copied to clipboard')
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return
+      console.error(e)
+      showToast(e instanceof Error ? e.message : 'Could not share this post')
+    }
+  }
 
   async function toggleLike(announcementId: string) {
     if (!profile) return
@@ -1720,6 +1744,18 @@ export default function FeedPage() {
                         ) : (
                           <ChevronDown className="w-4 h-4 opacity-50" />
                         )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void shareAnnouncement(a, bizName)}
+                        className={clsx(
+                          'flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-[15px] font-medium',
+                          isLight ? 'text-slate-600 hover:bg-slate-100' : 'text-[#b8c0dc] hover:bg-white/10'
+                        )}
+                        aria-label="Share post"
+                      >
+                        <Share2 className="w-[18px] h-[18px]" />
+                        Share
                       </button>
                     </div>
                   </div>

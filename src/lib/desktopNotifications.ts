@@ -81,3 +81,14 @@ export function messagePreview(body: string, hasImage?: boolean): string {
   if (t) return t.length > 160 ? `${t.slice(0, 157)}…` : t
   return hasImage ? '📷 Image' : 'New message'
 }
+
+/** e.g. "James message" for staff desktop popups when a customer texts. */
+export function customerMessagePopupTitle(
+  senderLabel: string | null | undefined,
+  fallback = 'New message'
+): string {
+  const trimmed = senderLabel?.trim()
+  if (!trimmed) return fallback
+  const first = trimmed.split(/\s+/)[0] || trimmed
+  return `${first} message`
+}

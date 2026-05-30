@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { isDesktopNotifyEnabled, messagePreview, showDesktopNotification } from '@/lib/desktopNotifications'
+import { customerMessagePopupTitle, isDesktopNotifyEnabled, messagePreview, showDesktopNotification } from '@/lib/desktopNotifications'
 
 type NotificationInsert = {
   id: string
@@ -41,6 +41,8 @@ type UseDesktopMessageNotificationsOpts = {
   onOpenConversation?: (conversationId: string) => void
   /** Prefer messages realtime (works when notifications table is not replicated). */
   watchMessages?: WatchMessagesOpts
+  /** Resolve customer first name for support_message notification popups. */
+  getCustomerLabelForConversation?: (conversationId: string | null) => string | null
 }
 
 /** One popup per inbound message (messages + notifications INSERT often fire together). */
@@ -68,6 +70,7 @@ export function useDesktopMessageNotifications({
   onOpenMessage,
   onOpenConversation,
   watchMessages,
+  getCustomerLabelForConversation,
 }: UseDesktopMessageNotificationsOpts) {
   const typesRef = useRef(types)
   typesRef.current = types
@@ -77,6 +80,8 @@ export function useDesktopMessageNotifications({
   onOpenConvoRef.current = onOpenConversation
   const watchMessagesRef = useRef(watchMessages)
   watchMessagesRef.current = watchMessages
+  const getCustomerLabelRef = useRef(getCustomerLabelForConversation)
+  getCustomerLabelRef.current = getCustomerLabelForConversation
 
   useEffect(() => {
     if (!userId) return
@@ -102,7 +107,7 @@ export function useDesktopMessageNotifications({
               : wm.isInboundMessage(msg)
             if (!inbound) return
             const label = wm.getSenderLabel?.(msg)
-            const title = label ? `${wm.popupTitle} · ${label}` : wm.popupTitle
+            const title = customerMessagePopupTitle(label, wm.popupTitle)
             const body = messagePreview(msg.body, Boolean(msg.image_url))
             if (!shouldShowInboundPopup(msg.conversation_id, body)) return
 
@@ -126,23 +131,54 @@ export function useDesktopMessageNotifications({
         filter: `user_id=eq.${userId}`,
       },
       (payload) => {
-        if (!isDesktopNotifyEnabled()) return
-        const row = payload.new as NotificationInsert
-        if (!typesRef.current.includes(row.type)) return
-        if (row.read) return
-        if (row.type === 'support_message') {
-          if (!shouldShowInboundPopup(row.conversation_id, row.body)) return
-        }
+        void (async () => {
+          if (!isDesktopNotifyEnabled()) return
+          const row = payload.new as NotificationInsert
+          if (!typesRef.current.includes(row.type)) return
+          if (row.read) return
+          if (row.type === 'support_message') {
+            if (!shouldShowInboundPopup(row.conversation_id, row.body)) return
+          }
 
-        showDesktopNotification({
-          title: row.title,
-          body: row.body,
-          tag: `relay-notify-${row.id}`,
-          onClick: () => {
-            if (row.conversation_id) onOpenConvoRef.current?.(row.conversation_id)
-            else onOpenRef.current?.(row)
-          },
-        })
+          let customerLabel =
+            row.type === 'support_message'
+              ? getCustomerLabelRef.current?.(row.conversation_id)
+              : null
+
+          if (row.type === 'support_message' && !customerLabel && row.conversation_id) {
+            const { data: conv } = await supabase
+              .from('conversations')
+              .select('customer_id')
+              .eq('id', row.conversation_id)
+              .maybeSingle()
+            if (conv?.customer_id) {
+              const { data: prof } = await supabase
+                .from('profiles')
+                .select('first_name, username')
+                .eq('id', conv.customer_id)
+                .maybeSingle()
+              customerLabel =
+                (prof?.first_name as string | null | undefined)?.trim() ||
+                (prof?.username as string | null | undefined)?.trim() ||
+                null
+            }
+          }
+
+          const title =
+            row.type === 'support_message'
+              ? customerMessagePopupTitle(customerLabel, row.title)
+              : row.title
+
+          showDesktopNotification({
+            title,
+            body: row.body,
+            tag: `relay-notify-${row.id}`,
+            onClick: () => {
+              if (row.conversation_id) onOpenConvoRef.current?.(row.conversation_id)
+              else onOpenRef.current?.(row)
+            },
+          })
+        })()
       }
     )
 

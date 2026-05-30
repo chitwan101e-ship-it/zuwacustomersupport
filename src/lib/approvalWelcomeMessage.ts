@@ -1,6 +1,39 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { ensureSupportConversation } from '@/lib/ensureSupportConversation'
 
+export const NEWLY_APPROVED_PRESET_KEY = 'newly_approved'
+
+/** Assigns the "Newly approved" inbox label on the support thread (idempotent). */
+async function assignNewlyApprovedLabel(
+  admin: SupabaseClient,
+  businessId: string,
+  conversationId: string
+): Promise<void> {
+  const { data: labelDef, error: defErr } = await admin
+    .from('inbox_label_definitions')
+    .select('id')
+    .eq('business_id', businessId)
+    .eq('preset_key', NEWLY_APPROVED_PRESET_KEY)
+    .maybeSingle()
+
+  if (defErr) {
+    console.error('[approval-welcome] newly_approved label lookup:', defErr.message)
+    return
+  }
+  if (!labelDef?.id) {
+    console.error('[approval-welcome] newly_approved label not found for business')
+    return
+  }
+
+  const { error: insErr } = await admin.from('conversation_inbox_labels').insert({
+    conversation_id: conversationId,
+    label_id: labelDef.id,
+  })
+  if (insErr && insErr.code !== '23505') {
+    console.error('[approval-welcome] newly_approved label assign:', insErr.message)
+  }
+}
+
 export const DEFAULT_APPROVAL_WELCOME_TEMPLATE =
   "Welcome, {customer_name}! Your account has been approved. We're glad to have you at Juwa Bros. Message us here anytime if you need help."
 
@@ -38,6 +71,8 @@ export async function sendApprovalWelcomeMessage(
       return
     }
     const conversationId = ensured.conversationId
+
+    await assignNewlyApprovedLabel(admin, businessId, conversationId)
 
     const { count, error: countErr } = await admin
       .from('messages')

@@ -4,12 +4,43 @@ import { getPublicSiteUrl } from '@/lib/publicSiteUrl'
 import { getResend, getResendFromAddress } from '@/lib/resend'
 import { isSyntheticStaffAuthEmail } from '@/lib/staffAuthEmail'
 
+/** Look up emails in small parallel batches. */
 const EMAIL_LOOKUP_BATCH = 8
+/** Pause between each Resend send to avoid 429 rate limits. */
+const SEND_DELAY_MS = 600
+const MAX_SEND_RETRIES = 4
 
 export type BulkNotificationEmailResult = {
   sent: number
   skipped: number
   failed: number
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const e = error as { statusCode?: number; message?: string }
+  return e.statusCode === 429 || /rate limit|too many requests/i.test(String(e.message ?? ''))
+}
+
+async function sendEmailWithRetry(
+  resend: NonNullable<ReturnType<typeof getResend>>,
+  payload: { from: string; to: string; subject: string; html: string }
+): Promise<'sent' | 'failed'> {
+  for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt++) {
+    const { error } = await resend.emails.send(payload)
+    if (!error) return 'sent'
+    if (isRateLimitError(error) && attempt < MAX_SEND_RETRIES - 1) {
+      await sleep(SEND_DELAY_MS * (attempt + 2))
+      continue
+    }
+    console.error('[bulk-notification-email]', payload.to, error)
+    return 'failed'
+  }
+  return 'failed'
 }
 
 export async function lookupCustomerEmail(
@@ -78,19 +109,17 @@ export async function sendBulkCustomerNotificationEmails(
         continue
       }
 
-      const { error } = await resend.emails.send({
+      const result = await sendEmailWithRetry(resend, {
         from: getResendFromAddress(),
         to: row.email,
         subject: opts.subject,
         html,
       })
 
-      if (error) {
-        console.error('[bulk-notification-email]', row.userId, error)
-        failed += 1
-      } else {
-        sent += 1
-      }
+      if (result === 'sent') sent += 1
+      else failed += 1
+
+      await sleep(SEND_DELAY_MS)
     }
   }
 

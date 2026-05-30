@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { getApprovedCustomerIdsForInboxLabelPresets } from '@/lib/inboxLabelRecipients'
 import { sendBulkCustomerNotificationEmails } from '@/lib/sendBulkCustomerNotificationEmails'
 
 const MAX_RECIPIENTS = 500
@@ -15,6 +16,7 @@ export async function POST(req: NextRequest) {
 
     const body = (await req.json()) as {
       userIds?: string[]
+      labelPresetKeys?: string[]
       subject?: string
       title?: string
       body?: string
@@ -23,22 +25,17 @@ export async function POST(req: NextRequest) {
       brandName?: string
     }
 
-    const userIds = Array.isArray(body.userIds) ? body.userIds.filter((id) => typeof id === 'string' && id.trim()) : []
     const subject = typeof body.subject === 'string' ? body.subject.trim() : ''
     const title = typeof body.title === 'string' ? body.title.trim() : ''
     const messageBody = typeof body.body === 'string' ? body.body.trim() : ''
     const linkPath = typeof body.linkPath === 'string' ? body.linkPath.trim() : ''
+    const labelPresetKeys = Array.isArray(body.labelPresetKeys)
+      ? body.labelPresetKeys.filter((k) => typeof k === 'string' && k.trim())
+      : []
 
-    if (!userIds.length || !subject || !title || !messageBody || !linkPath) {
+    if (!subject || !title || !messageBody || !linkPath) {
       return NextResponse.json(
-        { error: 'userIds, subject, title, body, and linkPath are required.' },
-        { status: 400 }
-      )
-    }
-
-    if (userIds.length > MAX_RECIPIENTS) {
-      return NextResponse.json(
-        { error: `Too many recipients (max ${MAX_RECIPIENTS}).` },
+        { error: 'subject, title, body, and linkPath are required.' },
         { status: 400 }
       )
     }
@@ -68,6 +65,29 @@ export async function POST(req: NextRequest) {
     }
 
     const admin = createServiceClient()
+    let userIds: string[]
+
+    if (labelPresetKeys.length > 0) {
+      userIds = await getApprovedCustomerIdsForInboxLabelPresets(
+        admin,
+        staff.business_id as string,
+        labelPresetKeys
+      )
+    } else {
+      userIds = Array.isArray(body.userIds) ? body.userIds.filter((id) => typeof id === 'string' && id.trim()) : []
+    }
+
+    if (!userIds.length) {
+      return NextResponse.json({ ok: true, sent: 0, skipped: 0, failed: 0, recipientCount: 0 })
+    }
+
+    if (userIds.length > MAX_RECIPIENTS) {
+      return NextResponse.json(
+        { error: `Too many recipients (max ${MAX_RECIPIENTS}).` },
+        { status: 400 }
+      )
+    }
+
     const result = await sendBulkCustomerNotificationEmails(admin, {
       userIds,
       subject,
@@ -78,7 +98,7 @@ export async function POST(req: NextRequest) {
       brandName: body.brandName,
     })
 
-    return NextResponse.json({ ok: true, ...result })
+    return NextResponse.json({ ok: true, recipientCount: userIds.length, ...result })
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error'
     return NextResponse.json({ error: msg }, { status: 500 })

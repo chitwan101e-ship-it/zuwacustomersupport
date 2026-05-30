@@ -297,7 +297,10 @@ begin
       ('vip', 'VIP', '#ca8a04'),
       ('priority', 'Priority', '#ea580c'),
       ('scammer', 'Scammer', '#dc2626'),
-      ('follow_up', 'Follow up', '#2563eb')
+      ('follow_up', 'Follow up', '#2563eb'),
+      ('newly_approved', 'Newly approved', '#6366f1'),
+      ('account_created', 'Account created', '#64748b'),
+      ('active_player', 'Active player', '#16a34a')
   ) as x(preset_key, name, color)
   where not exists (
     select 1 from public.inbox_label_definitions d
@@ -315,7 +318,10 @@ cross join (
     ('vip', 'VIP', '#ca8a04'),
     ('priority', 'Priority', '#ea580c'),
     ('scammer', 'Scammer', '#dc2626'),
-    ('follow_up', 'Follow up', '#2563eb')
+    ('follow_up', 'Follow up', '#2563eb'),
+    ('newly_approved', 'Newly approved', '#6366f1'),
+    ('account_created', 'Account created', '#64748b'),
+    ('active_player', 'Active player', '#16a34a')
 ) as x(preset_key, name, color)
 where not exists (
   select 1 from public.inbox_label_definitions d

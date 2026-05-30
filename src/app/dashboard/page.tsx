@@ -32,12 +32,14 @@ import {
   EyeOff,
   Trash2,
   ThumbsUp,
+  Share2,
   UserCheck,
   User2,
   Users,
   UserCog,
   X,
 } from 'lucide-react'
+import { sharePostLink } from '@/lib/sharePostLink'
 import { ContentModerationMenu } from '@/components/ContentModerationMenu'
 import { ChatMessageImage } from '@/components/ChatMessageImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
@@ -323,6 +325,7 @@ export default function DashboardPage() {
   const [convoList, setConvoList] = useState<ConvoListItem[]>([])
   const convoListRef = useRef<ConvoListItem[]>([])
   convoListRef.current = convoList
+  const inboundCustomerFirstNameRef = useRef(new Map<string, string>())
   const [selectedConvoId, setSelectedConvoId] = useState<string | null>(null)
   const selectedConvoIdRef = useRef<string | null>(null)
   selectedConvoIdRef.current = selectedConvoId
@@ -1365,10 +1368,18 @@ export default function DashboardPage() {
       else router.push(row.link || '/dashboard')
     },
     onOpenConversation: (conversationId) => openMessageFromNotifyRef.current(conversationId),
+    getCustomerLabelForConversation: (conversationId) => {
+      if (!conversationId) return null
+      const cached = inboundCustomerFirstNameRef.current.get(conversationId)
+      if (cached) return cached
+      const conv = convoListRef.current.find((c) => c.id === conversationId)
+      if (!conv?.customerName?.trim()) return null
+      return conv.customerName.trim().split(/\s+/)[0] || conv.customerName.trim()
+    },
     watchMessages: profile?.id
       ? {
           myUserId: profile.id,
-          popupTitle: 'New customer message',
+          popupTitle: 'New message',
           isInboundMessage: () => false,
           confirmInbound: async (msg) => {
             const bid = profileRef.current?.business_id
@@ -1379,12 +1390,29 @@ export default function DashboardPage() {
               .eq('id', msg.conversation_id)
               .maybeSingle()
             if (!data || data.business_id !== bid) return false
-            return msg.sender_id === data.customer_id
+            if (msg.sender_id !== data.customer_id) return false
+
+            if (!inboundCustomerFirstNameRef.current.has(msg.conversation_id)) {
+              const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
+              const fromList = conv?.customerName?.trim().split(/\s+/)[0]
+              if (fromList) {
+                inboundCustomerFirstNameRef.current.set(msg.conversation_id, fromList)
+              } else {
+                const { data: prof } = await supabase
+                  .from('profiles')
+                  .select('first_name, username')
+                  .eq('id', data.customer_id)
+                  .maybeSingle()
+                const first =
+                  (prof?.first_name as string | null | undefined)?.trim() ||
+                  (prof?.username as string | null | undefined)?.trim() ||
+                  'Customer'
+                inboundCustomerFirstNameRef.current.set(msg.conversation_id, first)
+              }
+            }
+            return true
           },
-          getSenderLabel: (msg) => {
-            const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
-            return conv?.customerName ?? null
-          },
+          getSenderLabel: (msg) => inboundCustomerFirstNameRef.current.get(msg.conversation_id) ?? null,
         }
       : undefined,
   })
@@ -2255,14 +2283,15 @@ export default function DashboardPage() {
   }
 
   async function sendBulkNotificationEmails(payload: {
-    userIds: string[]
+    userIds?: string[]
+    labelPresetKeys?: string[]
     subject: string
     title: string
     body: string
     linkPath: string
     ctaLabel?: string
-  }): Promise<{ sent: number; skipped: number; failed: number } | null> {
-    if (payload.userIds.length === 0) return null
+  }): Promise<{ sent: number; skipped: number; failed: number; recipientCount?: number } | null> {
+    if (!payload.labelPresetKeys?.length && !payload.userIds?.length) return null
     try {
       const brandName = businessInfo?.name || 'Juwa Bros'
       const res = await fetch('/api/staff/send-bulk-notification-emails', {
@@ -2274,13 +2303,14 @@ export default function DashboardPage() {
         sent?: number
         skipped?: number
         failed?: number
+        recipientCount?: number
         error?: string
       }
       if (!res.ok) {
         console.error('[send-bulk-notification-emails]', j.error || res.status)
         return null
       }
-      return { sent: j.sent ?? 0, skipped: j.skipped ?? 0, failed: j.failed ?? 0 }
+      return { sent: j.sent ?? 0, skipped: j.skipped ?? 0, failed: j.failed ?? 0, recipientCount: j.recipientCount }
     } catch (e) {
       console.error(e)
       return null
@@ -2336,6 +2366,7 @@ export default function DashboardPage() {
         .is('deleted_at', null)
 
       let notificationsOk = true
+      let emailResult: { sent: number; skipped: number; failed: number; recipientCount?: number } | null = null
       if (custErr) {
         console.error(custErr)
         notificationsOk = false
@@ -2360,10 +2391,9 @@ export default function DashboardPage() {
           }
         }
 
-        const customerIds = (customers || []).map((row: { id: string }) => row.id)
         const emailTitle = `New post: ${title}`
-        const emailResult = await sendBulkNotificationEmails({
-          userIds: customerIds,
+        emailResult = await sendBulkNotificationEmails({
+          labelPresetKeys: ['active_player', 'account_created'],
           subject: emailTitle,
           title: emailTitle,
           body: preview,
@@ -2385,8 +2415,23 @@ export default function DashboardPage() {
           'Announcement published on the feed. In-app notifications could not all be sent — check the console or Supabase notifications policies.'
         )
       } else if (notified > 0) {
+        const emailSent = emailResult?.sent ?? 0
+        const emailSkipped = emailResult?.skipped ?? 0
+        const emailFailed = emailResult?.failed ?? 0
+        const emailTargets = emailResult?.recipientCount ?? 0
+        let emailLine = ''
+        if (emailResult === null) {
+          emailLine = ' Email could not be sent — check server logs.'
+        } else if (emailTargets === 0) {
+          emailLine = ' No customers with Active player or Account created labels to email.'
+        } else {
+          emailLine = ` ${emailSent} email(s) sent to Active player / Account created labels`
+          if (emailSkipped) emailLine += ` (${emailSkipped} skipped — no address)`
+          if (emailFailed) emailLine += ` (${emailFailed} failed)`
+          emailLine += '.'
+        }
         alert(
-          `Announcement posted. ${notified} approved customer(s) were notified in-app and by email (where an address is on file).`
+          `Announcement posted. ${notified} approved customer(s) got an in-app notification.${emailLine}`
         )
       } else {
         alert('Announcement posted. No approved customers to notify yet.')
@@ -2400,6 +2445,17 @@ export default function DashboardPage() {
       )
     } finally {
       setPostBusy(false)
+    }
+  }
+
+  async function shareStaffAnnouncement(a: { id: string; title: string }) {
+    try {
+      const result = await sharePostLink({ announcementId: a.id, title: a.title })
+      alert(result === 'shared' ? 'Post shared.' : 'Post link copied. Approved customers can open it after signing in.')
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not share this post.')
     }
   }
 
@@ -2671,6 +2727,13 @@ export default function DashboardPage() {
     )
   }, [filteredConvoList, inboxThreadLabelFilterIds])
 
+  /** Drop open thread when it falls outside the active label filter. */
+  useEffect(() => {
+    if (inboxThreadLabelFilterIds.length === 0 || !selectedConvoId) return
+    const stillVisible = inboxDisplayList.some((c) => c.id === selectedConvoId)
+    if (!stillVisible) setSelectedConvoId(null)
+  }, [inboxThreadLabelFilterIds, inboxDisplayList, selectedConvoId])
+
   /** Active members matching inbox search who have no thread in results (often: follow only, no messages yet). */
   const inboxSearchMemberMatches = useMemo(() => {
     const q = inboxSearchQuery.trim().toLowerCase().replace(/^@+/, '')
@@ -2788,9 +2851,9 @@ export default function DashboardPage() {
     )
   }
 
-  function toggleInboxThreadLabelFilter(labelId: string) {
+  function selectInboxThreadLabelFilter(labelId: string) {
     setInboxThreadLabelFilterIds((prev) =>
-      prev.includes(labelId) ? prev.filter((id) => id !== labelId) : [...prev, labelId]
+      prev.length === 1 && prev[0] === labelId ? [] : [labelId]
     )
   }
 
@@ -3078,8 +3141,8 @@ export default function DashboardPage() {
         {activeTab === 'post' ? (
           <section className="space-y-3 max-w-4xl">
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
-              Goes to the public feed for all approved customers. They can like and comment. Approved customers get an in-app notification and email when you
-              publish.
+              Goes to the public feed for all approved customers. They can like and comment. Everyone approved gets an in-app notification when you publish. Email goes only to customers labeled{' '}
+              <strong className="text-[#c4cbe6]">Active player</strong> or <strong className="text-[#c4cbe6]">Account created</strong> on their support thread.
             </p>
 
             <div className="rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] p-3 space-y-3">
@@ -3231,7 +3294,7 @@ export default function DashboardPage() {
                             />
                           </div>
                         ) : null}
-                        <div className="flex items-center gap-4 px-4 py-3 border-t border-white/10 text-sm text-[#9ea8cc]">
+                        <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-sm text-[#9ea8cc]">
                           <button
                             type="button"
                             disabled={meta.likes === 0}
@@ -3257,6 +3320,14 @@ export default function DashboardPage() {
                           >
                             <RelayChatBubbleIcon className="text-[#8d63ff]" size={16} strokeWidth={2} />
                             {meta.comments} comments
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void shareStaffAnnouncement(a)}
+                            className="inline-flex items-center gap-1.5 hover:text-white ml-auto"
+                          >
+                            <Share2 className="w-4 h-4 text-[#8d63ff]" />
+                            Share link
                           </button>
                         </div>
                         {engagementOpen?.postId === a.id ? (
@@ -3424,7 +3495,7 @@ export default function DashboardPage() {
                   {inboxSearchQuery.trim() || inboxThreadLabelFilterIds.length > 0
                     ? `${inboxDisplayList.length} of ${convoListMerged.length} threads`
                     : `${convoListMerged.length} threads`}
-                  {inboxShowsRecentCap && !inboxSearchQuery.trim()
+                  {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0
                     ? ` · ${INBOX_THREAD_LIMIT} most recent`
                     : ''}
                 </span>
@@ -3489,15 +3560,26 @@ export default function DashboardPage() {
                       />
                     </div>
                     {inboxLabelCatalog.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        <span className="text-[10px] text-[#5c647e] w-full">Filter by label (any match)</span>
+                      <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                        <span className="text-[10px] text-[#5c647e] w-full">Filter by label</span>
+                        <button
+                          type="button"
+                          onClick={() => setInboxThreadLabelFilterIds([])}
+                          className={`inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                            inboxThreadLabelFilterIds.length === 0
+                              ? 'border-[#8d63ff]/50 bg-[rgba(141,99,255,0.15)] text-[#c4b8ff] ring-1 ring-[#8d63ff]/50'
+                              : 'border-white/[0.12] bg-white/[0.04] text-[#9ea8cc] opacity-90 hover:opacity-100 hover:text-white'
+                          }`}
+                        >
+                          All threads
+                        </button>
                         {inboxLabelCatalog.map((lbl) => {
                           const on = inboxThreadLabelFilterIds.includes(lbl.id)
                           return (
                             <button
                               key={lbl.id}
                               type="button"
-                              onClick={() => toggleInboxThreadLabelFilter(lbl.id)}
+                              onClick={() => selectInboxThreadLabelFilter(lbl.id)}
                               className={`inline-flex max-w-full truncate rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
                                 on ? 'ring-1 ring-[#8d63ff]/50' : 'opacity-80 hover:opacity-100'
                               }`}
@@ -3507,23 +3589,29 @@ export default function DashboardPage() {
                             </button>
                           )
                         })}
-                        {inboxThreadLabelFilterIds.length > 0 ? (
-                          <button
-                            type="button"
-                            onClick={() => setInboxThreadLabelFilterIds([])}
-                            className="text-[10px] font-medium text-[#8d63ff] hover:underline px-1"
-                          >
-                            Clear labels
-                          </button>
-                        ) : null}
                       </div>
                     ) : null}
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-white/[0.08] max-h-[44vh] lg:max-h-none">
-                    {inboxShowsRecentCap && !inboxSearchQuery.trim() ? (
+                    {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0 ? (
                       <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
                         Showing the {INBOX_THREAD_LIMIT} most recently active threads. Chats do not expire — search by
                         name to find older conversations (e.g. Bayern).
+                      </p>
+                    ) : inboxThreadLabelFilterIds.length > 0 ? (
+                      <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
+                        {inboxDisplayList.length === 0
+                          ? 'No labeled threads in the recent load.'
+                          : `${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label in the recent load.`}{' '}
+                        Search by name to find older labeled conversations, or{' '}
+                        <button
+                          type="button"
+                          onClick={() => setInboxThreadLabelFilterIds([])}
+                          className="font-semibold text-[#8d63ff] hover:underline"
+                        >
+                          view all threads
+                        </button>
+                        .
                       </p>
                     ) : null}
                     {inboxSearchExtraBusy && inboxSearchQuery.trim().length >= 2 ? (
