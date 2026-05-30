@@ -37,6 +37,7 @@ import { ContentModerationMenu } from '@/components/ContentModerationMenu'
 import { sharePostLink } from '@/lib/sharePostLink'
 import { ChatMessageImage } from '@/components/ChatMessageImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
+import { ExpandablePostText } from '@/components/ExpandablePostText'
 
 type ProfileRow = {
   id: string
@@ -1807,8 +1808,22 @@ export default function FeedPage() {
                       </div>
                     </div>
                     <div className={`mt-3 text-[15px] ${isLight ? 'text-slate-800' : 'text-white'}`}>
-                      <p className={`mb-1.5 whitespace-pre-wrap ${headingText}`}>{a.title}</p>
-                      <p className={`whitespace-pre-wrap text-[15px] ${isLight ? 'text-slate-700 leading-7' : 'leading-snug'}`}>{a.body}</p>
+                      {a.title.trim() ? (
+                        <ExpandablePostText
+                          text={a.title}
+                          collapsedLines={3}
+                          isLight={isLight}
+                          className={`mb-1.5 font-semibold ${headingText}`}
+                        />
+                      ) : null}
+                      {a.body.trim() ? (
+                        <ExpandablePostText
+                          text={a.body}
+                          collapsedLines={5}
+                          isLight={isLight}
+                          className={`text-[15px] ${isLight ? 'text-slate-700 leading-7' : 'leading-snug'}`}
+                        />
+                      ) : null}
                     </div>
                   </div>
 

@@ -2362,9 +2362,9 @@ export default function DashboardPage() {
     if (!profile?.business_id) return
     const rawTitle = postTitle.trim()
     const rawBody = postBody.trim()
-    if (!rawBody && !postImage) return
+    if (!rawTitle && !rawBody && !postImage) return
     const title = rawTitle || (rawBody ? rawBody.slice(0, 60) : 'Photo update')
-    const body = rawBody || 'Shared a photo.'
+    const body = rawBody || (rawTitle ? '' : 'Shared a photo.')
     setPostBusy(true)
     let notified = 0
     try {
@@ -3200,25 +3200,31 @@ export default function DashboardPage() {
 
             <div className="rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] p-3 space-y-3">
               <input type="file" ref={postFileInputRef} accept="image/*" className="hidden" onChange={onPostImagePick} />
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#8d63ff] to-[#5a7ff6] flex items-center justify-center">
+              <div className="flex items-start gap-3">
+                <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#8d63ff] to-[#5a7ff6] flex items-center justify-center shrink-0 mt-0.5">
                   <User2 className="w-5 h-5 text-white" />
                 </div>
+                <div className="flex-1 min-w-0 space-y-1">
+                  <textarea
+                    rows={2}
+                    className="w-full bg-[#111a31] border border-white/10 rounded-2xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff] text-[#dce3f9] placeholder:text-[#8b97bf] resize-none min-h-[52px] max-h-32"
+                    placeholder="What's on your mind?"
+                    value={postTitle}
+                    onChange={(e) => setPostTitle(e.target.value)}
+                  />
+                  <p className="text-[11px] text-[#7d86a8] px-1">Main line — shows first on the feed (bold).</p>
+                </div>
+              </div>
+              <div className="space-y-1">
                 <textarea
-                  rows={2}
-                  className="flex-1 bg-[#111a31] border border-white/10 rounded-2xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff] text-[#dce3f9] placeholder:text-[#8b97bf] resize-none min-h-[52px] max-h-32"
-                  placeholder="What's on your mind?"
+                  rows={3}
+                  className="w-full bg-[#111a31] border border-white/10 rounded-2xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff] min-h-20 max-h-40 resize-y text-[#dce3f9] placeholder:text-[#8b97bf]"
+                  placeholder="Add more details (optional)"
                   value={postBody}
                   onChange={(e) => setPostBody(e.target.value)}
                 />
+                <p className="text-[11px] text-[#7d86a8] px-1">Optional — shows below the main line if you add text here.</p>
               </div>
-              <textarea
-                rows={3}
-                className="w-full bg-[#111a31] border border-white/10 rounded-2xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff] min-h-20 max-h-40 resize-y"
-                placeholder="Add more details (optional)"
-                value={postTitle}
-                onChange={(e) => setPostTitle(e.target.value)}
-              />
               {postImage ? (
                 <div className="relative rounded-xl overflow-hidden border border-white/10 max-h-56">
                   <img src={postImage.previewUrl} alt="" className="w-full h-full object-cover max-h-56" />
@@ -3244,7 +3250,7 @@ export default function DashboardPage() {
               </div>
               <button
                 type="button"
-                disabled={postBusy || (!postBody.trim() && !postImage)}
+                disabled={postBusy || (!postTitle.trim() && !postBody.trim() && !postImage)}
                 onClick={() => void publishAnnouncement()}
                 className="w-full rounded-xl py-2.5 font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
               >
@@ -3333,8 +3339,14 @@ export default function DashboardPage() {
                             </div>
                           ) : (
                             <>
-                              <p className="font-semibold text-white whitespace-pre-wrap">{a.title}</p>
-                              <p className="text-sm text-[#c4cbe6] mt-1 whitespace-pre-wrap line-clamp-6">{a.body}</p>
+                              {a.title.trim() ? (
+                                <p className="font-semibold text-white whitespace-pre-wrap">{a.title}</p>
+                              ) : null}
+                              {a.body.trim() ? (
+                                <p className={`text-sm text-[#c4cbe6] whitespace-pre-wrap line-clamp-6 ${a.title.trim() ? 'mt-1' : ''}`}>
+                                  {a.body}
+                                </p>
+                              ) : null}
                             </>
                           )}
                         </div>
@@ -3526,7 +3538,7 @@ export default function DashboardPage() {
                                                     />
                                                   ) : (
                                                     <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
-                                                      {(profile?.first_name || profile?.username || 'JB').slice(0, 2).toUpperCase()}
+                                                      {(profile?.username || 'JB').slice(0, 2).toUpperCase()}
                                                     </div>
                                                   )}
                                                   <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
@@ -3587,7 +3599,7 @@ export default function DashboardPage() {
                                       />
                                     ) : (
                                       <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
-                                        {(profile?.first_name || profile?.username || 'JB').slice(0, 2).toUpperCase()}
+                                        {(profile?.username || 'JB').slice(0, 2).toUpperCase()}
                                       </div>
                                     )}
                                     <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
