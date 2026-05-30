@@ -46,8 +46,20 @@ type ProfileRow = {
   avatar_url?: string | null
   account_status?: string
 }
-type BusinessRow = { id: string; name: string; slug: string }
-type BizEmbed = { id: string; name: string; slug: string }
+type BusinessRow = {
+  id: string
+  name: string
+  slug: string
+  logo_url?: string | null
+  admin_avatar_url?: string | null
+}
+type BizEmbed = { id: string; name: string; slug: string; logo_url?: string | null }
+type AuthorEmbed = {
+  avatar_url?: string | null
+  first_name?: string | null
+  last_name?: string | null
+  username?: string
+}
 type AnnouncementRow = {
   id: string
   title: string
@@ -55,9 +67,18 @@ type AnnouncementRow = {
   image_url?: string | null
   created_at: string
   business_id: string
+  author_id?: string
   businesses: BizEmbed | BizEmbed[] | null
+  author?: AuthorEmbed | AuthorEmbed[] | null
 }
-type ProfileEmbed = { username: string; first_name: string; last_name: string; avatar_url?: string | null }
+type ProfileEmbed = {
+  username: string
+  first_name: string
+  last_name: string
+  avatar_url?: string | null
+  role?: string
+  business_role?: string | null
+}
 type CommentRow = {
   id: string
   announcement_id: string
@@ -75,6 +96,7 @@ type MessageSenderEmbed = {
   last_name: string
   role: string
   business_role: string | null
+  avatar_url?: string | null
 }
 type MessageRow = {
   id: string
@@ -119,6 +141,100 @@ function initials(name: string) {
   return (p[0]?.slice(0, 2) || '?').toUpperCase()
 }
 
+const MESSAGE_PROFILE_SELECT =
+  'username, first_name, last_name, role, business_role, avatar_url'
+
+function teamAvatarUrl(
+  embed: MessageSenderEmbed | null,
+  biz: BusinessRow | null | undefined
+): string | null {
+  return (
+    embed?.avatar_url?.trim() ||
+    biz?.logo_url?.trim() ||
+    biz?.admin_avatar_url?.trim() ||
+    null
+  )
+}
+
+function businessChatAvatarUrl(biz: BusinessRow | null | undefined): string | null {
+  return biz?.logo_url?.trim() || biz?.admin_avatar_url?.trim() || null
+}
+
+function ChatAvatar({
+  name,
+  imageUrl,
+  className,
+  gradient,
+}: {
+  name: string
+  imageUrl?: string | null
+  className: string
+  gradient: string
+}) {
+  if (imageUrl?.trim()) {
+    return (
+      <img
+        src={imageUrl.trim()}
+        alt={`${name} avatar`}
+        className={`${className} rounded-full object-cover border border-white/20 shrink-0`}
+      />
+    )
+  }
+  return (
+    <div
+      className={`${className} rounded-full flex items-center justify-center font-bold text-white border border-white/30 shrink-0`}
+      style={{ background: gradient }}
+    >
+      {initials(name)}
+    </div>
+  )
+}
+
+function announcementAvatarUrl(a: AnnouncementRow): string | null {
+  const biz = one(a.businesses)
+  const author = one(a.author)
+  return biz?.logo_url?.trim() || author?.avatar_url?.trim() || null
+}
+
+async function loadBusinessRows(supabase: ReturnType<typeof createClient>): Promise<BusinessRow[]> {
+  const { data: biz, error: bErr } = await supabase
+    .from('businesses')
+    .select('id, name, slug, logo_url')
+    .order('name')
+
+  if (bErr || !biz?.length) return (biz || []) as BusinessRow[]
+
+  const bizIds = biz.map((b) => (b as { id: string }).id)
+  const adminAvatarByBiz: Record<string, string> = {}
+
+  const { data: admins } = await supabase
+    .from('profiles')
+    .select('business_id, avatar_url')
+    .eq('role', 'business')
+    .eq('business_role', 'admin')
+    .in('business_id', bizIds)
+    .not('avatar_url', 'is', null)
+
+  for (const row of admins || []) {
+    const r = row as { business_id: string; avatar_url: string | null }
+    const url = r.avatar_url?.trim()
+    if (url) adminAvatarByBiz[r.business_id] = url
+  }
+
+  return (biz as BusinessRow[]).map((b) => ({
+    ...b,
+    admin_avatar_url: adminAvatarByBiz[b.id] ?? null,
+  }))
+}
+
+function isAdminComment(c: CommentRow): boolean {
+  const p = one(c.profiles)
+  return p?.role === 'business' && p?.business_role === 'admin'
+}
+
+const COMMENT_PROFILE_SELECT =
+  'username, first_name, last_name, avatar_url, role, business_role'
+
 function commentsByParent(comments: CommentRow[]) {
   const map = new Map<string | null, CommentRow[]>()
   for (const c of comments) {
@@ -126,8 +242,17 @@ function commentsByParent(comments: CommentRow[]) {
     if (!map.has(k)) map.set(k, [])
     map.get(k)!.push(c)
   }
-  for (const arr of map.values()) {
-    arr.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
+  for (const [parentId, arr] of map.entries()) {
+    if (parentId === null) {
+      arr.sort((a, b) => {
+        const aAdmin = isAdminComment(a)
+        const bAdmin = isAdminComment(b)
+        if (aAdmin !== bAdmin) return aAdmin ? -1 : 1
+        return +new Date(a.created_at) - +new Date(b.created_at)
+      })
+    } else {
+      arr.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
+    }
   }
   return map
 }
@@ -248,7 +373,9 @@ export default function FeedPage() {
           image_url,
           created_at,
           business_id,
-          businesses ( id, name, slug )
+          author_id,
+          businesses ( id, name, slug, logo_url ),
+          author:profiles!announcements_author_id_fkey ( avatar_url, first_name, last_name, username )
         `
         )
         .in('business_id', followIds)
@@ -301,7 +428,7 @@ export default function FeedPage() {
           created_at,
           user_id,
           hidden_at,
-          profiles ( username, first_name, last_name, avatar_url )
+          profiles ( ${COMMENT_PROFILE_SELECT} )
         `
         )
         .in('announcement_id', ids)
@@ -434,12 +561,8 @@ export default function FeedPage() {
       if (cancelled) return
       setProfile(pr)
 
-      const { data: biz, error: bErr } = await supabase
-        .from('businesses')
-        .select('id, name, slug')
-        .order('name')
-
-      if (!bErr && biz) setBusinesses(biz as BusinessRow[])
+      const bizRows = await loadBusinessRows(supabase)
+      if (!cancelled) setBusinesses(bizRows)
 
       const { data: followsRows } = await supabase.from('follows').select('business_id').eq('user_id', session.user.id)
       const fids = (followsRows || []).map((r) => (r as { business_id: string }).business_id)
@@ -574,7 +697,7 @@ export default function FeedPage() {
           body,
           created_at,
           user_id,
-          profiles ( username, first_name, last_name, avatar_url )
+          profiles ( ${COMMENT_PROFILE_SELECT} )
         `
         )
         .single()
@@ -698,7 +821,7 @@ export default function FeedPage() {
           body,
           created_at,
           user_id,
-          profiles ( username, first_name, last_name, avatar_url )
+          profiles ( ${COMMENT_PROFILE_SELECT} )
         `
         )
         .single()
@@ -721,8 +844,7 @@ export default function FeedPage() {
 
   const loadConversationMessages = useCallback(
     async (conversationId: string) => {
-      const sel =
-        'id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( username, first_name, last_name, role, business_role )'
+      const sel = `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( ${MESSAGE_PROFILE_SELECT} )`
 
       const { data: msgs, error: mErr } = await supabase
         .from('messages')
@@ -1219,8 +1341,7 @@ export default function FeedPage() {
 
       const body = text || (imageUrl ? '📷' : ' ')
 
-      const sel =
-        'id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( username, first_name, last_name, role, business_role )'
+      const sel = `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( ${MESSAGE_PROFILE_SELECT} )`
 
       const { data, error } = await supabase
         .from('messages')
@@ -1499,6 +1620,7 @@ export default function FeedPage() {
             announcements.map((a) => {
               const biz = one(a.businesses)
               const bizName = biz?.name || 'Business'
+              const postAvatarUrl = announcementAvatarUrl(a)
               const liked = likeRows.some((r) => r.announcement_id === a.id)
               const count = likeCounts[a.id] || 0
               const comments = commentsByAnn[a.id] || []
@@ -1651,12 +1773,20 @@ export default function FeedPage() {
                 >
                   <div className="p-4 pb-0">
                     <div className="flex items-start gap-3">
-                      <div
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-                        style={{ backgroundColor: fbBlue }}
-                      >
-                        {initials(bizName)}
-                      </div>
+                      {postAvatarUrl ? (
+                        <img
+                          src={postAvatarUrl}
+                          alt={`${bizName} avatar`}
+                          className="w-10 h-10 rounded-full object-cover shrink-0 border border-white/10"
+                        />
+                      ) : (
+                        <div
+                          className="w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
+                          style={{ backgroundColor: fbBlue }}
+                        >
+                          {initials(bizName)}
+                        </div>
+                      )}
                       <div className="min-w-0 flex-1 leading-tight">
                         {biz?.slug ? (
                           <Link
@@ -1844,11 +1974,17 @@ export default function FeedPage() {
           >
             {supportPanelView === 'chat' && (conversation || supportBizId) ? (
               <>
-                <div className="w-9 h-9 rounded-full bg-white/25 flex items-center justify-center text-xs font-bold shrink-0 border border-white/30 ml-1">
-                  {initials(
-                    businesses.find((b) => b.id === supportBizId)?.name || 'B'
-                  )}
-                </div>
+                {(() => {
+                  const activeBiz = businesses.find((b) => b.id === supportBizId)
+                  return (
+                    <ChatAvatar
+                      name={activeBiz?.name || 'Business'}
+                      imageUrl={businessChatAvatarUrl(activeBiz)}
+                      className="w-9 h-9 text-xs ml-1"
+                      gradient={relayChatGradient}
+                    />
+                  )
+                })()}
                 <div className="min-w-0 flex-1">
                   <div className="font-semibold text-sm truncate leading-tight">
                     {businesses.find((b) => b.id === supportBizId)?.name || 'Business'}
@@ -1910,12 +2046,12 @@ export default function FeedPage() {
                         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/10 border-b border-white/10 text-left transition-colors disabled:opacity-50"
                       >
                         <div className="relative shrink-0">
-                          <div
-                            className="w-12 h-12 rounded-full flex items-center justify-center text-white text-sm font-bold"
-                            style={{ background: relayChatGradient }}
-                          >
-                            {initials(b.name)}
-                          </div>
+                          <ChatAvatar
+                            name={b.name}
+                            imageUrl={businessChatAvatarUrl(b)}
+                            className="w-12 h-12 text-sm"
+                            gradient={relayChatGradient}
+                          />
                           {unread > 0 ? (
                             <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[#ff3355] text-white text-[10px] font-extrabold leading-[18px] text-center border-2 border-[#0f1a38]">
                               {unread > 9 ? '9+' : unread}
@@ -1951,12 +2087,17 @@ export default function FeedPage() {
               <div ref={supportMessagesScrollRef} className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
                 {messages.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
-                    <div
-                      className="w-14 h-14 rounded-full flex items-center justify-center text-white mb-3"
-                      style={{ background: relayChatGradient }}
-                    >
-                      <MessageCircle className="w-7 h-7" />
-                    </div>
+                    {(() => {
+                      const activeBiz = businesses.find((b) => b.id === supportBizId)
+                      return (
+                        <ChatAvatar
+                          name={activeBiz?.name || 'Business'}
+                          imageUrl={businessChatAvatarUrl(activeBiz)}
+                          className="w-14 h-14 text-sm mb-3"
+                          gradient={relayChatGradient}
+                        />
+                      )
+                    })()}
                     <p className="text-sm font-medium text-white">No messages yet</p>
                     <p className="text-xs text-[#7f8bad] mt-1">
                       Send a message or a photo to start the conversation.
@@ -1966,8 +2107,14 @@ export default function FeedPage() {
                   messages.map((m, i) => {
                     const mine = m.sender_id === profile.id
                     const embed = one(m.profiles)
+                    const activeBiz = businesses.find((b) => b.id === supportBizId)
+                    const isTeam = !mine && embed?.role === 'business'
+                    const prev = i > 0 ? messages[i - 1] : null
+                    const showAvatar = isTeam && (!prev || prev.sender_id !== m.sender_id)
+                    const avatarName = activeBiz?.name || embed?.username || 'Team'
+                    const avatarUrl = teamAvatarUrl(embed, activeBiz)
                     const teamLine =
-                      !mine && embed && embed.role === 'business'
+                      isTeam && embed
                         ? `${[embed.first_name, embed.last_name].filter(Boolean).join(' ').trim() || `@${embed.username}`} · @${embed.username}`
                         : null
                     const showText = Boolean(m.body?.trim()) && m.body !== '📷'
@@ -1977,10 +2124,26 @@ export default function FeedPage() {
                       <div
                         key={m.id}
                         className={clsx(
-                          'flex flex-col w-fit max-w-[min(92%,22rem)] shrink-0',
-                          mine ? 'ml-auto items-end' : 'mr-auto items-start'
+                          'flex w-full max-w-full shrink-0',
+                          mine ? 'justify-end' : 'justify-start gap-2'
                         )}
                       >
+                        {!mine && showAvatar ? (
+                          <ChatAvatar
+                            name={avatarName}
+                            imageUrl={avatarUrl}
+                            className="w-7 h-7 text-[10px] self-end mb-5"
+                            gradient={relayChatGradient}
+                          />
+                        ) : !mine ? (
+                          <div className="w-7 shrink-0" aria-hidden />
+                        ) : null}
+                        <div
+                          className={clsx(
+                            'flex flex-col w-fit max-w-[min(calc(100%-2.25rem),22rem)] shrink-0',
+                            mine ? 'items-end' : 'items-start'
+                          )}
+                        >
                         {teamLine ? (
                           <p
                             className="text-[10px] text-[#aeb7d6] px-1 pb-0.5 font-medium truncate max-w-full"
@@ -2044,6 +2207,7 @@ export default function FeedPage() {
                           {!mine && isLastOther && m.read && m.read_at ? (
                             <span className="text-[#6b7aad]">Opened · {timeAgo(m.read_at)}</span>
                           ) : null}
+                        </div>
                         </div>
                       </div>
                     )

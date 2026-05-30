@@ -168,6 +168,8 @@ type BasicProfile = {
   first_name: string | null
   last_name: string | null
   avatar_url?: string | null
+  role?: string
+  business_role?: string | null
 }
 
 type CommentPreview = {
@@ -187,6 +189,7 @@ type EngagementComment = {
   hidden_at?: string | null
   userName: string
   userAvatar: string | null
+  isStaff?: boolean
 }
 
 function formatModerationError(e: unknown, action: string): string {
@@ -208,8 +211,17 @@ function engagementCommentsByParent(list: EngagementComment[]) {
     if (!m.has(k)) m.set(k, [])
     m.get(k)!.push(c)
   }
-  for (const arr of m.values()) {
-    arr.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
+  for (const [parentId, arr] of m.entries()) {
+    if (parentId === null) {
+      arr.sort((a, b) => {
+        const aStaff = Boolean(a.isStaff)
+        const bStaff = Boolean(b.isStaff)
+        if (aStaff !== bStaff) return aStaff ? -1 : 1
+        return +new Date(a.created_at) - +new Date(b.created_at)
+      })
+    } else {
+      arr.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
+    }
   }
   return m
 }
@@ -387,7 +399,11 @@ export default function DashboardPage() {
   >({})
   const [myAnnouncementsLoading, setMyAnnouncementsLoading] = useState(false)
   const [engagementOpen, setEngagementOpen] = useState<{ postId: string; mode: 'likes' | 'comments' } | null>(null)
-  const [staffCommentReplyDrafts, setStaffCommentReplyDrafts] = useState<Record<string, string>>({})
+  const [staffCommentDrafts, setStaffCommentDrafts] = useState<Record<string, string>>({})
+  const [staffReplyThreadTarget, setStaffReplyThreadTarget] = useState<{ postId: string; parentId: string } | null>(
+    null
+  )
+  const [staffReplyThreadDraft, setStaffReplyThreadDraft] = useState('')
   const [staffReplyBusyPostId, setStaffReplyBusyPostId] = useState<string | null>(null)
   const [editingPostId, setEditingPostId] = useState<string | null>(null)
   const [editPostTitle, setEditPostTitle] = useState('')
@@ -821,7 +837,7 @@ export default function DashboardPage() {
         if (userIds.size > 0) {
           const { data: rows } = await supabase
             .from('profiles')
-            .select('id, username, first_name, last_name, avatar_url')
+            .select('id, username, first_name, last_name, avatar_url, role, business_role')
             .in('id', [...userIds])
           profileMap = new Map((rows || []).map((row) => [row.id, row as BasicProfile]))
         }
@@ -885,6 +901,7 @@ export default function DashboardPage() {
               hidden_at: (row as { hidden_at?: string | null }).hidden_at ?? null,
               userName: name,
               userAvatar: profileMap.get(row.user_id)?.avatar_url ?? null,
+              isStaff: profileMap.get(row.user_id)?.role === 'business',
             })
           }
         }
@@ -1042,11 +1059,34 @@ export default function DashboardPage() {
     }
   }
 
+  async function submitStaffComment(postId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    const text = (staffCommentDrafts[postId] || '').trim()
+    if (!text) return
+    setStaffReplyBusyPostId(postId)
+    try {
+      const { error } = await supabase.from('comments').insert({
+        announcement_id: postId,
+        user_id: p.id,
+        body: text,
+      })
+      if (error) throw error
+      setStaffCommentDrafts((d) => ({ ...d, [postId]: '' }))
+      setEngagementOpen({ postId, mode: 'comments' })
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not post comment.')
+    } finally {
+      setStaffReplyBusyPostId(null)
+    }
+  }
+
   async function submitStaffCommentReply(postId: string, parentCommentId: string) {
     const p = profileRef.current
     if (!p?.business_id) return
-    const key = `${postId}::${parentCommentId}`
-    const text = (staffCommentReplyDrafts[key] || '').trim()
+    const text = staffReplyThreadDraft.trim()
     if (!text) return
     setStaffReplyBusyPostId(postId)
     try {
@@ -1057,7 +1097,8 @@ export default function DashboardPage() {
         parent_comment_id: parentCommentId,
       })
       if (error) throw error
-      setStaffCommentReplyDrafts((d) => ({ ...d, [key]: '' }))
+      setStaffReplyThreadDraft('')
+      setStaffReplyThreadTarget(null)
       await loadMyAnnouncements(p.business_id)
     } catch (e) {
       console.error(e)
@@ -2637,6 +2678,18 @@ export default function DashboardPage() {
       const nextUrl = `${pub.publicUrl}?v=${Date.now()}`
       const { error: saveErr } = await supabase.from('profiles').update({ avatar_url: nextUrl }).eq('id', profile.id)
       if (saveErr) throw saveErr
+      if (profile.business_id && profile.business_role === 'admin') {
+        const { error: logoErr } = await supabase
+          .from('businesses')
+          .update({ logo_url: nextUrl })
+          .eq('id', profile.business_id)
+        if (logoErr) {
+          console.error('[staff-avatar] business logo sync:', logoErr.message)
+          alert(
+            'Profile photo saved, but it could not sync to the customer chat logo. Run migration 029_businesses_admin_update.sql in Supabase, then upload again.'
+          )
+        }
+      }
       setProfile((prev) => (prev ? { ...prev, avatar_url: nextUrl } : prev))
     } catch (e) {
       console.error(e)
@@ -3294,7 +3347,7 @@ export default function DashboardPage() {
                             />
                           </div>
                         ) : null}
-                        <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-sm text-[#9ea8cc]">
+                        <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-sm">
                           <button
                             type="button"
                             disabled={meta.likes === 0}
@@ -3303,20 +3356,33 @@ export default function DashboardPage() {
                                 prev?.postId === a.id && prev.mode === 'likes' ? null : { postId: a.id, mode: 'likes' }
                               )
                             }
-                            className="inline-flex items-center gap-1.5 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                           >
                             <ThumbsUp className="w-4 h-4 text-[#8d63ff]" />
                             {meta.likes} likes
                           </button>
                           <button
                             type="button"
-                            disabled={meta.comments === 0}
-                            onClick={() =>
-                              setEngagementOpen((prev) =>
-                                prev?.postId === a.id && prev.mode === 'comments' ? null : { postId: a.id, mode: 'comments' }
+                            aria-expanded={engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'}
+                            onClick={() => {
+                              const opening = !(engagementOpen?.postId === a.id && engagementOpen.mode === 'comments')
+                              setEngagementOpen(
+                                opening ? { postId: a.id, mode: 'comments' } : null
                               )
-                            }
-                            className="inline-flex items-center gap-1.5 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                              if (!opening) {
+                                setStaffReplyThreadTarget((prev) => (prev?.postId === a.id ? null : prev))
+                              }
+                              if (opening) {
+                                requestAnimationFrame(() => {
+                                  document.getElementById(`staff-comment-${a.id}`)?.focus()
+                                })
+                              }
+                            }}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 cursor-pointer transition-colors ${
+                              engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
+                                ? 'text-white bg-[#8d63ff]/15'
+                                : 'text-[#c4cbe6] hover:text-white hover:bg-white/[0.06]'
+                            }`}
                           >
                             <RelayChatBubbleIcon className="text-[#8d63ff]" size={16} strokeWidth={2} />
                             {meta.comments} comments
@@ -3324,7 +3390,7 @@ export default function DashboardPage() {
                           <button
                             type="button"
                             onClick={() => void shareStaffAnnouncement(a)}
-                            className="inline-flex items-center gap-1.5 hover:text-white ml-auto"
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors ml-auto"
                           >
                             <Share2 className="w-4 h-4 text-[#8d63ff]" />
                             Share link
@@ -3333,141 +3399,232 @@ export default function DashboardPage() {
                         {engagementOpen?.postId === a.id ? (
                           <div className="px-4 pb-4 border-t border-white/10">
                             <div className="pt-3">
-                              <p className="text-sm font-semibold text-white mb-2">
-                                {engagementOpen.mode === 'likes' ? 'People who liked this post' : 'People who commented on this post'}
-                              </p>
                               {engagementOpen.mode === 'likes' ? (
-                                meta.likedBy.length === 0 ? (
-                                  <p className="text-sm text-[#7d86a8]">No likes yet.</p>
-                                ) : (
-                                  <ul className="space-y-2">
-                                    {meta.likedBy.map((u, idx) => (
-                                      <li key={`${u.name}-${idx}`} className="flex items-center gap-3 rounded-xl border border-white/10 bg-[#131d3d] px-3 py-2.5">
-                                        {u.avatar ? (
-                                          <img src={u.avatar} alt={`${u.name} avatar`} className="w-9 h-9 rounded-full object-cover border border-white/10" />
-                                        ) : (
-                                          <div className="w-9 h-9 rounded-full bg-[#202b51] text-[11px] font-bold text-[#d8def3] border border-white/10 flex items-center justify-center">
-                                            {u.name.slice(0, 2).toUpperCase()}
-                                          </div>
-                                        )}
-                                        <p className="text-sm text-white font-medium">{u.name}</p>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )
-                              ) : meta.commentDetails.length === 0 ? (
-                                <p className="text-sm text-[#7d86a8]">No comments yet.</p>
-                              ) : (
-                                (() => {
-                                  const cBy = engagementCommentsByParent(meta.commentDetails)
-                                  const draftKey = (parentId: string) => `${a.id}::${parentId}`
-                                  function renderEngagementComment(c: EngagementComment): ReactNode {
-                                    const kids = cBy.get(c.id) || []
-                                    const dk = draftKey(c.id)
-                                    return (
-                                      <li key={c.id} className="flex items-start gap-2.5">
-                                        {c.userAvatar ? (
-                                          <img
-                                            src={c.userAvatar}
-                                            alt={`${c.userName} avatar`}
-                                            className="w-9 h-9 rounded-full object-cover border border-white/10 shrink-0"
-                                          />
-                                        ) : (
-                                          <div className="w-9 h-9 rounded-full bg-[#202b51] text-[11px] font-bold text-[#d8def3] border border-white/10 flex items-center justify-center shrink-0">
-                                            {c.userName.slice(0, 2).toUpperCase()}
-                                          </div>
-                                        )}
-                                        <div className="min-w-0 flex-1 space-y-2">
-                                          <div className="rounded-2xl border border-white/10 bg-[#131d3d] px-3 py-2">
-                                            <div className="flex items-start justify-between gap-2">
-                                              <div className="min-w-0 flex-1">
-                                                <p className="text-sm text-white font-medium leading-tight">{c.userName}</p>
-                                                {c.hidden_at ? (
-                                                  <span className="mt-0.5 inline-block rounded border border-amber-500/30 bg-amber-500/10 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-200">
-                                                    Hidden
-                                                  </span>
-                                                ) : null}
-                                              </div>
-                                              <ContentModerationMenu
-                                                isHidden={Boolean(c.hidden_at)}
-                                                busy={commentModerationBusyId === c.id}
-                                                onEdit={() => beginEditComment(c)}
-                                                onHide={() => void toggleCommentHidden(c.id, Boolean(c.hidden_at))}
-                                                onDelete={() => void deleteComment(c.id)}
-                                              />
+                                <>
+                                  <p className="text-sm font-semibold text-white mb-2">People who liked this post</p>
+                                  {meta.likedBy.length === 0 ? (
+                                    <p className="text-sm text-[#7d86a8]">No likes yet.</p>
+                                  ) : (
+                                    <ul className="space-y-2">
+                                      {meta.likedBy.map((u, idx) => (
+                                        <li key={`${u.name}-${idx}`} className="flex items-center gap-3 rounded-xl border border-white/10 bg-[#131d3d] px-3 py-2.5">
+                                          {u.avatar ? (
+                                            <img src={u.avatar} alt={`${u.name} avatar`} className="w-9 h-9 rounded-full object-cover border border-white/10" />
+                                          ) : (
+                                            <div className="w-9 h-9 rounded-full bg-[#202b51] text-[11px] font-bold text-[#d8def3] border border-white/10 flex items-center justify-center">
+                                              {u.name.slice(0, 2).toUpperCase()}
                                             </div>
-                                            {editingCommentId === c.id ? (
-                                              <div className="mt-2 space-y-2">
-                                                <textarea
-                                                  className="w-full min-h-16 rounded-xl border border-white/10 bg-[#111a31] px-2.5 py-2 text-sm text-white outline-none focus:border-[#6f54ff]"
-                                                  value={editCommentBody}
-                                                  onChange={(e) => setEditCommentBody(e.target.value)}
-                                                />
-                                                <div className="flex flex-wrap gap-2">
-                                                  <button
-                                                    type="button"
-                                                    disabled={commentModerationBusyId === c.id || !editCommentBody.trim()}
-                                                    onClick={() => void saveEditComment()}
-                                                    className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
-                                                  >
-                                                    Save
-                                                  </button>
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => setEditingCommentId(null)}
-                                                    className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-[#c4cbe6]"
-                                                  >
-                                                    Cancel
-                                                  </button>
-                                                </div>
-                                              </div>
-                                            ) : (
-                                              <p className="text-sm text-[#c4cbe6] mt-0.5 break-words whitespace-pre-wrap">{c.body}</p>
-                                            )}
-                                            <p className="text-[11px] text-[#7d86a8] mt-1">{timeAgo(c.created_at)}</p>
-                                          </div>
-                                          <div className="flex flex-wrap items-center gap-2">
-                                            <textarea
-                                              rows={1}
-                                              className="flex-1 min-w-[140px] rounded-xl border border-white/10 bg-[#111a31] px-2.5 py-2 text-xs text-white outline-none focus:border-[#6f54ff] resize-none min-h-[36px] max-h-24"
-                                              placeholder={`Reply to ${c.userName}…`}
-                                              value={staffCommentReplyDrafts[dk] || ''}
-                                              onChange={(e) =>
-                                                setStaffCommentReplyDrafts((d) => ({ ...d, [dk]: e.target.value }))
-                                              }
-                                              onKeyDown={(e) => {
-                                                if (e.key === 'Enter' && !e.shiftKey) {
-                                                  e.preventDefault()
-                                                  void submitStaffCommentReply(a.id, c.id)
-                                                }
-                                              }}
-                                            />
-                                            <button
-                                              type="button"
-                                              disabled={
-                                                staffReplyBusyPostId === a.id || !(staffCommentReplyDrafts[dk] || '').trim()
-                                              }
-                                              onClick={() => void submitStaffCommentReply(a.id, c.id)}
-                                              className="rounded-lg px-3 py-2 text-xs font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
-                                            >
-                                              {staffReplyBusyPostId === a.id ? '…' : 'Reply'}
-                                            </button>
-                                          </div>
-                                          {kids.length > 0 ? (
-                                            <ul className="space-y-2.5 border-l border-white/10 pl-3 ml-1">
-                                              {kids.map((k) => renderEngagementComment(k))}
-                                            </ul>
-                                          ) : null}
-                                        </div>
-                                      </li>
-                                    )
-                                  }
-                                  return (
-                                    <ul className="space-y-2.5">
-                                      {(cBy.get(null) || []).map((c) => renderEngagementComment(c))}
+                                          )}
+                                          <p className="text-sm text-white font-medium">{u.name}</p>
+                                        </li>
+                                      ))}
                                     </ul>
-                                  )
-                                })()
+                                  )}
+                                </>
+                              ) : (
+                                <div className="bg-[#091028] border border-white/10 rounded-2xl px-3 py-3 space-y-3">
+                                  {meta.commentDetails.length === 0 ? (
+                                    <p className="text-sm text-[#7d86a8] text-center py-2">No comments yet.</p>
+                                  ) : (
+                                    (() => {
+                                      const cBy = engagementCommentsByParent(meta.commentDetails)
+                                      function renderEngagementComment(c: EngagementComment): ReactNode {
+                                        const kids = cBy.get(c.id) || []
+                                        const isReplying =
+                                          staffReplyThreadTarget?.postId === a.id &&
+                                          staffReplyThreadTarget?.parentId === c.id
+                                        return (
+                                          <li key={c.id} className="flex gap-2 text-sm">
+                                            {c.userAvatar ? (
+                                              <img
+                                                src={c.userAvatar}
+                                                alt={`${c.userName} avatar`}
+                                                className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                              />
+                                            ) : (
+                                              <div className="w-8 h-8 rounded-full bg-[#606770] text-xs font-bold text-white border border-white/10 flex items-center justify-center shrink-0">
+                                                {c.userName.slice(0, 2).toUpperCase()}
+                                              </div>
+                                            )}
+                                            <div className="min-w-0 flex-1">
+                                              <div
+                                                className={`max-w-full rounded-2xl px-3 py-2 border bg-[#131d3d] border-white/10 ${
+                                                  c.hidden_at ? 'opacity-70' : ''
+                                                }`}
+                                              >
+                                                <div className="flex items-start justify-between gap-2">
+                                                  <div className="min-w-0">
+                                                    <span className="font-semibold text-white">{c.userName}</span>
+                                                    {c.hidden_at ? (
+                                                      <span className="ml-2 text-[10px] font-semibold uppercase text-amber-200">
+                                                        Hidden
+                                                      </span>
+                                                    ) : null}
+                                                  </div>
+                                                  <ContentModerationMenu
+                                                    isHidden={Boolean(c.hidden_at)}
+                                                    busy={commentModerationBusyId === c.id}
+                                                    onEdit={() => beginEditComment(c)}
+                                                    onHide={() => void toggleCommentHidden(c.id, Boolean(c.hidden_at))}
+                                                    onDelete={() => void deleteComment(c.id)}
+                                                    className="shrink-0"
+                                                  />
+                                                </div>
+                                                {editingCommentId === c.id ? (
+                                                  <div className="mt-2 space-y-2">
+                                                    <textarea
+                                                      className="w-full min-h-16 rounded-xl border border-white/10 bg-[#111a31] px-2.5 py-2 text-sm text-white outline-none focus:border-[#6f54ff]"
+                                                      value={editCommentBody}
+                                                      onChange={(e) => setEditCommentBody(e.target.value)}
+                                                    />
+                                                    <div className="flex flex-wrap gap-2">
+                                                      <button
+                                                        type="button"
+                                                        disabled={commentModerationBusyId === c.id || !editCommentBody.trim()}
+                                                        onClick={() => void saveEditComment()}
+                                                        className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
+                                                      >
+                                                        Save
+                                                      </button>
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => setEditingCommentId(null)}
+                                                        className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-[#c4cbe6]"
+                                                      >
+                                                        Cancel
+                                                      </button>
+                                                    </div>
+                                                  </div>
+                                                ) : (
+                                                  <p className="mt-0.5 text-[#d4dbf0] break-words whitespace-pre-wrap">{c.body}</p>
+                                                )}
+                                              </div>
+                                              <div className="mt-1 ml-1 flex flex-wrap items-center gap-2">
+                                                <p className="text-[11px] text-[#7d86a8]">{timeAgo(c.created_at)}</p>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    setStaffReplyThreadTarget((prev) =>
+                                                      prev?.postId === a.id && prev.parentId === c.id
+                                                        ? null
+                                                        : { postId: a.id, parentId: c.id }
+                                                    )
+                                                    setStaffReplyThreadDraft('')
+                                                  }}
+                                                  className="text-[11px] font-semibold text-[#8d63ff]"
+                                                >
+                                                  Reply
+                                                </button>
+                                              </div>
+                                              {isReplying ? (
+                                                <div className="mt-2 flex gap-2 items-end">
+                                                  {profile?.avatar_url ? (
+                                                    <img
+                                                      src={profile.avatar_url}
+                                                      alt="Your avatar"
+                                                      className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                                    />
+                                                  ) : (
+                                                    <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
+                                                      {(profile?.first_name || profile?.username || 'JB').slice(0, 2).toUpperCase()}
+                                                    </div>
+                                                  )}
+                                                  <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
+                                                    <textarea
+                                                      rows={1}
+                                                      autoFocus
+                                                      className="flex-1 min-w-0 bg-transparent text-sm py-2 text-white placeholder:text-[#8e99bd] focus:outline-none resize-none min-h-[40px] max-h-28"
+                                                      placeholder={`Reply to ${c.userName}…`}
+                                                      value={staffReplyThreadDraft}
+                                                      onChange={(e) => setStaffReplyThreadDraft(e.target.value)}
+                                                      onKeyDown={(e) => {
+                                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                                          e.preventDefault()
+                                                          void submitStaffCommentReply(a.id, c.id)
+                                                        }
+                                                      }}
+                                                    />
+                                                    <button
+                                                      type="button"
+                                                      disabled={
+                                                        staffReplyBusyPostId === a.id || !staffReplyThreadDraft.trim()
+                                                      }
+                                                      onClick={() => void submitStaffCommentReply(a.id, c.id)}
+                                                      className="p-2 rounded-full text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
+                                                      aria-label="Send reply"
+                                                    >
+                                                      {staffReplyBusyPostId === a.id ? (
+                                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                                      ) : (
+                                                        <Send className="w-4 h-4" />
+                                                      )}
+                                                    </button>
+                                                  </div>
+                                                </div>
+                                              ) : null}
+                                              {kids.length > 0 ? (
+                                                <ul className="mt-2 space-y-2 border-l border-white/10 pl-2 ml-1">
+                                                  {kids.map((k) => renderEngagementComment(k))}
+                                                </ul>
+                                              ) : null}
+                                            </div>
+                                          </li>
+                                        )
+                                      }
+                                      return (
+                                        <ul className="space-y-3">
+                                          {(cBy.get(null) || []).map((c) => renderEngagementComment(c))}
+                                        </ul>
+                                      )
+                                    })()
+                                  )}
+                                  <div className="flex gap-2 items-end">
+                                    {profile?.avatar_url ? (
+                                      <img
+                                        src={profile.avatar_url}
+                                        alt="Your avatar"
+                                        className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                      />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
+                                        {(profile?.first_name || profile?.username || 'JB').slice(0, 2).toUpperCase()}
+                                      </div>
+                                    )}
+                                    <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
+                                      <textarea
+                                        id={`staff-comment-${a.id}`}
+                                        rows={1}
+                                        className="flex-1 min-w-0 bg-transparent text-sm py-2 text-white placeholder:text-[#8e99bd] focus:outline-none resize-none min-h-[40px] max-h-28"
+                                        placeholder="Write a comment…"
+                                        value={staffCommentDrafts[a.id] || ''}
+                                        onChange={(e) =>
+                                          setStaffCommentDrafts((d) => ({ ...d, [a.id]: e.target.value }))
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault()
+                                            void submitStaffComment(a.id)
+                                          }
+                                        }}
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          staffReplyBusyPostId === a.id || !(staffCommentDrafts[a.id] || '').trim()
+                                        }
+                                        onClick={() => void submitStaffComment(a.id)}
+                                        className="p-2 rounded-full text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
+                                        aria-label="Send comment"
+                                      >
+                                        {staffReplyBusyPostId === a.id ? (
+                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                        ) : (
+                                          <Send className="w-4 h-4" />
+                                        )}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
                               )}
                             </div>
                           </div>
