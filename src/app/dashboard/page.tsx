@@ -107,6 +107,8 @@ const THREAD_MESSAGE_SELECT =
 
 /** Inbox shows the N most recently updated threads (not expired — older threads drop off when volume is high). */
 const INBOX_THREAD_LIMIT = 500
+/** PostgREST `.in()` filters are sent on the URL; chunk to stay under proxy length limits. */
+const PROFILE_ID_IN_CHUNK = 200
 
 function oneEmbed<T>(v: T | T[] | null | undefined): T | null {
   if (v == null) return null
@@ -632,14 +634,20 @@ export default function DashboardPage() {
 
       const profileById: Record<string, { first_name: string; last_name: string; username: string; avatar_url?: string | null }> = {}
       if (customerIds.length > 0) {
-        const { data: profs, error: pe } = await supabase
-          .from('profiles')
-          .select('id, first_name, last_name, username, avatar_url')
-          .in('id', customerIds)
-        if (pe) setLoadError((prev) => (prev ? `${prev} · ` : '') + `profiles: ${pe.message}`)
-        for (const row of profs || []) {
-          const r = row as { id: string; first_name: string; last_name: string; username: string; avatar_url?: string | null }
-          profileById[r.id] = r
+        for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
+          const slice = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+          const { data: profs, error: pe } = await supabase
+            .from('profiles')
+            .select('id, first_name, last_name, username, avatar_url')
+            .in('id', slice)
+          if (pe) {
+            setLoadError((prev) => (prev ? `${prev} · ` : '') + `profiles: ${pe.message}`)
+            break
+          }
+          for (const row of profs || []) {
+            const r = row as { id: string; first_name: string; last_name: string; username: string; avatar_url?: string | null }
+            profileById[r.id] = r
+          }
         }
       }
 
@@ -778,16 +786,22 @@ export default function DashboardPage() {
         setActiveMembers([])
         setSuspendedMembers([])
       } else {
-        const { data: memberRows, error: me } = await supabase
-          .from('profiles')
-          .select('id, first_name, last_name, username, account_status, avatar_url')
-          .in('id', merged)
-          .eq('role', 'customer')
-          .in('account_status', ['approved', 'suspended'])
-          .is('deleted_at', null)
-          .order('username')
-        if (me) setLoadError((prev) => (prev ? `${prev} · ` : '') + `members: ${me.message}`)
-        const rows = (memberRows || []) as ActiveMember[]
+        const rows: ActiveMember[] = []
+        for (let i = 0; i < merged.length; i += PROFILE_ID_IN_CHUNK) {
+          const slice = merged.slice(i, i + PROFILE_ID_IN_CHUNK)
+          const { data: memberRows, error: me } = await supabase
+            .from('profiles')
+            .select('id, first_name, last_name, username, account_status, avatar_url')
+            .in('id', slice)
+            .eq('role', 'customer')
+            .in('account_status', ['approved', 'suspended'])
+            .is('deleted_at', null)
+          if (me) {
+            setLoadError((prev) => (prev ? `${prev} · ` : '') + `members: ${me.message}`)
+            break
+          }
+          rows.push(...((memberRows || []) as ActiveMember[]))
+        }
         const approved = rows.filter((r) => r.account_status === 'approved')
         const suspended = rows.filter((r) => r.account_status === 'suspended')
         approved.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
