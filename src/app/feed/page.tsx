@@ -1829,9 +1829,10 @@ export default function FeedPage() {
 
                   {a.image_url ? (
                     <div className="mt-3 px-1">
-                      <img
-                        src={a.image_url}
+                      <ChatMessageImage
+                        imageUrl={a.image_url}
                         alt=""
+                        linkClassName="block w-full cursor-pointer"
                         className="w-full max-h-[480px] object-cover rounded-2xl border border-white/10 bg-black/20"
                       />
                     </div>

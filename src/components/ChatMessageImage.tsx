@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
-import { storagePathFromMessageImageUrl } from '@/lib/messageImageUrl'
+import { useState } from 'react'
+import { ImageLightbox } from '@/components/ImageLightbox'
+import { useMessageImageSrc } from '@/hooks/useMessageImageSrc'
 
 type Props = {
   imageUrl: string
@@ -11,33 +11,23 @@ type Props = {
   linkClassName?: string
 }
 
-/** Renders a chat attachment; uses a signed URL when the bucket is not public. */
+/** Renders a chat attachment; opens in an in-app lightbox instead of navigating away. */
 export function ChatMessageImage({ imageUrl, alt = 'Attachment', className, linkClassName }: Props) {
-  const [src, setSrc] = useState(imageUrl)
-  const supabase = useMemo(() => createClient(), [])
-
-  useEffect(() => {
-    let cancelled = false
-    setSrc(imageUrl)
-
-    const path = storagePathFromMessageImageUrl(imageUrl)
-    if (!path) return
-
-    void (async () => {
-      const { data, error } = await supabase.storage.from('message-images').createSignedUrl(path, 3600)
-      if (cancelled || error || !data?.signedUrl) return
-      setSrc(data.signedUrl)
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [imageUrl, supabase])
+  const src = useMessageImageSrc(imageUrl)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
 
   return (
-    <a href={src} target="_blank" rel="noopener noreferrer" className={linkClassName ?? 'block'}>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={src} alt={alt} className={className} />
-    </a>
+    <>
+      <button
+        type="button"
+        onClick={() => setLightboxOpen(true)}
+        className={linkClassName ?? 'block cursor-pointer'}
+        aria-label="View image"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt={alt} className={className} />
+      </button>
+      <ImageLightbox src={src} alt={alt} open={lightboxOpen} onClose={() => setLightboxOpen(false)} />
+    </>
   )
 }
