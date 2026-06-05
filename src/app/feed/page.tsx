@@ -313,7 +313,9 @@ export default function FeedPage() {
 
   const [businesses, setBusinesses] = useState<BusinessRow[]>([])
   const [supportBizId, setSupportBizId] = useState<string>('')
+  const conversationRef = useRef<ConversationRow | null>(null)
   const [conversation, setConversation] = useState<ConversationRow | null>(null)
+  conversationRef.current = conversation
   const [messages, setMessages] = useState<MessageRow[]>([])
   const [supportDraft, setSupportDraft] = useState('')
   const [supportLoading, setSupportLoading] = useState(false)
@@ -326,7 +328,20 @@ export default function FeedPage() {
   const [feedRefreshing, setFeedRefreshing] = useState(false)
   const [messagesRefreshing, setMessagesRefreshing] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
+  const supportOpenRef = useRef(false)
+  supportOpenRef.current = supportOpen
   const [supportPanelView, setSupportPanelView] = useState<'list' | 'chat'>('list')
+  const supportPanelViewRef = useRef<'list' | 'chat'>('list')
+  supportPanelViewRef.current = supportPanelView
+
+  /** Only mark team messages read while the customer has the chat panel open on this thread. */
+  function isActivelyViewingCustomerChat(conversationId: string) {
+    return (
+      supportOpenRef.current &&
+      supportPanelViewRef.current === 'chat' &&
+      conversationRef.current?.id === conversationId
+    )
+  }
   const [appearance, setAppearance] = useState<AppearanceMode>(() => getStoredAppearance())
   const [greeting, setGreeting] = useState(() => greetingByHour())
   const [greetingSub, setGreetingSub] = useState(() => greetingSubtitle())
@@ -845,8 +860,9 @@ export default function FeedPage() {
   }
 
   const loadConversationMessages = useCallback(
-    async (conversationId: string) => {
+    async (conversationId: string, options?: { markRead?: boolean }) => {
       const sel = `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( ${MESSAGE_PROFILE_SELECT} )`
+      const shouldMarkRead = options?.markRead ?? isActivelyViewingCustomerChat(conversationId)
 
       const { data: msgs, error: mErr } = await supabase
         .from('messages')
@@ -857,15 +873,17 @@ export default function FeedPage() {
       if (mErr) throw mErr
       setMessages((msgs || []) as MessageRow[])
 
-      const { errorMessage: markErr } = await markStaffMessagesReadForCustomer(supabase, conversationId)
-      if (markErr) console.error(markErr)
+      if (shouldMarkRead) {
+        const { errorMessage: markErr } = await markStaffMessagesReadForCustomer(supabase, conversationId)
+        if (markErr) console.error(markErr)
 
-      const { data: msgs2 } = await supabase
-        .from('messages')
-        .select(sel)
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
-      if (msgs2) setMessages(msgs2 as MessageRow[])
+        const { data: msgs2 } = await supabase
+          .from('messages')
+          .select(sel)
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: true })
+        if (msgs2) setMessages(msgs2 as MessageRow[])
+      }
 
       const uid = profile?.id
       if (uid) {
@@ -883,7 +901,11 @@ export default function FeedPage() {
     try {
       const tasks: Promise<unknown>[] = [refreshMessagingUI(uid)]
       if (supportPanelView === 'chat' && conversation?.id) {
-        tasks.push(loadConversationMessages(conversation.id))
+        tasks.push(
+          loadConversationMessages(conversation.id, {
+            markRead: supportOpen && supportPanelView === 'chat',
+          })
+        )
       }
       await Promise.all(tasks)
     } catch (e) {
@@ -992,7 +1014,7 @@ export default function FeedPage() {
 
       setConversation(conv)
 
-      await loadConversationMessages(conv.id)
+      await loadConversationMessages(conv.id, { markRead: true })
     } catch (e) {
       console.error(e)
       setConversation(null)
@@ -1097,12 +1119,32 @@ export default function FeedPage() {
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` },
-        () => void loadConversationMessages(cid)
+        () => {
+          if (!isActivelyViewingCustomerChat(cid)) {
+            const uid = profile?.id
+            if (uid) void refreshMessagingUI(uid)
+            return
+          }
+          void loadConversationMessages(cid, { markRead: true })
+        }
       )
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` },
-        () => void loadConversationMessages(cid)
+        (payload) => {
+          if (!isActivelyViewingCustomerChat(cid)) return
+          const row = payload.new as {
+            id?: string
+            read?: boolean
+            read_at?: string | null
+          }
+          if (!row?.id) return
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === row.id ? { ...m, read: row.read ?? m.read, read_at: row.read_at ?? m.read_at } : m
+            )
+          )
+        }
       )
       .on('broadcast', { event: 'typing' }, ({ payload }) => {
         const p = payload as { userId?: string; typing?: boolean }
@@ -1227,12 +1269,15 @@ export default function FeedPage() {
 
   useEffect(() => {
     if (!profile?.id || !conversation?.id) return
+    if (!supportOpen || supportPanelView !== 'chat') return
+    const cid = conversation.id
     void (async () => {
-      const { errorMessage } = await markConversationNotificationsRead(supabase, profile.id, conversation.id)
-      if (errorMessage) console.error(errorMessage)
+      await loadConversationMessages(cid, { markRead: true })
+      const { errorMessage: nErr } = await markConversationNotificationsRead(supabase, profile.id, cid)
+      if (nErr) console.error(nErr)
       void loadUnreadNotifications(profile.id)
     })()
-  }, [profile?.id, conversation?.id, supabase, loadUnreadNotifications])
+  }, [profile?.id, conversation?.id, supportOpen, supportPanelView, supabase, loadConversationMessages, loadUnreadNotifications])
 
   useEffect(() => {
     if (!profile?.id) return
