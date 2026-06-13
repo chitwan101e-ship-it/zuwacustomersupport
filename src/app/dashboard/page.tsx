@@ -1289,6 +1289,8 @@ export default function DashboardPage() {
   useEffect(() => {
     const p = profileRef.current
     if (!p?.business_id) return
+    const businessId = p.business_id
+    const staffUserId = p.id
 
     let timer: number | null = null
     let slowTimer: number | null = null
@@ -1361,10 +1363,10 @@ export default function DashboardPage() {
     }
 
     const channel = supabase
-      .channel(`staff-dashboard-${p.business_id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations', filter: `business_id=eq.${p.business_id}` }, queueRefresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_reports', filter: `business_id=eq.${p.business_id}` }, queueRefresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'follows', filter: `business_id=eq.${p.business_id}` }, queueRefresh)
+      .channel(`staff-dashboard-${businessId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations', filter: `business_id=eq.${businessId}` }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_reports', filter: `business_id=eq.${businessId}` }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'follows', filter: `business_id=eq.${businessId}` }, queueRefresh)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages' },
@@ -1380,8 +1382,8 @@ export default function DashboardPage() {
               image_url?: string | null
             },
             {
-              businessId: p.business_id,
-              staffUserId: p.id,
+              businessId,
+              staffUserId: staffUserId,
               isActivelyViewingThread: isActivelyViewingInboxThread,
               getConvoFromList: (id) => {
                 const c = convoListRef.current.find((row) => row.id === id)
@@ -1402,7 +1404,7 @@ export default function DashboardPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_canned_replies' }, queueRefresh)
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${p.id}` },
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${staffUserId}` },
         (payload) => {
           queueRefresh()
           const row = payload.new as {
@@ -2233,7 +2235,7 @@ export default function DashboardPage() {
           .select(select)
           .eq('conversation_id', conversationId)
           .order('created_at', { ascending: true })
-        return { data: (data || []) as ThreadMessage[], error }
+        return { data: (data || []) as unknown as ThreadMessage[], error }
       }
 
       async function fetchWithReplyFallback() {
@@ -3233,7 +3235,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen lg:h-screen lg:overflow-hidden text-[14px] leading-snug text-white antialiased bg-[radial-gradient(ellipse_at_top_left,_#0f1840_0%,_#070a18_45%,_#050814_100%)] lg:grid lg:grid-cols-[220px_1fr]">
-      <aside className="hidden lg:flex lg:h-full lg:min-h-0 flex-col border-r border-white/[0.08] bg-[rgba(8,13,28,0.95)] py-3 px-2.5 gap-0.5 overflow-y-auto">
+      <aside className="hidden lg:flex lg:h-full lg:min-h-0 flex-col border-r border-white/[0.08] bg-[rgba(8,13,28,0.95)] py-3 px-2.5 gap-0.5 overflow-y-auto overflow-x-visible">
         <div className="admin-sidebar-top px-2 pb-3">
           <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[#4e5a7a] mb-2">Staff Portal</p>
           <div className="flex items-center gap-2.5 mb-2.5">
@@ -3282,7 +3284,7 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
-        <nav className="flex flex-col gap-0.5 flex-1 min-h-0">
+        <nav className="flex flex-col gap-0.5 flex-1 min-h-0 pr-0.5">
           {navItems.map((item) => {
             const Icon = item.icon
             const active = item.id === activeTab
@@ -3371,8 +3373,16 @@ export default function DashboardPage() {
           </div>
         </header>
 
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <div className="mx-auto w-full max-w-7xl space-y-3 px-3 py-3 sm:px-4 sm:py-4">
+        <div
+          className={`flex-1 min-h-0 ${
+            activeTab === 'inbox' ? 'lg:overflow-hidden lg:flex lg:flex-col' : 'overflow-y-auto'
+          }`}
+        >
+          <div
+            className={`mx-auto w-full max-w-7xl px-3 py-3 sm:px-4 sm:py-4 space-y-3 ${
+              activeTab === 'inbox' ? 'lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden' : ''
+            }`}
+          >
           {loadError ? (
             <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[13px] text-red-200">
               <strong className="font-semibold">Data load issue:</strong> {loadError}
@@ -3919,8 +3929,8 @@ export default function DashboardPage() {
         ) : null}
 
         {activeTab === 'inbox' ? (
-          <section className="space-y-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
+          <section className="space-y-3 lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden">
+            <div className="flex items-center justify-between gap-2 flex-wrap shrink-0">
               <div className="flex items-center gap-2 min-h-[34px]">
                 {inboxUnreadTotal > 0 ? (
                   <span className="text-[10px] font-bold text-[#8d63ff] bg-[rgba(141,99,255,0.2)] border border-[rgba(141,99,255,0.35)] rounded-md px-1.5 py-px tabular-nums">
@@ -3981,7 +3991,7 @@ export default function DashboardPage() {
                 </div>
               )
             ) : (
-              <div className="rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] overflow-hidden lg:grid lg:grid-cols-[minmax(220px,1fr)_minmax(0,1.75fr)] lg:h-[min(calc(100dvh-7.25rem),920px)] lg:min-h-0">
+              <div className="rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] overflow-hidden lg:grid lg:grid-cols-[minmax(220px,1fr)_minmax(0,1.75fr)] lg:grid-rows-[minmax(0,1fr)] lg:flex-1 lg:min-h-0">
                 <aside className="border-r border-white/[0.08] flex flex-col min-h-0 max-h-[44vh] lg:max-h-none lg:h-full">
                   <div className="p-2.5 border-b border-white/[0.08] shrink-0">
                     <div className="relative rounded-xl border border-white/[0.08] bg-[#0f1834]">
@@ -4151,7 +4161,7 @@ export default function DashboardPage() {
                   </div>
                 </aside>
 
-                <div className="flex flex-col relative flex-1 min-h-[260px] max-h-[48vh] lg:min-h-0 lg:max-h-none lg:h-full">
+                <div className="flex flex-col relative min-h-[260px] max-h-[48vh] lg:min-h-0 lg:max-h-none lg:h-full lg:overflow-hidden">
                   {selectedConvo ? (
                     <>
                       <div className="px-3 py-2.5 border-b border-white/[0.08] shrink-0 space-y-2">
@@ -4458,7 +4468,7 @@ export default function DashboardPage() {
                         onClick={() => threadChatScroll.jumpToLatest(scrollThreadToLatest)}
                       />
                       </div>
-                      <div className="p-2.5 border-t border-white/10 space-y-2 shrink-0">
+                      <div className="p-2 border-t border-white/10 space-y-1.5 shrink-0 bg-[rgba(11,18,40,0.98)]">
                         {peerCustomerTyping ? (
                           <p className="text-xs text-[#7d86a8]" aria-live="polite">
                             {selectedConvo.customerName} is typing…
@@ -4674,7 +4684,7 @@ export default function DashboardPage() {
                             Send
                           </button>
                         </div>
-                        <p className="text-[10px] text-[#5c647e]">
+                        <p className="hidden xl:block text-[10px] text-[#5c647e] leading-tight">
                           Photos only (no video). Quick replies support {'{customer_name}'}, {'{username}'}, and {'{business}'} in the saved
                           message.
                         </p>
@@ -5442,10 +5452,10 @@ export default function DashboardPage() {
                 active ? 'text-[#8d63ff]' : 'text-[#8892b0]'
               }`}
             >
-              <span className="relative inline-flex">
+              <span className="relative inline-flex shrink-0">
                 <Icon className="w-[21px] h-[21px] shrink-0" />
                 {item.id === 'inbox' && inboxUnreadTotal > 0 ? (
-                  <span className="absolute top-1 right-[calc(50%-1.25rem)] min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#090e20]">
+                  <span className="absolute -top-1.5 -right-2 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#090e20]">
                     {inboxUnreadTotal > 9 ? '9+' : inboxUnreadTotal}
                   </span>
                 ) : null}
