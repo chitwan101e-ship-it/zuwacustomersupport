@@ -19,12 +19,10 @@ type Props = {
 
 export function DesktopNotificationPrompt({ variant, isLight = false }: Props) {
   const [permission, setPermission] = useState<DesktopNotifyPermission>('default')
-  const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const sync = useCallback(() => {
     setPermission(getDesktopNotifyPermission())
-    setEnabled(isDesktopNotifyEnabled() || isDesktopNotifyPromptDismissed())
   }, [])
 
   useEffect(() => {
@@ -32,13 +30,14 @@ export function DesktopNotificationPrompt({ variant, isLight = false }: Props) {
   }, [sync])
 
   if (!desktopNotifySupported()) return null
-  if (enabled) {
+  if (isDesktopNotifyEnabled()) {
     return (
       <p className={`text-[10px] ${isLight ? 'text-slate-500' : 'text-[#5c647e]'}`}>
         Desktop alerts are on — corner popups for new messages and signup requests.
       </p>
     )
   }
+  if (isDesktopNotifyPromptDismissed()) return null
 
   const label =
     variant === 'staff'
@@ -55,9 +54,7 @@ export function DesktopNotificationPrompt({ variant, isLight = false }: Props) {
     try {
       const p = await requestDesktopNotifyPermission()
       setPermission(p)
-      if (p === 'granted') {
-        setEnabled(true)
-      }
+      sync()
     } finally {
       setBusy(false)
     }
@@ -65,7 +62,6 @@ export function DesktopNotificationPrompt({ variant, isLight = false }: Props) {
 
   function onDismiss() {
     dismissDesktopNotifyPrompt()
-    setEnabled(true)
   }
 
   const shell = isLight

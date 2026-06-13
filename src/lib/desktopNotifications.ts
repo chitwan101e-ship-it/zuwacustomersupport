@@ -62,17 +62,21 @@ export function showDesktopNotification(opts: {
 }): void {
   if (!desktopNotifySupported() || Notification.permission !== 'granted') return
 
-  const icon = `${window.location.origin}/favicon.svg`
-  const n = new Notification(opts.title, {
-    body: opts.body,
-    icon,
-    tag: opts.tag,
-  })
+  try {
+    const icon = `${window.location.origin}/favicon.svg`
+    const n = new Notification(opts.title, {
+      body: opts.body,
+      icon,
+      tag: opts.tag,
+    })
 
-  n.onclick = () => {
-    window.focus()
-    n.close()
-    opts.onClick?.()
+    n.onclick = () => {
+      window.focus()
+      n.close()
+      opts.onClick?.()
+    }
+  } catch (err) {
+    console.error('[desktop-notify] show failed:', err)
   }
 }
 

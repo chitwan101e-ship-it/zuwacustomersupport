@@ -2,7 +2,12 @@
 
 import { useEffect, useRef } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { customerMessagePopupTitle, isDesktopNotifyEnabled, messagePreview, showDesktopNotification } from '@/lib/desktopNotifications'
+import {
+  showStaffInboundDesktopPopup,
+  showStaffNotificationRowDesktopPopup,
+  tryShowStaffInboundMessageDesktopPopup,
+} from '@/lib/staffInboundDesktopAlert'
+import { isDesktopNotifyEnabled } from '@/lib/desktopNotifications'
 
 type NotificationInsert = {
   id: string
@@ -25,11 +30,10 @@ type MessageInsert = {
 
 type WatchMessagesOpts = {
   myUserId: string
+  businessId: string
   popupTitle: string
-  /** Fast check (e.g. not sent by self). */
-  isInboundMessage: (msg: MessageInsert) => boolean
-  /** Optional: async check that this message belongs to the current user (avoids alerting on other tenants). */
-  confirmInbound?: (msg: MessageInsert) => Promise<boolean>
+  isActivelyViewingThread?: (conversationId: string) => boolean
+  getConvoFromList?: (conversationId: string) => { customer_id: string; customerName: string } | undefined
   getSenderLabel?: (msg: MessageInsert) => string | null
 }
 
@@ -39,30 +43,11 @@ type UseDesktopMessageNotificationsOpts = {
   types: string[]
   onOpenMessage?: (row: NotificationInsert) => void
   onOpenConversation?: (conversationId: string) => void
-  /** Prefer messages realtime (works when notifications table is not replicated). */
   watchMessages?: WatchMessagesOpts
-  /** Resolve customer first name for support_message notification popups. */
   getCustomerLabelForConversation?: (conversationId: string | null) => string | null
 }
 
-/** One popup per inbound message (messages + notifications INSERT often fire together). */
-const recentInboundPopups = new Map<string, number>()
-
-function inboundPopupKey(conversationId: string | null, body: string): string {
-  return `${conversationId ?? 'none'}:${body.trim().slice(0, 120)}`
-}
-
-function shouldShowInboundPopup(conversationId: string | null, body: string): boolean {
-  const key = inboundPopupKey(conversationId, body)
-  const now = Date.now()
-  const prev = recentInboundPopups.get(key)
-  if (prev != null && now - prev < 5000) return false
-  recentInboundPopups.set(key, now)
-  window.setTimeout(() => recentInboundPopups.delete(key), 5000)
-  return true
-}
-
-/** Listens for new messages / notifications and shows OS corner popups when allowed. */
+/** Listens for new notifications and shows OS corner popups when allowed. Message popups are handled on the staff dashboard realtime channel. */
 export function useDesktopMessageNotifications({
   supabase,
   userId,
@@ -88,39 +73,24 @@ export function useDesktopMessageNotifications({
 
     const channel = supabase.channel(`desktop-notify-${userId}`)
 
-    if (watchMessagesRef.current) {
-      channel.on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
-        (payload) => {
-          void (async () => {
-            if (!isDesktopNotifyEnabled()) return
-            const wm = watchMessagesRef.current
-            if (!wm) return
-
-            const msg = payload.new as MessageInsert
-            if (msg.sender_id === wm.myUserId) return
-
-            // Only alert on true customer → staff messages (not team replies / welcome msgs).
-            const inbound = wm.confirmInbound
-              ? await wm.confirmInbound(msg)
-              : wm.isInboundMessage(msg)
-            if (!inbound) return
-            const label = wm.getSenderLabel?.(msg)
-            const title = customerMessagePopupTitle(label, wm.popupTitle)
-            const body = messagePreview(msg.body, Boolean(msg.image_url))
-            if (!shouldShowInboundPopup(msg.conversation_id, body)) return
-
-            showDesktopNotification({
-              title,
-              body,
-              tag: `relay-msg-${msg.id}`,
-              onClick: () => onOpenConvoRef.current?.(msg.conversation_id),
-            })
-          })()
-        }
-      )
-    }
+    channel.on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'messages' },
+      (payload) => {
+        void (async () => {
+          const wm = watchMessagesRef.current
+          if (!wm || !isDesktopNotifyEnabled()) return
+          const msg = payload.new as MessageInsert
+          await tryShowStaffInboundMessageDesktopPopup(supabase, msg, {
+            businessId: wm.businessId,
+            staffUserId: wm.myUserId,
+            isActivelyViewingThread: wm.isActivelyViewingThread ?? (() => false),
+            getConvoFromList: (id) => wm.getConvoFromList?.(id),
+            onOpenConversation: (conversationId) => onOpenConvoRef.current?.(conversationId),
+          })
+        })()
+      }
+    )
 
     channel.on(
       'postgres_changes',
@@ -136,9 +106,6 @@ export function useDesktopMessageNotifications({
           const row = payload.new as NotificationInsert
           if (!typesRef.current.includes(row.type)) return
           if (row.read) return
-          if (row.type === 'support_message') {
-            if (!shouldShowInboundPopup(row.conversation_id, row.body)) return
-          }
 
           let customerLabel =
             row.type === 'support_message'
@@ -164,16 +131,14 @@ export function useDesktopMessageNotifications({
             }
           }
 
-          const title =
-            row.type === 'support_message'
-              ? customerMessagePopupTitle(customerLabel, row.title)
-              : row.title
-
-          showDesktopNotification({
-            title,
+          showStaffNotificationRowDesktopPopup({
+            type: row.type,
+            title: row.title,
             body: row.body,
-            tag: `relay-notify-${row.id}`,
-            onClick: () => {
+            conversationId: row.conversation_id,
+            senderLabel: customerLabel,
+            notificationId: row.id,
+            onOpen: () => {
               if (row.conversation_id) onOpenConvoRef.current?.(row.conversation_id)
               else onOpenRef.current?.(row)
             },
@@ -182,7 +147,11 @@ export function useDesktopMessageNotifications({
       }
     )
 
-    channel.subscribe()
+    channel.subscribe((status, err) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        console.error('[desktop-notify] subscription failed:', status, err)
+      }
+    })
 
     return () => {
       void supabase.removeChannel(channel)

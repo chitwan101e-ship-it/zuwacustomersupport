@@ -221,11 +221,14 @@ create table public.messages (
   sender_id       uuid not null references public.profiles(id) on delete cascade,
   body            text not null,
   read            boolean default false,
+  reply_to_message_id uuid references public.messages(id) on delete set null,
   created_at      timestamptz default now()
 );
 
 create index idx_messages_conversation on public.messages(conversation_id);
 create index idx_messages_created      on public.messages(created_at asc);
+create index idx_messages_reply_to     on public.messages(reply_to_message_id)
+  where reply_to_message_id is not null;
 
 -- 8b. INBOX LABELS (staff; matches migration 013_inbox_conversation_labels.sql)
 create table public.inbox_label_definitions (

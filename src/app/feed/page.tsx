@@ -9,7 +9,17 @@ import { markStaffMessagesReadForCustomer } from '@/lib/markStaffMessagesReadFor
 import {
   countUnreadStaffMessages,
   loadCustomerChatPreviews,
+  CUSTOMER_MESSAGE_SELECT,
+  CUSTOMER_MESSAGE_SELECT_LEGACY,
+  CUSTOMER_MESSAGE_SELECT_BASE,
+  hydrateReplyEmbeds,
+  isReplyToSchemaError,
+  oneMessageEmbed as oneReplyEmbed,
+  replyAuthorLabel,
+  replyPreviewText,
   type ChatPreview,
+  type MessageReplyEmbed,
+  type ReplyTargetMessage,
 } from '@/lib/customerMessaging'
 import RelayLogo from '@/components/RelayLogo'
 import { CustomerMobileFooterNav } from '@/components/CustomerMobileFooterNav'
@@ -33,9 +43,15 @@ import {
   CheckCheck,
   Share2,
 } from 'lucide-react'
+import {
+  ChatMessageImage,
+  MessageReplyQuote,
+  ReplyTargetBar,
+} from '@/components/ChatMessageImage'
+import { ChatJumpToLatestButton } from '@/components/ChatJumpToLatestButton'
+import { useChatScrollToLatest } from '@/lib/useChatScrollToLatest'
 import { ContentModerationMenu } from '@/components/ContentModerationMenu'
 import { sharePostLink } from '@/lib/sharePostLink'
-import { ChatMessageImage } from '@/components/ChatMessageImage'
 import { FeedPostImage } from '@/components/FeedPostImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
 import { ExpandablePostText } from '@/components/ExpandablePostText'
@@ -109,6 +125,8 @@ type MessageRow = {
   image_url?: string | null
   read?: boolean | null
   read_at?: string | null
+  reply_to_message_id?: string | null
+  reply_to?: MessageReplyEmbed | MessageReplyEmbed[] | null
   profiles?: MessageSenderEmbed | MessageSenderEmbed[] | null
 }
 
@@ -142,9 +160,6 @@ function initials(name: string) {
   if (p.length >= 2) return (p[0][0] + p[1][0]).toUpperCase()
   return (p[0]?.slice(0, 2) || '?').toUpperCase()
 }
-
-const MESSAGE_PROFILE_SELECT =
-  'username, first_name, last_name, role, business_role, avatar_url'
 
 function teamAvatarUrl(
   embed: MessageSenderEmbed | null,
@@ -290,6 +305,29 @@ function greetingAccentEmoji(d = new Date()) {
   return '🌙'
 }
 
+function businessListScore(b: BusinessRow, previews: Map<string, ChatPreview>): number {
+  const pv = previews.get(b.id)
+  let score = 0
+  if (pv && new Date(pv.lastAt).getTime() > 0) score += 10
+  if (pv?.unreadFromTeam) score += pv.unreadFromTeam * 5
+  if (b.logo_url?.trim() || b.admin_avatar_url?.trim()) score += 3
+  if (previews.has(b.id)) score += 1
+  return score
+}
+
+/** One row per display name — keeps the thread that actually has messages / unread. */
+function dedupeBusinessesByName(rows: BusinessRow[], previews: Map<string, ChatPreview>): BusinessRow[] {
+  const byName = new Map<string, BusinessRow>()
+  for (const b of rows) {
+    const key = b.name.trim().toLowerCase()
+    const existing = byName.get(key)
+    if (!existing || businessListScore(b, previews) > businessListScore(existing, previews)) {
+      byName.set(key, b)
+    }
+  }
+  return Array.from(byName.values())
+}
+
 export default function FeedPage() {
   const router = useRouter()
   const pathname = usePathname()
@@ -323,6 +361,9 @@ export default function FeedPage() {
   /** Unread inbound team messages (drives the Messages FAB — delivered, not opened). */
   const [chatUnreadCount, setChatUnreadCount] = useState(0)
   const [chatPreviews, setChatPreviews] = useState<Map<string, ChatPreview>>(new Map())
+  const chatPreviewsRef = useRef(chatPreviews)
+  chatPreviewsRef.current = chatPreviews
+  const messagesLoadSeqRef = useRef(0)
   const [followedBusinessIds, setFollowedBusinessIds] = useState<string[]>([])
   const [toast, setToast] = useState<string | null>(null)
   const [feedRefreshing, setFeedRefreshing] = useState(false)
@@ -350,6 +391,7 @@ export default function FeedPage() {
     file: File
     previewUrl: string
   } | null>(null)
+  const [replyTarget, setReplyTarget] = useState<ReplyTargetMessage | null>(null)
   const supportFileInputRef = useRef<HTMLInputElement>(null)
   const supportMessagesScrollRef = useRef<HTMLDivElement>(null)
   const supportMessagesEndRef = useRef<HTMLDivElement>(null)
@@ -861,28 +903,50 @@ export default function FeedPage() {
 
   const loadConversationMessages = useCallback(
     async (conversationId: string, options?: { markRead?: boolean }) => {
-      const sel = `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( ${MESSAGE_PROFILE_SELECT} )`
+      const seq = ++messagesLoadSeqRef.current
       const shouldMarkRead = options?.markRead ?? isActivelyViewingCustomerChat(conversationId)
 
-      const { data: msgs, error: mErr } = await supabase
-        .from('messages')
-        .select(sel)
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
+      async function fetchMessages(select: string) {
+        const { data, error } = await supabase
+          .from('messages')
+          .select(select)
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: true })
+        return { data: (data || []) as unknown as MessageRow[], error }
+      }
 
+      async function fetchWithReplyFallback() {
+        let result = await fetchMessages(CUSTOMER_MESSAGE_SELECT)
+        if (result.error && isReplyToSchemaError(result.error.message)) {
+          result = await fetchMessages(CUSTOMER_MESSAGE_SELECT_LEGACY)
+        }
+        if (result.error && isReplyToSchemaError(result.error.message)) {
+          result = await fetchMessages(CUSTOMER_MESSAGE_SELECT_BASE)
+        }
+        if (!result.error) {
+          result = { ...result, data: hydrateReplyEmbeds(result.data) }
+        }
+        return result
+      }
+
+      const { data: msgs, error: mErr } = await fetchWithReplyFallback()
+      if (seq !== messagesLoadSeqRef.current) return
       if (mErr) throw mErr
-      setMessages((msgs || []) as MessageRow[])
+      setMessages(msgs)
 
       if (shouldMarkRead) {
         const { errorMessage: markErr } = await markStaffMessagesReadForCustomer(supabase, conversationId)
         if (markErr) console.error(markErr)
 
-        const { data: msgs2 } = await supabase
-          .from('messages')
-          .select(sel)
-          .eq('conversation_id', conversationId)
-          .order('created_at', { ascending: true })
-        if (msgs2) setMessages(msgs2 as MessageRow[])
+        const { data: msgs2, error: refetchErr } = await fetchWithReplyFallback()
+        if (seq !== messagesLoadSeqRef.current) return
+        if (!refetchErr && msgs2) setMessages(msgs2)
+
+        const uid = profile?.id
+        if (uid) {
+          const { errorMessage: nErr } = await markConversationNotificationsRead(supabase, uid, conversationId)
+          if (nErr) console.error(nErr)
+        }
       }
 
       const uid = profile?.id
@@ -926,12 +990,11 @@ export default function FeedPage() {
 
   /**
    * Which business receives footer / primary Support chat.
-   * If NEXT_PUBLIC_PRIMARY_SUPPORT_BUSINESS_SLUG is set, it wins against the full businesses list
-   * (not only businesses the customer follows) — otherwise a customer-only follow list would miss the support business.
-   * When unset, prefer followed businesses for hints, then first team alphabetically.
+   * If NEXT_PUBLIC_PRIMARY_SUPPORT_BUSINESS_SLUG is set, it wins against the pool
+   * (not only businesses the customer follows) — otherwise a customer-only follow list would miss support.
    */
-  function resolvePrimarySupportBusinessId(): string | null {
-    const list = businesses
+  function resolvePrimarySupportBusinessId(pool: BusinessRow[]): string | null {
+    const list = pool
     if (list.length === 0) return null
 
     const pickFirstByName = (rows: BusinessRow[]) =>
@@ -945,33 +1008,72 @@ export default function FeedPage() {
 
     const followedSet = new Set(followedBusinessIds)
     const followedRows = list.filter((b) => followedSet.has(b.id))
-    const pool = followedRows.length > 0 ? followedRows : list
+    const scoped = followedRows.length > 0 ? followedRows : list
 
     const slugHints = ['support', 'relay', 'jbcoms', 'admin', 'help']
     for (const s of slugHints) {
-      const hit = pool.find((b) => b.slug.toLowerCase() === s)
+      const hit = scoped.find((b) => b.slug.toLowerCase() === s)
       if (hit) return hit.id
     }
-    const byName = pool.find((b) => /support|helpdesk|help\s*desk|relay\s*support/i.test(b.name))
+    const byName = scoped.find((b) => /support|helpdesk|help\s*desk|relay\s*support/i.test(b.name))
     if (byName) return byName.id
-    return pickFirstByName(pool)
+    return pickFirstByName(scoped)
+  }
+
+  function pickBusinessWithUnread(pool: BusinessRow[]): string | null {
+    let best: { id: string; unread: number; lastAt: number } | null = null
+    for (const b of pool) {
+      const pv = chatPreviewsRef.current.get(b.id)
+      const unread = pv?.unreadFromTeam ?? 0
+      if (unread <= 0) continue
+      const lastAt = pv ? new Date(pv.lastAt).getTime() : 0
+      if (
+        !best ||
+        unread > best.unread ||
+        (unread === best.unread && lastAt > best.lastAt)
+      ) {
+        best = { id: b.id, unread, lastAt }
+      }
+    }
+    return best?.id ?? null
+  }
+
+  /** Prefer unread, then the thread with the latest message, then primary support business. */
+  function pickBusinessForChatOpen(pool: BusinessRow[]): string | null {
+    const unreadId = pickBusinessWithUnread(pool)
+    if (unreadId) return unreadId
+
+    let bestActivity: { id: string; lastAt: number } | null = null
+    for (const b of pool) {
+      const pv = chatPreviewsRef.current.get(b.id)
+      const lastAt = pv ? new Date(pv.lastAt).getTime() : 0
+      if (lastAt > 0 && (!bestActivity || lastAt > bestActivity.lastAt)) {
+        bestActivity = { id: b.id, lastAt }
+      }
+    }
+    if (bestActivity) return bestActivity.id
+    if (pool.length === 1) return pool[0].id
+    return resolvePrimarySupportBusinessId(pool)
   }
 
   async function openPrimarySupportChat() {
     if (!profile) return
-    const bid = resolvePrimarySupportBusinessId()
-    if (!bid) {
-      showToast('No team is available to message yet.')
-      setSupportOpen(true)
-      setSupportPanelView('list')
+    setSupportOpen(true)
+
+    const pool = messageableBusinessesRef.current
+    const bid = pickBusinessForChatOpen(pool)
+    if (bid) {
+      await openThreadForBusiness(bid)
       return
     }
-    setSupportOpen(true)
-    await openThreadForBusiness(bid)
+
+    showToast('No team is available to message yet.')
+    setSupportPanelView('list')
   }
 
   function closeMessagesPanel() {
     setSupportOpen(false)
+    setReplyTarget(null)
   }
 
   function onMessagesEntryClick() {
@@ -984,10 +1086,30 @@ export default function FeedPage() {
 
   async function openThreadForBusiness(businessId: string) {
     if (!profile || !businessId) return
+    const switchingBusiness = supportBizId !== businessId
     setSupportBizId(businessId)
     setSupportPanelView('chat')
     setSupportLoading(true)
+    if (switchingBusiness) {
+      messagesLoadSeqRef.current += 1
+      setMessages([])
+      setConversation(null)
+    }
     try {
+      const preview = chatPreviewsRef.current.get(businessId)
+
+      if (preview?.conversationId) {
+        const conv: ConversationRow = {
+          id: preview.conversationId,
+          business_id: businessId,
+          customer_id: profile.id,
+          status: 'open',
+        }
+        setConversation(conv)
+        await loadConversationMessages(conv.id, { markRead: true })
+        return
+      }
+
       const { data: existing, error: exErr } = await supabase
         .from('conversations')
         .select('id, business_id, customer_id, status')
@@ -1013,10 +1135,10 @@ export default function FeedPage() {
       }
 
       setConversation(conv)
-
       await loadConversationMessages(conv.id, { markRead: true })
     } catch (e) {
       console.error(e)
+      showToast('Could not open messages. Try again.')
       setConversation(null)
       setMessages([])
       setSupportPanelView('list')
@@ -1268,18 +1390,6 @@ export default function FeedPage() {
   }, [supportOpen, supportPanelView, profile?.id])
 
   useEffect(() => {
-    if (!profile?.id || !conversation?.id) return
-    if (!supportOpen || supportPanelView !== 'chat') return
-    const cid = conversation.id
-    void (async () => {
-      await loadConversationMessages(cid, { markRead: true })
-      const { errorMessage: nErr } = await markConversationNotificationsRead(supabase, profile.id, cid)
-      if (nErr) console.error(nErr)
-      void loadUnreadNotifications(profile.id)
-    })()
-  }, [profile?.id, conversation?.id, supportOpen, supportPanelView, supabase, loadConversationMessages, loadUnreadNotifications])
-
-  useEffect(() => {
     if (!profile?.id) return
     const onVis = () => {
       if (document.visibilityState === 'visible') {
@@ -1325,14 +1435,19 @@ export default function FeedPage() {
   }
 
   const scrollSupportToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
-    const end = supportMessagesEndRef.current
-    if (end) {
-      end.scrollIntoView({ block: 'end', behavior })
+    const el = supportMessagesScrollRef.current
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior })
       return
     }
-    const el = supportMessagesScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    const end = supportMessagesEndRef.current
+    if (end) end.scrollIntoView({ block: 'end', behavior })
   }, [])
+
+  const supportChatScroll = useChatScrollToLatest(
+    supportMessagesScrollRef,
+    supportOpen && supportPanelView === 'chat' ? conversation?.id ?? null : null
+  )
 
   useEffect(() => {
     if (supportOpen) return
@@ -1341,13 +1456,53 @@ export default function FeedPage() {
       return null
     })
     setSupportDraft('')
+    setReplyTarget(null)
   }, [supportOpen])
 
   useEffect(() => {
-    if (!supportOpen || supportPanelView !== 'chat' || !conversation?.id) return
-    const raf = window.requestAnimationFrame(() => scrollSupportToLatest('auto'))
-    return () => window.cancelAnimationFrame(raf)
-  }, [supportOpen, supportPanelView, conversation?.id, messages.length, scrollSupportToLatest])
+    if (!supportOpen || supportPanelView !== 'chat' || !conversation?.id || supportLoading) return
+    let cancelled = false
+    const scroll = () => {
+      if (cancelled) return
+      scrollSupportToLatest('auto')
+      supportChatScroll.markAtLatest()
+    }
+    const id = window.requestAnimationFrame(() => window.requestAnimationFrame(scroll))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(id)
+    }
+  }, [
+    supportOpen,
+    supportPanelView,
+    conversation?.id,
+    supportLoading,
+    scrollSupportToLatest,
+    supportChatScroll.markAtLatest,
+  ])
+
+  useEffect(() => {
+    if (!supportOpen || supportPanelView !== 'chat' || !conversation?.id || supportLoading) return
+    if (!supportChatScroll.isNearBottomRef.current) return
+    let cancelled = false
+    const scroll = () => {
+      if (cancelled) return
+      scrollSupportToLatest('auto')
+    }
+    const id = window.requestAnimationFrame(() => window.requestAnimationFrame(scroll))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(id)
+    }
+  }, [
+    supportOpen,
+    supportPanelView,
+    conversation?.id,
+    supportLoading,
+    messages.length,
+    scrollSupportToLatest,
+    supportChatScroll.isNearBottomRef,
+  ])
 
   async function sendSupportMessage() {
     if (!profile || !conversation) return
@@ -1388,23 +1543,89 @@ export default function FeedPage() {
 
       const body = text || (imageUrl ? '📷' : ' ')
 
-      const sel = `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, profiles ( ${MESSAGE_PROFILE_SELECT} )`
+      const replyToId = replyTarget?.id ?? null
 
-      const { data, error } = await supabase
+      const insertPayload: {
+        conversation_id: string
+        sender_id: string
+        body: string
+        image_url: string | null
+        reply_to_message_id?: string | null
+      } = {
+        conversation_id: conversation.id,
+        sender_id: profile.id,
+        body,
+        image_url: imageUrl,
+      }
+      if (replyToId) insertPayload.reply_to_message_id = replyToId
+
+      const capturedReplyTarget = replyTarget
+
+      let { data, error } = await supabase
         .from('messages')
-        .insert({
-          conversation_id: conversation.id,
-          sender_id: profile.id,
-          body,
-          image_url: imageUrl,
-        })
-        .select(sel)
+        .insert(insertPayload)
+        .select(CUSTOMER_MESSAGE_SELECT)
         .single()
 
+      if (error && isReplyToSchemaError(error.message)) {
+        const legacy = await supabase
+          .from('messages')
+          .insert(insertPayload)
+          .select(CUSTOMER_MESSAGE_SELECT_LEGACY)
+          .single()
+        data = legacy.data as typeof data
+        error = legacy.error
+      }
+
+      if (error && isReplyToSchemaError(error.message)) {
+        const { reply_to_message_id: _drop, ...basePayload } = insertPayload
+        const base = await supabase
+          .from('messages')
+          .insert(basePayload)
+          .select(CUSTOMER_MESSAGE_SELECT_BASE)
+          .single()
+        data = base.data as typeof data
+        error = base.error
+        if (replyToId && !error) {
+          showToast('Run migration 030 in Supabase to save reply links permanently.')
+        }
+      }
+
       if (error) throw error
-      setMessages((prev) => [...prev, data as MessageRow])
+
+      let row = data as MessageRow
+      if (capturedReplyTarget && replyToId) {
+        row = {
+          ...row,
+          reply_to_message_id: replyToId,
+          reply_to: {
+            id: capturedReplyTarget.id,
+            sender_id: capturedReplyTarget.sender_id,
+            body: capturedReplyTarget.body,
+            image_url: capturedReplyTarget.image_url ?? null,
+            profiles: capturedReplyTarget.profiles ?? null,
+          },
+        }
+      }
+      row = hydrateReplyEmbeds([row])[0]
+
+      setMessages((prev) => [...prev, row])
       setSupportDraft('')
       clearPendingAttachment()
+      setReplyTarget(null)
+
+      let notifyPreview = text.trim().slice(0, 160)
+      if (!notifyPreview) notifyPreview = imageUrl ? '📷 Message' : 'Message'
+      void fetch('/api/customer/notify-staff-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationId: conversation.id, preview: notifyPreview }),
+      }).then(async (res) => {
+        if (res.ok) return
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        console.error('notify-staff-message failed:', res.status, j.error ?? j)
+      })
+
       void refreshMessagingUI(profile.id)
     } catch (e) {
       console.error(e)
@@ -1425,7 +1646,10 @@ export default function FeedPage() {
   }
 
   const sortedBusinesses = useMemo(() => {
-    return [...businesses].sort((a, b) => {
+    const followedSet = new Set(followedBusinessIds)
+    const filtered = businesses.filter((b) => followedSet.has(b.id) || chatPreviews.has(b.id))
+    const deduped = dedupeBusinessesByName(filtered, chatPreviews)
+    return deduped.sort((a, b) => {
       const pa = chatPreviews.get(a.id)
       const pb = chatPreviews.get(b.id)
       const ta = pa ? new Date(pa.lastAt).getTime() : 0
@@ -1433,7 +1657,10 @@ export default function FeedPage() {
       if (tb !== ta) return tb - ta
       return a.name.localeCompare(b.name)
     })
-  }, [businesses, chatPreviews])
+  }, [businesses, chatPreviews, followedBusinessIds])
+
+  const messageableBusinessesRef = useRef<BusinessRow[]>([])
+  messageableBusinessesRef.current = sortedBusinesses
 
   const feedSeenIndexes = useMemo(() => {
     const uid = profile?.id
@@ -2141,8 +2368,18 @@ export default function FeedPage() {
                 </div>
               ) : conversation ? (
                 <>
-              <div ref={supportMessagesScrollRef} className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
-                {messages.length === 0 ? (
+              <div className="relative flex-1 min-h-0 flex flex-col">
+              <div
+                ref={supportMessagesScrollRef}
+                onScroll={supportChatScroll.onScroll}
+                className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0"
+              >
+                {supportLoading && messages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
+                    <Loader2 className="h-9 w-9 animate-spin text-[#8d63ff] mb-3" aria-hidden />
+                    <p className="text-sm text-[#9ba6cb]">Loading messages…</p>
+                  </div>
+                ) : messages.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
                     {(() => {
                       const activeBiz = businesses.find((b) => b.id === supportBizId)
@@ -2177,11 +2414,18 @@ export default function FeedPage() {
                     const showText = Boolean(m.body?.trim()) && m.body !== '📷'
                     const isLastMine = mine && i === feedSeenIndexes.lastMine
                     const isLastOther = !mine && i === feedSeenIndexes.lastOther
+                    const replyParent = oneReplyEmbed(m.reply_to)
+                    const customerId = profile.id
+                    const replyQuoteVariant = mine ? 'customer-mine' : 'customer-other'
+                    const scrollToMessage = (messageId: string) => {
+                      document.getElementById(`feed-msg-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                    }
                     return (
                       <div
                         key={m.id}
+                        id={`feed-msg-${m.id}`}
                         className={clsx(
-                          'flex w-full max-w-full shrink-0',
+                          'group/msg flex w-full max-w-full shrink-0',
                           mine ? 'justify-end' : 'justify-start gap-2'
                         )}
                       >
@@ -2211,13 +2455,32 @@ export default function FeedPage() {
                         ) : null}
                         <div
                           className={clsx(
-                            'text-sm shadow-lg overflow-hidden max-w-full ring-1 ring-white/10',
+                            'relative text-sm shadow-lg overflow-hidden max-w-full ring-1 ring-white/10',
                             mine
                               ? 'rounded-2xl rounded-br-md'
                               : 'rounded-2xl rounded-bl-md bg-[#13213d] text-white border border-[#8d63ff]/20'
                           )}
                           style={mine ? { background: relayChatGradient, color: 'white' } : undefined}
                         >
+                          {replyParent ? (
+                            <div className={showText || m.image_url ? 'px-2 pt-2' : 'p-2'}>
+                              <MessageReplyQuote
+                                authorLabel={replyAuthorLabel(
+                                  replyParent.sender_id,
+                                  customerId,
+                                  oneReplyEmbed(replyParent.profiles),
+                                  {
+                                    viewerIsCustomer: true,
+                                    businessName: activeBiz?.name,
+                                  }
+                                )}
+                                body={replyParent.body}
+                                imageUrl={replyParent.image_url}
+                                variant={replyQuoteVariant}
+                                onClick={() => scrollToMessage(replyParent.id)}
+                              />
+                            </div>
+                          ) : null}
                           {m.image_url ? (
                             <ChatMessageImage
                               imageUrl={m.image_url}
@@ -2246,6 +2509,15 @@ export default function FeedPage() {
                           )}
                         >
                           <span className="text-[#7f8bad] tabular-nums">{timeAgo(m.created_at)}</span>
+                          {!mine ? (
+                            <button
+                              type="button"
+                              onClick={() => setReplyTarget(m)}
+                              className="font-semibold text-[#8d63ff] hover:text-[#a78bff] hover:underline"
+                            >
+                              Reply
+                            </button>
+                          ) : null}
                           {mine && isLastMine ? (
                             <span className="inline-flex items-center gap-1 font-semibold text-violet-100/95">
                               {m.read && m.read_at ? (
@@ -2277,6 +2549,11 @@ export default function FeedPage() {
                 ) : null}
                 <div ref={supportMessagesEndRef} className="h-px w-full" aria-hidden />
               </div>
+              <ChatJumpToLatestButton
+                visible={supportChatScroll.showJumpButton}
+                onClick={() => supportChatScroll.jumpToLatest(scrollSupportToLatest)}
+              />
+              </div>
 
               <input
                 ref={supportFileInputRef}
@@ -2287,6 +2564,21 @@ export default function FeedPage() {
               />
 
               <div className="shrink-0 border-t border-white/10 bg-[#0f1a38] p-2 space-y-2">
+                {replyTarget ? (
+                  <ReplyTargetBar
+                    authorLabel={replyAuthorLabel(
+                      replyTarget.sender_id,
+                      profile.id,
+                      oneReplyEmbed(replyTarget.profiles),
+                      {
+                        viewerIsCustomer: true,
+                        businessName: businesses.find((b) => b.id === supportBizId)?.name,
+                      }
+                    )}
+                    previewText={replyPreviewText(replyTarget.body, replyTarget.image_url)}
+                    onCancel={() => setReplyTarget(null)}
+                  />
+                ) : null}
                 {pendingAttachment ? (
                   <div className="relative rounded-lg overflow-hidden border border-white/10 max-h-28">
                     {/* eslint-disable-next-line @next/next/no-img-element */}

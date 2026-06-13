@@ -41,11 +41,33 @@ import {
 } from 'lucide-react'
 import { sharePostLink } from '@/lib/sharePostLink'
 import { ContentModerationMenu } from '@/components/ContentModerationMenu'
-import { ChatMessageImage } from '@/components/ChatMessageImage'
+import {
+  ChatMessageImage,
+  MessageReplyQuote,
+  ReplyTargetBar,
+} from '@/components/ChatMessageImage'
+import { ChatJumpToLatestButton } from '@/components/ChatJumpToLatestButton'
+import { useChatScrollToLatest } from '@/lib/useChatScrollToLatest'
+import {
+  THREAD_MESSAGE_SELECT,
+  THREAD_MESSAGE_SELECT_LEGACY,
+  THREAD_MESSAGE_SELECT_BASE,
+  hydrateReplyEmbeds,
+  isReplyToSchemaError,
+  oneMessageEmbed as oneReplyEmbed,
+  replyAuthorLabel,
+  replyPreviewText,
+  type MessageReplyEmbed,
+  type ReplyTargetMessage,
+} from '@/lib/customerMessaging'
 import { FeedPostImage } from '@/components/FeedPostImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
 import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
+import {
+  showStaffNotificationRowDesktopPopup,
+  tryShowStaffInboundMessageDesktopPopup,
+} from '@/lib/staffInboundDesktopAlert'
 
 type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
 type UsersPanelTab = 'pending' | 'active' | 'suspended'
@@ -100,11 +122,10 @@ type ThreadMessage = {
   image_url?: string | null
   read?: boolean | null
   read_at?: string | null
+  reply_to_message_id?: string | null
+  reply_to?: MessageReplyEmbed | MessageReplyEmbed[] | null
   profiles?: ThreadMessageSenderEmbed | ThreadMessageSenderEmbed[] | null
 }
-
-const THREAD_MESSAGE_SELECT =
-  'id, sender_id, body, created_at, image_url, read, read_at, profiles ( username, first_name, last_name, business_role )'
 
 /** Inbox shows the N most recently updated threads (not expired — older threads drop off when volume is high). */
 const INBOX_THREAD_LIMIT = 500
@@ -341,6 +362,7 @@ export default function DashboardPage() {
   const convoListRef = useRef<ConvoListItem[]>([])
   convoListRef.current = convoList
   const inboundCustomerFirstNameRef = useRef(new Map<string, string>())
+  const openMessageFromNotifyRef = useRef<(conversationId: string) => void>(() => {})
   const [selectedConvoId, setSelectedConvoId] = useState<string | null>(null)
   const selectedConvoIdRef = useRef<string | null>(null)
   selectedConvoIdRef.current = selectedConvoId
@@ -354,6 +376,7 @@ export default function DashboardPage() {
   const [replyDraft, setReplyDraft] = useState('')
   const [replyBusy, setReplyBusy] = useState(false)
   const [replyPendingImage, setReplyPendingImage] = useState<{ blob: Blob; previewUrl: string } | null>(null)
+  const [replyTarget, setReplyTarget] = useState<ReplyTargetMessage | null>(null)
 
   const [pendingCustomers, setPendingCustomers] = useState<PendingCustomer[]>([])
   const [reviewBusyId, setReviewBusyId] = useState<string | null>(null)
@@ -484,14 +507,16 @@ export default function DashboardPage() {
   profileRef.current = profile
 
   const scrollThreadToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
-    const end = threadEndRef.current
-    if (end) {
-      end.scrollIntoView({ block: 'end', behavior })
+    const el = threadScrollRef.current
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior })
       return
     }
-    const el = threadScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    const end = threadEndRef.current
+    if (end) end.scrollIntoView({ block: 'end', behavior })
   }, [])
+
+  const threadChatScroll = useChatScrollToLatest(threadScrollRef, selectedConvoId)
 
   const navItems = useMemo(() => {
     if (!profile || profile.business_role !== 'admin') {
@@ -700,12 +725,12 @@ export default function DashboardPage() {
 
         const { data: unreadRows, error: ue } = await supabase
           .from('messages')
-          .select('conversation_id, sender_id, read')
+          .select('conversation_id, sender_id')
           .in('conversation_id', convIds)
+          .or('read.eq.false,read.is.null')
         if (ue) setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages(unread): ${ue.message}`)
         for (const m of unreadRows || []) {
-          const row = m as { conversation_id: string; sender_id: string; read: boolean | null }
-          if (row.read === true) continue
+          const row = m as { conversation_id: string; sender_id: string }
           const cust = customerByConvo[row.conversation_id]
           if (cust && row.sender_id === cust) {
             unreadByConvo[row.conversation_id] = (unreadByConvo[row.conversation_id] || 0) + 1
@@ -1224,15 +1249,49 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!selectedConvoId || threadLoading) return
-    const raf = window.requestAnimationFrame(() => scrollThreadToLatest('auto'))
-    return () => window.cancelAnimationFrame(raf)
-  }, [selectedConvoId, threadLoading, threadMessages.length, scrollThreadToLatest])
+    let cancelled = false
+    const scroll = () => {
+      if (cancelled) return
+      scrollThreadToLatest('auto')
+      threadChatScroll.markAtLatest()
+    }
+    const id = window.requestAnimationFrame(() => window.requestAnimationFrame(scroll))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(id)
+    }
+  }, [selectedConvoId, threadLoading, scrollThreadToLatest, threadChatScroll.markAtLatest])
+
+  useEffect(() => {
+    if (!selectedConvoId || threadLoading) return
+    if (!threadChatScroll.isNearBottomRef.current) return
+    let cancelled = false
+    const scroll = () => {
+      if (cancelled) return
+      scrollThreadToLatest('auto')
+    }
+    const id = window.requestAnimationFrame(() => window.requestAnimationFrame(scroll))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(id)
+    }
+  }, [selectedConvoId, threadLoading, threadMessages.length, scrollThreadToLatest, threadChatScroll.isNearBottomRef])
+
+  useEffect(() => {
+    if (activeTab === 'inbox') return
+    if (!selectedConvoIdRef.current) return
+    setSelectedConvoId(null)
+    setThreadMessages([])
+    setReplyTarget(null)
+    clearReplyPendingImage()
+  }, [activeTab])
 
   useEffect(() => {
     const p = profileRef.current
     if (!p?.business_id) return
 
     let timer: number | null = null
+    let slowTimer: number | null = null
     const queueRefresh = () => {
       if (timer) window.clearTimeout(timer)
       timer = window.setTimeout(() => {
@@ -1240,24 +1299,152 @@ export default function DashboardPage() {
         if (current?.business_id) void refreshDashboard(current)
       }, 100)
     }
+    const queueSlowRefresh = () => {
+      if (slowTimer) window.clearTimeout(slowTimer)
+      slowTimer = window.setTimeout(() => {
+        const current = profileRef.current
+        if (current?.business_id) void refreshDashboard(current)
+      }, 450)
+    }
+
+    const bumpInboxOnCustomerMessage = (payload: { new: Record<string, unknown> }): boolean => {
+      const msg = payload.new as {
+        conversation_id?: string
+        sender_id?: string
+        body?: string
+        created_at?: string
+      }
+      if (!msg.conversation_id || !msg.sender_id) return false
+      const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
+      if (!conv || msg.sender_id !== conv.customer_id) return false
+      if (isActivelyViewingInboxThread(msg.conversation_id)) return true
+
+      const preview = (msg.body ?? '').trim() || conv.preview
+      const updated_at = msg.created_at || new Date().toISOString()
+      setConvoList((prev) =>
+        prev.map((c) =>
+          c.id === msg.conversation_id
+            ? { ...c, unreadCount: c.unreadCount + 1, preview, updated_at }
+            : c
+        )
+      )
+      return true
+    }
+
+    const resolveInboundCustomerMessage = (payload: { new: Record<string, unknown> }) => {
+      void (async () => {
+        const msg = payload.new as {
+          conversation_id?: string
+          sender_id?: string
+          body?: string
+          created_at?: string
+        }
+        if (!msg.conversation_id || !msg.sender_id) return
+        if (isActivelyViewingInboxThread(msg.conversation_id)) return
+        const bid = profileRef.current?.business_id
+        if (!bid) return
+
+        const cached = convoListRef.current.find((c) => c.id === msg.conversation_id)
+        if (cached) {
+          if (msg.sender_id !== cached.customer_id) return
+        } else {
+          const { data } = await supabase
+            .from('conversations')
+            .select('business_id, customer_id')
+            .eq('id', msg.conversation_id)
+            .maybeSingle()
+          if (!data || data.business_id !== bid || msg.sender_id !== data.customer_id) return
+        }
+
+        queueRefresh()
+      })()
+    }
 
     const channel = supabase
       .channel(`staff-dashboard-${p.business_id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations', filter: `business_id=eq.${p.business_id}` }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_reports', filter: `business_id=eq.${p.business_id}` }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'follows', filter: `business_id=eq.${p.business_id}` }, queueRefresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, queueRefresh)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        (payload) => {
+          const bumped = bumpInboxOnCustomerMessage(payload)
+          void tryShowStaffInboundMessageDesktopPopup(
+            supabase,
+            payload.new as {
+              id?: string
+              conversation_id: string
+              sender_id: string
+              body?: string | null
+              image_url?: string | null
+            },
+            {
+              businessId: p.business_id,
+              staffUserId: p.id,
+              isActivelyViewingThread: isActivelyViewingInboxThread,
+              getConvoFromList: (id) => {
+                const c = convoListRef.current.find((row) => row.id === id)
+                if (!c) return undefined
+                return { customer_id: c.customer_id, customerName: c.customerName }
+              },
+              onOpenConversation: (conversationId) => openMessageFromNotifyRef.current(conversationId),
+            }
+          )
+          if (bumped) queueSlowRefresh()
+          else resolveInboundCustomerMessage(payload)
+        }
+      )
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_inbox_labels' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_label_definitions' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_canned_replies' }, queueRefresh)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${p.id}` },
+        (payload) => {
+          queueRefresh()
+          const row = payload.new as {
+            id?: string
+            type?: string
+            title?: string
+            body?: string
+            conversation_id?: string | null
+            read?: boolean
+          }
+          if (!row?.type || row.read) return
+          if (row.type !== 'support_message' && row.type !== 'staff_alert') return
+          const customerLabel =
+            row.type === 'support_message' && row.conversation_id
+              ? inboundCustomerFirstNameRef.current.get(row.conversation_id) ??
+                convoListRef.current
+                  .find((c) => c.id === row.conversation_id)
+                  ?.customerName.trim()
+                  .split(/\s+/)[0] ??
+                null
+              : null
+          showStaffNotificationRowDesktopPopup({
+            type: row.type,
+            title: row.title ?? 'Notification',
+            body: row.body ?? '',
+            conversationId: row.conversation_id,
+            senderLabel: customerLabel,
+            notificationId: row.id,
+            onOpen: () => {
+              if (row.conversation_id) openMessageFromNotifyRef.current(row.conversation_id)
+            },
+          })
+        }
+      )
       .subscribe()
 
     return () => {
       if (timer) window.clearTimeout(timer)
+      if (slowTimer) window.clearTimeout(slowTimer)
       void supabase.removeChannel(channel)
     }
-  }, [supabase, refreshDashboard, profile?.business_id])
+  }, [supabase, refreshDashboard, profile?.business_id, profile?.id])
 
   useEffect(() => {
     if (!selectedConvoId || !profile?.id) return
@@ -1404,7 +1591,19 @@ export default function DashboardPage() {
       .channel(`staff-notifications-${uid}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+        (payload) => {
+          const row = payload.new as { type?: string; read?: boolean }
+          if (row?.read) return
+          if (row?.type === 'support_message' || row?.type === 'staff_alert') {
+            setStaffNotifyUnread((n) => n + 1)
+          }
+          void bumpBell()
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
         () => void bumpBell()
       )
       .subscribe()
@@ -1413,12 +1612,6 @@ export default function DashboardPage() {
       void supabase.removeChannel(channel)
     }
   }, [supabase, profile?.id])
-
-  const openMessageFromNotifyRef = useRef<(conversationId: string) => void>(() => {})
-  openMessageFromNotifyRef.current = (conversationId: string) => {
-    setActiveTab('inbox')
-    void openThread(conversationId)
-  }
 
   useDesktopMessageNotifications({
     supabase,
@@ -1437,45 +1630,21 @@ export default function DashboardPage() {
       if (!conv?.customerName?.trim()) return null
       return conv.customerName.trim().split(/\s+/)[0] || conv.customerName.trim()
     },
-    watchMessages: profile?.id
-      ? {
-          myUserId: profile.id,
-          popupTitle: 'New message',
-          isInboundMessage: () => false,
-          confirmInbound: async (msg) => {
-            const bid = profileRef.current?.business_id
-            if (!bid) return false
-            const { data } = await supabase
-              .from('conversations')
-              .select('business_id, customer_id')
-              .eq('id', msg.conversation_id)
-              .maybeSingle()
-            if (!data || data.business_id !== bid) return false
-            if (msg.sender_id !== data.customer_id) return false
-
-            if (!inboundCustomerFirstNameRef.current.has(msg.conversation_id)) {
-              const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
-              const fromList = conv?.customerName?.trim().split(/\s+/)[0]
-              if (fromList) {
-                inboundCustomerFirstNameRef.current.set(msg.conversation_id, fromList)
-              } else {
-                const { data: prof } = await supabase
-                  .from('profiles')
-                  .select('first_name, username')
-                  .eq('id', data.customer_id)
-                  .maybeSingle()
-                const first =
-                  (prof?.first_name as string | null | undefined)?.trim() ||
-                  (prof?.username as string | null | undefined)?.trim() ||
-                  'Customer'
-                inboundCustomerFirstNameRef.current.set(msg.conversation_id, first)
-              }
-            }
-            return true
-          },
-          getSenderLabel: (msg) => inboundCustomerFirstNameRef.current.get(msg.conversation_id) ?? null,
-        }
-      : undefined,
+    watchMessages:
+      profile?.id && profile.business_id
+        ? {
+            myUserId: profile.id,
+            businessId: profile.business_id,
+            popupTitle: 'New message',
+            isActivelyViewingThread: isActivelyViewingInboxThread,
+            getConvoFromList: (id) => {
+              const c = convoListRef.current.find((row) => row.id === id)
+              if (!c) return undefined
+              return { customer_id: c.customer_id, customerName: c.customerName }
+            },
+            getSenderLabel: (msg) => inboundCustomerFirstNameRef.current.get(msg.conversation_id) ?? null,
+          }
+        : undefined,
   })
 
   useEffect(() => {
@@ -2058,13 +2227,32 @@ export default function DashboardPage() {
       if (convoErr) throw convoErr
       const customerId = convoMeta?.customer_id as string | undefined
 
-      const { data, error } = await supabase
-        .from('messages')
-        .select(THREAD_MESSAGE_SELECT)
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
+      async function fetchMessages(select: string) {
+        const { data, error } = await supabase
+          .from('messages')
+          .select(select)
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: true })
+        return { data: (data || []) as ThreadMessage[], error }
+      }
+
+      async function fetchWithReplyFallback() {
+        let result = await fetchMessages(THREAD_MESSAGE_SELECT)
+        if (result.error && isReplyToSchemaError(result.error.message)) {
+          result = await fetchMessages(THREAD_MESSAGE_SELECT_LEGACY)
+        }
+        if (result.error && isReplyToSchemaError(result.error.message)) {
+          result = await fetchMessages(THREAD_MESSAGE_SELECT_BASE)
+        }
+        if (!result.error) {
+          result = { ...result, data: hydrateReplyEmbeds(result.data) }
+        }
+        return result
+      }
+
+      const { data, error } = await fetchWithReplyFallback()
       if (error) throw error
-      setThreadMessages((data || []) as ThreadMessage[])
+      setThreadMessages(data)
 
       if (options?.markRead && customerId) {
         await markActiveThreadRead(conversationId, customerId)
@@ -2083,28 +2271,15 @@ export default function DashboardPage() {
     setSelectedConvoId(conversationId)
     setThreadLoading(true)
     setReplyDraft('')
+    setReplyTarget(null)
     clearReplyPendingImage()
     await reloadThreadMessages(conversationId, { markRead: true, showLoading: true })
   }
 
-  /** Mark unread customer messages when the admin returns to Inbox with a thread still open. */
-  useEffect(() => {
-    if (activeTab !== 'inbox' || !selectedConvoId) return
-    const cid = selectedConvoId
-    void (async () => {
-      const { data: convoMeta, error: convoErr } = await supabase
-        .from('conversations')
-        .select('customer_id')
-        .eq('id', cid)
-        .maybeSingle()
-      if (convoErr) {
-        console.error(convoErr)
-        return
-      }
-      const customerId = convoMeta?.customer_id as string | undefined
-      if (customerId) await markActiveThreadRead(cid, customerId)
-    })()
-  }, [activeTab, selectedConvoId, supabase])
+  openMessageFromNotifyRef.current = (conversationId: string) => {
+    setActiveTab('inbox')
+    void openThread(conversationId)
+  }
 
   async function onReplyImagePick(e: ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]
@@ -2134,7 +2309,8 @@ export default function DashboardPage() {
   async function insertStaffMessageToConversation(
     conversationId: string,
     rawText: string,
-    pendingImage: { blob: Blob; previewUrl: string } | null
+    pendingImage: { blob: Blob; previewUrl: string } | null,
+    opts?: { replyToId?: string | null; replyTarget?: ReplyTargetMessage | null }
   ): Promise<ThreadMessage | null> {
     const p = profileRef.current
     if (!p) return null
@@ -2158,19 +2334,67 @@ export default function DashboardPage() {
 
     const body = text || (imageUrl ? '📷' : ' ')
 
-    const { data, error } = await supabase
+    const replyToId = opts?.replyToId ?? null
+    const capturedReplyTarget = opts?.replyTarget ?? null
+
+    const insertPayload: {
+      conversation_id: string
+      sender_id: string
+      body: string
+      image_url: string | null
+      reply_to_message_id?: string | null
+    } = {
+      conversation_id: conversationId,
+      sender_id: p.id,
+      body,
+      image_url: imageUrl,
+    }
+    if (replyToId) insertPayload.reply_to_message_id = replyToId
+
+    let { data, error } = await supabase
       .from('messages')
-      .insert({
-        conversation_id: conversationId,
-        sender_id: p.id,
-        body,
-        image_url: imageUrl,
-      })
+      .insert(insertPayload)
       .select(THREAD_MESSAGE_SELECT)
       .single()
+
+    if (error && isReplyToSchemaError(error.message)) {
+      const legacy = await supabase
+        .from('messages')
+        .insert(insertPayload)
+        .select(THREAD_MESSAGE_SELECT_LEGACY)
+        .single()
+      data = legacy.data as typeof data
+      error = legacy.error
+    }
+
+    if (error && isReplyToSchemaError(error.message)) {
+      const { reply_to_message_id: _drop, ...basePayload } = insertPayload
+      const base = await supabase
+        .from('messages')
+        .insert(basePayload)
+        .select(THREAD_MESSAGE_SELECT_BASE)
+        .single()
+      data = base.data as typeof data
+      error = base.error
+    }
+
     if (error) throw error
 
-    const msg = data as ThreadMessage
+    let msg = data as ThreadMessage
+    if (capturedReplyTarget && replyToId) {
+      msg = {
+        ...msg,
+        reply_to_message_id: replyToId,
+        reply_to: {
+          id: capturedReplyTarget.id,
+          sender_id: capturedReplyTarget.sender_id,
+          body: capturedReplyTarget.body,
+          image_url: capturedReplyTarget.image_url ?? null,
+          profiles: capturedReplyTarget.profiles ?? null,
+        },
+      }
+    }
+    msg = hydrateReplyEmbeds([msg])[0]
     if (selectedConvoIdRef.current === conversationId) {
       setThreadMessages((prev) => [...prev, msg])
     }
@@ -2233,9 +2457,13 @@ export default function DashboardPage() {
 
     setReplyBusy(true)
     try {
-      const msg = await insertStaffMessageToConversation(selectedConvoId, replyDraft, replyPendingImage)
+      const msg = await insertStaffMessageToConversation(selectedConvoId, replyDraft, replyPendingImage, {
+        replyToId: replyTarget?.id ?? null,
+        replyTarget,
+      })
       if (!msg) return
       setReplyDraft('')
+      setReplyTarget(null)
       clearReplyPendingImage()
       await refreshDashboard(profileRef.current!)
     } catch (e) {
@@ -3082,6 +3310,9 @@ export default function DashboardPage() {
             )
           })}
         </nav>
+        <div className="mt-2 px-1">
+          <DesktopNotificationPrompt variant="staff" />
+        </div>
         <button
           type="button"
           onClick={() => void signOut()}
@@ -3187,7 +3418,7 @@ export default function DashboardPage() {
               <div className="px-3 py-2 border-b border-white/[0.08]">
                 <h3 className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#8892b0]">Recent Conversations</h3>
               </div>
-              <div className="divide-y divide-white/[0.08]">
+              <div className="divide-y divide-white/[0.08] py-0.5">
                 {convoList.length === 0 ? (
                   <p className="px-3 py-5 text-[13px] text-[#8892b0]">No customer threads yet.</p>
                 ) : (
@@ -3201,18 +3432,20 @@ export default function DashboardPage() {
                       }}
                       className="w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-white/[0.03] transition-colors"
                     >
-                      <div className="w-9 h-9 rounded-[10px] bg-[#131e3e] flex items-center justify-center shrink-0 relative overflow-hidden border border-white/[0.06] text-xs font-bold text-white">
-                        {item.customerAvatar ? (
-                          <img
-                            src={item.customerAvatar}
-                            alt={`${item.customerName} avatar`}
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          item.customerName.slice(0, 2).toUpperCase()
-                        )}
+                      <div className="relative shrink-0">
+                        <div className="w-9 h-9 rounded-[10px] bg-[#131e3e] flex items-center justify-center overflow-hidden border border-white/[0.06] text-xs font-bold text-white">
+                          {item.customerAvatar ? (
+                            <img
+                              src={item.customerAvatar}
+                              alt={`${item.customerName} avatar`}
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            item.customerName.slice(0, 2).toUpperCase()
+                          )}
+                        </div>
                         {item.unreadCount > 0 ? (
-                          <span className="absolute -top-1 -right-1 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#050814]">
+                          <span className="absolute -top-1 -right-1 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#050814]">
                             {item.unreadCount > 9 ? '9+' : item.unreadCount}
                           </span>
                         ) : null}
@@ -3687,7 +3920,6 @@ export default function DashboardPage() {
 
         {activeTab === 'inbox' ? (
           <section className="space-y-3">
-            <DesktopNotificationPrompt variant="staff" />
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2 min-h-[34px]">
                 {inboxUnreadTotal > 0 ? (
@@ -3796,7 +4028,7 @@ export default function DashboardPage() {
                       </div>
                     ) : null}
                   </div>
-                  <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-white/[0.08] max-h-[44vh] lg:max-h-none">
+                  <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-white/[0.08] max-h-[44vh] lg:max-h-none pt-1 pb-0.5">
                     {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0 ? (
                       <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
                         Showing the {INBOX_THREAD_LIMIT} most recently active threads. Chats do not expire — search by
@@ -3874,24 +4106,24 @@ export default function DashboardPage() {
                             active ? 'bg-[rgba(141,99,255,0.07)]' : 'hover:bg-white/[0.03]'
                           }`}
                         >
-                          <div className="w-9 h-9 rounded-[10px] bg-[#131e3e] flex items-center justify-center text-[12px] font-bold shrink-0 relative overflow-hidden border border-white/[0.06] text-white">
-                            {item.customerAvatar ? (
-                              <img src={item.customerAvatar} alt={`${item.customerName} avatar`} className="w-full h-full object-cover" />
-                            ) : (
-                              item.customerName.slice(0, 2).toUpperCase()
-                            )}
+                          <div className="relative shrink-0">
+                            <div className="w-9 h-9 rounded-[10px] bg-[#131e3e] flex items-center justify-center text-[12px] font-bold overflow-hidden border border-white/[0.06] text-white">
+                              {item.customerAvatar ? (
+                                <img src={item.customerAvatar} alt={`${item.customerName} avatar`} className="w-full h-full object-cover" />
+                              ) : (
+                                item.customerName.slice(0, 2).toUpperCase()
+                              )}
+                            </div>
+                            {item.unreadCount > 0 ? (
+                              <span className="absolute -top-1 -right-1 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#050814]">
+                                {item.unreadCount > 9 ? '9+' : item.unreadCount}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-[13px] font-semibold text-white truncate">{item.customerName}</p>
-                              <div className="shrink-0 text-right">
-                                <p className="text-[10px] text-[#4e5a7a]">{timeAgo(item.updated_at)}</p>
-                                {item.unreadCount > 0 ? (
-                                  <span className="inline-flex mt-0.5 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold items-center justify-center tabular-nums border-2 border-[#050814]">
-                                    {item.unreadCount > 9 ? '9+' : item.unreadCount}
-                                  </span>
-                                ) : null}
-                              </div>
+                              <p className="shrink-0 text-[10px] text-[#4e5a7a]">{timeAgo(item.updated_at)}</p>
                             </div>
                             <p className="text-[11px] text-[#8892b0] truncate">@{item.customerUsername}</p>
                             <p className="text-[11px] text-[#8892b0] truncate mt-0.5 max-w-[min(100%,220px)]">{item.preview}</p>
@@ -4100,7 +4332,12 @@ export default function DashboardPage() {
                           </div>
                         </div>
                       ) : null}
-                      <div ref={threadScrollRef} className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+                      <div className="relative flex-1 min-h-0 flex flex-col">
+                      <div
+                        ref={threadScrollRef}
+                        onScroll={threadChatScroll.onScroll}
+                        className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2"
+                      >
                         {threadLoading ? (
                           <div className="flex justify-center py-12">
                             <Loader2 className="w-6 h-6 animate-spin text-[#8d63ff]" />
@@ -4119,9 +4356,21 @@ export default function DashboardPage() {
                               m.read_at &&
                               ((isFromTeam && i === threadSeenIndexes.lastStaff) ||
                                 (!isFromTeam && i === threadSeenIndexes.lastOther))
+                            const replyParent = oneReplyEmbed(m.reply_to)
+                            const customerId = selectedConvo.customer_id
+                            const replyQuoteVariant = isFromTeam ? 'staff-out' : 'staff-in'
+                            const sentAtLabel = timeAgo(m.created_at)
+                            const seenAtLabel = m.read_at ? timeAgo(m.read_at) : null
+                            const hideSentTime = isFromTeam && showSeen && seenAtLabel === sentAtLabel
+                            const scrollToMessage = (messageId: string) => {
+                              document
+                                .getElementById(`inbox-msg-${messageId}`)
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                            }
                             return (
                               <div
                                 key={m.id}
+                                id={`inbox-msg-${m.id}`}
                                 className={`flex flex-col w-full min-w-0 ${isFromTeam ? 'items-end' : 'items-start'}`}
                               >
                                 {teamLine ? (
@@ -4134,37 +4383,80 @@ export default function DashboardPage() {
                                 ) : null}
                                 <div className={`flex w-full min-w-0 ${isFromTeam ? 'justify-end' : 'justify-start'}`}>
                                   <div
-                                    className={`w-fit max-w-[min(85%,24rem)] shrink-0 rounded-2xl px-3 py-2 text-sm ${
+                                    className={`w-fit max-w-[min(85%,24rem)] shrink-0 rounded-2xl text-sm overflow-hidden ${
                                       isFromTeam ? 'bg-[#6f54ff] text-white' : 'bg-[#151d39] text-[#e2e6f5]'
                                     }`}
                                   >
+                                    {replyParent ? (
+                                      <div className={showText || m.image_url ? 'px-2 pt-2' : 'p-2'}>
+                                        <MessageReplyQuote
+                                          authorLabel={replyAuthorLabel(
+                                            replyParent.sender_id,
+                                            customerId,
+                                            oneReplyEmbed(replyParent.profiles),
+                                            {
+                                              viewerIsCustomer: false,
+                                              businessName: businessInfo?.name,
+                                            }
+                                          )}
+                                          body={replyParent.body}
+                                          imageUrl={replyParent.image_url}
+                                          variant={replyQuoteVariant}
+                                          onClick={() => scrollToMessage(replyParent.id)}
+                                        />
+                                      </div>
+                                    ) : null}
                                     {m.image_url ? (
                                       <ChatMessageImage
                                         imageUrl={m.image_url}
                                         alt="Attachment"
-                                        className="rounded-lg max-h-40 mb-1 max-w-full w-full object-cover"
+                                        className={`max-h-40 max-w-full w-full object-cover block ${
+                                          showText ? 'rounded-t-lg' : 'rounded-lg'
+                                        } ${replyParent ? 'mx-2 mb-1 rounded-lg' : ''}`}
                                       />
                                     ) : null}
                                     {showText ? (
                                       <LinkifiedText
                                         text={m.body}
-                                        className="whitespace-pre-wrap break-words"
+                                        className={`whitespace-pre-wrap break-words px-3 py-2 ${
+                                          replyParent && !m.image_url ? 'pt-0' : ''
+                                        }`}
                                         linkClassName={isFromTeam ? 'text-white' : 'text-[#9eb4ff]'}
                                       />
                                     ) : null}
-                                    <p className={`text-[10px] mt-1 ${isFromTeam ? 'text-white/70' : 'text-[#7d86a8]'}`}>
-                                      {timeAgo(m.created_at)}
-                                    </p>
                                   </div>
                                 </div>
-                                {showSeen ? (
-                                  <p className="text-[11px] text-[#7d86a8] mt-1 px-1">Seen · {timeAgo(m.read_at!)}</p>
-                                ) : null}
+                                <div
+                                  className={`mt-1 flex max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] ${
+                                    isFromTeam ? 'justify-end' : 'justify-start'
+                                  }`}
+                                >
+                                  {!hideSentTime ? (
+                                    <span className="text-[#7d86a8] tabular-nums">{sentAtLabel}</span>
+                                  ) : null}
+                                  {!isFromTeam ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setReplyTarget(m)}
+                                      className="font-semibold text-[#8d63ff] hover:text-[#a78bff] hover:underline"
+                                    >
+                                      Reply
+                                    </button>
+                                  ) : null}
+                                  {showSeen && seenAtLabel ? (
+                                    <span className="text-[#7d86a8]">Seen · {seenAtLabel}</span>
+                                  ) : null}
+                                </div>
                               </div>
                             )
                           })
                         )}
                         <div ref={threadEndRef} className="h-px w-full" aria-hidden />
+                      </div>
+                      <ChatJumpToLatestButton
+                        visible={threadChatScroll.showJumpButton}
+                        onClick={() => threadChatScroll.jumpToLatest(scrollThreadToLatest)}
+                      />
                       </div>
                       <div className="p-2.5 border-t border-white/10 space-y-2 shrink-0">
                         {peerCustomerTyping ? (
@@ -4196,6 +4488,21 @@ export default function DashboardPage() {
                               <X className="w-4 h-4" />
                             </button>
                           </div>
+                        ) : null}
+                        {replyTarget ? (
+                          <ReplyTargetBar
+                            authorLabel={replyAuthorLabel(
+                              replyTarget.sender_id,
+                              selectedConvo.customer_id,
+                              oneReplyEmbed(replyTarget.profiles),
+                              {
+                                viewerIsCustomer: false,
+                                businessName: businessInfo?.name,
+                              }
+                            )}
+                            previewText={replyPreviewText(replyTarget.body, replyTarget.image_url)}
+                            onCancel={() => setReplyTarget(null)}
+                          />
                         ) : null}
                         <div className="flex gap-2 items-end">
                           <button
