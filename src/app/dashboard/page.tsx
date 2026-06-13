@@ -63,10 +63,7 @@ import {
 import { FeedPostImage } from '@/components/FeedPostImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
-import {
-  showStaffNotificationRowDesktopPopup,
-  tryShowStaffInboundMessageDesktopPopup,
-} from '@/lib/staffInboundDesktopAlert'
+import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
 
 type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
 type UsersPanelTab = 'pending' | 'active' | 'suspended'
@@ -1371,27 +1368,6 @@ export default function DashboardPage() {
         { event: 'INSERT', schema: 'public', table: 'messages' },
         (payload) => {
           const bumped = bumpInboxOnCustomerMessage(payload)
-          void tryShowStaffInboundMessageDesktopPopup(
-            supabase,
-            payload.new as {
-              id?: string
-              conversation_id: string
-              sender_id: string
-              body?: string | null
-              image_url?: string | null
-            },
-            {
-              businessId,
-              staffUserId: staffUserId,
-              isActivelyViewingThread: isActivelyViewingInboxThread,
-              getConvoFromList: (id) => {
-                const c = convoListRef.current.find((row) => row.id === id)
-                if (!c) return undefined
-                return { customer_id: c.customer_id, customerName: c.customerName }
-              },
-              onOpenConversation: (conversationId) => openMessageFromNotifyRef.current(conversationId),
-            }
-          )
           if (bumped) queueSlowRefresh()
           else resolveInboundCustomerMessage(payload)
         }
@@ -1404,43 +1380,13 @@ export default function DashboardPage() {
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${staffUserId}` },
-        (payload) => {
-          queueRefresh()
-          const row = payload.new as {
-            id?: string
-            type?: string
-            title?: string
-            body?: string
-            link?: string | null
-            conversation_id?: string | null
-            read?: boolean
-          }
-          if (!row?.type || row.read) return
-          if (row.type !== 'support_message' && row.type !== 'staff_alert') return
-          const customerLabel =
-            row.type === 'support_message' && row.conversation_id
-              ? inboundCustomerFirstNameRef.current.get(row.conversation_id) ??
-                convoListRef.current
-                  .find((c) => c.id === row.conversation_id)
-                  ?.customerName.trim()
-                  .split(/\s+/)[0] ??
-                null
-              : null
-          showStaffNotificationRowDesktopPopup({
-            type: row.type,
-            title: row.title ?? 'Notification',
-            body: row.body ?? '',
-            conversationId: row.conversation_id,
-            senderLabel: customerLabel,
-            notificationId: row.id,
-            onOpen: () => {
-              if (row.conversation_id) openMessageFromNotifyRef.current(row.conversation_id)
-              else if (row.link) router.push(row.link)
-            },
-          })
-        }
+        () => queueRefresh()
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          console.error('[staff-dashboard] Realtime subscription failed:', status, err)
+        }
+      })
 
     return () => {
       if (timer) window.clearTimeout(timer)
@@ -1615,6 +1561,40 @@ export default function DashboardPage() {
       void supabase.removeChannel(channel)
     }
   }, [supabase, profile?.id])
+
+  useDesktopMessageNotifications({
+    supabase,
+    userId: profile?.id,
+    types: ['support_message', 'staff_alert'],
+    onOpenMessage: (row) => {
+      if (row.conversation_id) openMessageFromNotifyRef.current(row.conversation_id)
+      else router.push(row.link || '/notifications')
+    },
+    onOpenConversation: (conversationId) => openMessageFromNotifyRef.current(conversationId),
+    getCustomerLabelForConversation: (conversationId) => {
+      if (!conversationId) return null
+      const cached = inboundCustomerFirstNameRef.current.get(conversationId)
+      if (cached) return cached
+      const conv = convoListRef.current.find((c) => c.id === conversationId)
+      if (!conv?.customerName?.trim()) return null
+      return conv.customerName.trim().split(/\s+/)[0] || conv.customerName.trim()
+    },
+    watchMessages:
+      profile?.id && profile.business_id
+        ? {
+            myUserId: profile.id,
+            businessId: profile.business_id,
+            popupTitle: 'New message',
+            isActivelyViewingThread: isActivelyViewingInboxThread,
+            getConvoFromList: (id) => {
+              const c = convoListRef.current.find((row) => row.id === id)
+              if (!c) return undefined
+              return { customer_id: c.customer_id, customerName: c.customerName }
+            },
+            getSenderLabel: (msg) => inboundCustomerFirstNameRef.current.get(msg.conversation_id) ?? null,
+          }
+        : undefined,
+  })
 
   useEffect(() => {
     if (activeTab !== 'team' || profileRef.current?.business_role !== 'admin') return
@@ -3202,7 +3182,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen lg:h-screen lg:overflow-hidden text-[14px] leading-snug text-white antialiased bg-[radial-gradient(ellipse_at_top_left,_#0f1840_0%,_#070a18_45%,_#050814_100%)] lg:grid lg:grid-cols-[220px_1fr]">
-      <aside className="hidden lg:flex lg:h-full lg:min-h-0 flex-col border-r border-white/[0.08] bg-[rgba(8,13,28,0.95)] py-3 px-2.5 gap-0.5 overflow-y-auto overflow-x-visible">
+      <aside className="hidden lg:flex lg:h-full lg:min-h-0 flex-col border-r border-white/[0.08] bg-[rgba(8,13,28,0.95)] py-3 px-2.5 gap-0.5 overflow-hidden">
         <div className="admin-sidebar-top px-2 pb-3">
           <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[#4e5a7a] mb-2">Staff Portal</p>
           <div className="flex items-center gap-2.5 mb-2.5">
@@ -3251,7 +3231,7 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
-        <nav className="flex flex-col gap-0.5 flex-1 min-h-0 pr-0.5">
+        <nav className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
           {navItems.map((item) => {
             const Icon = item.icon
             const active = item.id === activeTab
@@ -3279,17 +3259,17 @@ export default function DashboardPage() {
             )
           })}
         </nav>
-        <div className="mt-2 px-1">
-          <DesktopNotificationPrompt variant="staff" />
+        <div className="shrink-0 mt-auto pt-3 border-t border-white/[0.06] px-1 space-y-2">
+          <DesktopNotificationPrompt variant="staff" layout="sidebar" />
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="flex w-full items-center gap-2 text-left text-[12px] text-[#4e5a7a] hover:text-[#c4cbe6] px-2.5 py-2 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5 shrink-0" />
+            Sign out
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={() => void signOut()}
-          className="mt-auto flex items-center gap-2 text-left text-[12px] text-[#4e5a7a] hover:text-[#c4cbe6] px-2.5 py-2 transition-colors"
-        >
-          <LogOut className="w-3.5 h-3.5 shrink-0" />
-          Sign out
-        </button>
       </aside>
 
       <main className="flex flex-col min-h-0 w-full min-h-screen lg:min-h-0 lg:h-full overflow-hidden pb-[max(4.25rem,env(safe-area-inset-bottom))] lg:pb-0">

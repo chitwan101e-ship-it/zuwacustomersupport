@@ -48,10 +48,11 @@ export function showStaffInboundDesktopPopup(opts: {
   const shown = showDesktopNotification({
     title: customerMessagePopupTitle(opts.senderLabel, opts.fallbackTitle ?? 'New message'),
     body: preview,
-    tag: opts.tag ?? `relay-msg-${opts.conversationId}`,
+    tag: opts.tag ?? `relay-msg-${opts.conversationId}-${Date.now()}`,
     onClick: opts.onOpen,
   })
   if (shown.ok) markStaffInboundPopupShown(opts.conversationId, preview)
+  else console.warn('[desktop-notify] message popup failed:', shown.reason)
 }
 
 export function showStaffNotificationRowDesktopPopup(opts: {
@@ -83,6 +84,8 @@ export function showStaffNotificationRowDesktopPopup(opts: {
   })
   if (shown.ok && opts.type === 'support_message') {
     markStaffInboundPopupShown(opts.conversationId ?? null, body)
+  } else if (!shown.ok) {
+    console.warn('[desktop-notify] notification popup failed:', shown.reason, opts.type)
   }
 }
 

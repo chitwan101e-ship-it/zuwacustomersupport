@@ -1614,6 +1614,18 @@ export default function FeedPage() {
       clearPendingAttachment()
       setReplyTarget(null)
 
+      let notifyPreview = text.trim().slice(0, 160)
+      if (!notifyPreview) notifyPreview = imageUrl ? '📷 Message' : 'Message'
+      void fetch('/api/customer/notify-staff-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationId: conversation.id, preview: notifyPreview }),
+      }).then(async (res) => {
+        if (res.ok) return
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        console.error('notify-staff-message failed:', res.status, j.error ?? j)
+      })
+
       void refreshMessagingUI(profile.id)
     } catch (e) {
       console.error(e)

@@ -3,7 +3,6 @@
 import { useEffect, useRef } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
-  showStaffInboundDesktopPopup,
   showStaffNotificationRowDesktopPopup,
   tryShowStaffInboundMessageDesktopPopup,
 } from '@/lib/staffInboundDesktopAlert'
@@ -47,7 +46,9 @@ type UseDesktopMessageNotificationsOpts = {
   getCustomerLabelForConversation?: (conversationId: string | null) => string | null
 }
 
-/** Listens for new notifications and shows OS corner popups when allowed. Message popups are handled on the staff dashboard realtime channel. */
+const POLL_MS = 15_000
+
+/** Listens for new notifications/messages (Realtime + poll fallback) and shows OS corner popups. */
 export function useDesktopMessageNotifications({
   supabase,
   userId,
@@ -67,9 +68,74 @@ export function useDesktopMessageNotifications({
   watchMessagesRef.current = watchMessages
   const getCustomerLabelRef = useRef(getCustomerLabelForConversation)
   getCustomerLabelRef.current = getCustomerLabelForConversation
+  const seenNotificationIdsRef = useRef<Set<string>>(new Set())
+  const mountedAtRef = useRef<string>(new Date().toISOString())
 
   useEffect(() => {
     if (!userId) return
+
+    seenNotificationIdsRef.current = new Set()
+    mountedAtRef.current = new Date().toISOString()
+
+    async function resolveCustomerLabel(conversationId: string | null): Promise<string | null> {
+      const cached = getCustomerLabelRef.current?.(conversationId)
+      if (cached) return cached
+      if (!conversationId) return null
+
+      const { data: conv } = await supabase
+        .from('conversations')
+        .select('customer_id')
+        .eq('id', conversationId)
+        .maybeSingle()
+      if (!conv?.customer_id) return null
+
+      const { data: prof } = await supabase
+        .from('profiles')
+        .select('first_name, username')
+        .eq('id', conv.customer_id)
+        .maybeSingle()
+      return (
+        (prof?.first_name as string | null | undefined)?.trim() ||
+        (prof?.username as string | null | undefined)?.trim() ||
+        null
+      )
+    }
+
+    async function showNotificationPopup(row: NotificationInsert) {
+      if (!isDesktopNotifyEnabled()) return
+      if (!typesRef.current.includes(row.type)) return
+      if (row.read) return
+      if (seenNotificationIdsRef.current.has(row.id)) return
+      seenNotificationIdsRef.current.add(row.id)
+
+      const customerLabel =
+        row.type === 'support_message' ? await resolveCustomerLabel(row.conversation_id) : null
+
+      showStaffNotificationRowDesktopPopup({
+        type: row.type,
+        title: row.title,
+        body: row.body,
+        conversationId: row.conversation_id,
+        senderLabel: customerLabel,
+        notificationId: row.id,
+        onOpen: () => {
+          if (row.conversation_id) onOpenConvoRef.current?.(row.conversation_id)
+          else onOpenRef.current?.(row)
+        },
+      })
+    }
+
+    void (async () => {
+      const { data } = await supabase
+        .from('notifications')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('read', false)
+        .in('type', typesRef.current)
+      for (const row of data ?? []) {
+        seenNotificationIdsRef.current.add((row as { id: string }).id)
+      }
+    })()
 
     const channel = supabase.channel(`desktop-notify-${userId}`)
 
@@ -101,59 +167,41 @@ export function useDesktopMessageNotifications({
         filter: `user_id=eq.${userId}`,
       },
       (payload) => {
-        void (async () => {
-          if (!isDesktopNotifyEnabled()) return
-          const row = payload.new as NotificationInsert
-          if (!typesRef.current.includes(row.type)) return
-          if (row.read) return
-
-          let customerLabel =
-            row.type === 'support_message'
-              ? getCustomerLabelRef.current?.(row.conversation_id)
-              : null
-
-          if (row.type === 'support_message' && !customerLabel && row.conversation_id) {
-            const { data: conv } = await supabase
-              .from('conversations')
-              .select('customer_id')
-              .eq('id', row.conversation_id)
-              .maybeSingle()
-            if (conv?.customer_id) {
-              const { data: prof } = await supabase
-                .from('profiles')
-                .select('first_name, username')
-                .eq('id', conv.customer_id)
-                .maybeSingle()
-              customerLabel =
-                (prof?.first_name as string | null | undefined)?.trim() ||
-                (prof?.username as string | null | undefined)?.trim() ||
-                null
-            }
-          }
-
-          showStaffNotificationRowDesktopPopup({
-            type: row.type,
-            title: row.title,
-            body: row.body,
-            conversationId: row.conversation_id,
-            senderLabel: customerLabel,
-            notificationId: row.id,
-            onOpen: () => {
-              if (row.conversation_id) onOpenConvoRef.current?.(row.conversation_id)
-              else onOpenRef.current?.(row)
-            },
-          })
-        })()
+        void showNotificationPopup(payload.new as NotificationInsert)
       }
     )
 
     channel.subscribe((status, err) => {
       if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-        console.error('[desktop-notify] subscription failed:', status, err)
+        console.error('[desktop-notify] Realtime subscription failed:', status, err)
       }
     })
 
+    const poll = async () => {
+      if (!isDesktopNotifyEnabled()) return
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('id, type, title, body, link, conversation_id, business_id, read, created_at')
+        .eq('user_id', userId)
+        .eq('read', false)
+        .in('type', typesRef.current)
+        .gte('created_at', mountedAtRef.current)
+        .order('created_at', { ascending: true })
+
+      if (error) {
+        console.warn('[desktop-notify] poll failed:', error.message)
+        return
+      }
+
+      for (const row of (data ?? []) as NotificationInsert[]) {
+        await showNotificationPopup(row)
+      }
+    }
+
+    const pollTimer = window.setInterval(() => void poll(), POLL_MS)
+
     return () => {
+      window.clearInterval(pollTimer)
       void supabase.removeChannel(channel)
     }
   }, [supabase, userId])
