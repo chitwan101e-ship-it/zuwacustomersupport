@@ -122,14 +122,44 @@ export async function resolveCustomerRecipient(
   }
 }
 
-export async function listBusinessMemberIds(admin: SupabaseClient, businessId: string): Promise<string[]> {
+/** PostgREST returns at most 1000 rows per request unless paginated. */
+const MEMBER_ID_PAGE_SIZE = 1000
+
+async function fetchBusinessMemberIdColumn(
+  client: SupabaseClient,
+  businessId: string,
+  table: 'conversations' | 'follows',
+  column: 'customer_id' | 'user_id'
+): Promise<string[]> {
+  const ids: string[] = []
+  let from = 0
+  while (true) {
+    const { data, error } = await client
+      .from(table)
+      .select(column)
+      .eq('business_id', businessId)
+      .range(from, from + MEMBER_ID_PAGE_SIZE - 1)
+    if (error) throw error
+    if (!data?.length) break
+    for (const row of data) {
+      const id = (row as Record<string, string>)[column]
+      if (id) ids.push(id)
+    }
+    if (data.length < MEMBER_ID_PAGE_SIZE) break
+    from += MEMBER_ID_PAGE_SIZE
+  }
+  return ids
+}
+
+/** Approved customers linked to a business via follow or support thread. */
+export async function listBusinessMemberIds(client: SupabaseClient, businessId: string): Promise<string[]> {
   const memberIds = new Set<string>()
-  const [{ data: convos }, { data: follows }] = await Promise.all([
-    admin.from('conversations').select('customer_id').eq('business_id', businessId),
-    admin.from('follows').select('user_id').eq('business_id', businessId),
+  const [convIds, followIds] = await Promise.all([
+    fetchBusinessMemberIdColumn(client, businessId, 'conversations', 'customer_id'),
+    fetchBusinessMemberIdColumn(client, businessId, 'follows', 'user_id'),
   ])
-  for (const r of convos || []) memberIds.add((r as { customer_id: string }).customer_id)
-  for (const r of follows || []) memberIds.add((r as { user_id: string }).user_id)
+  for (const id of convIds) memberIds.add(id)
+  for (const id of followIds) memberIds.add(id)
   return [...memberIds]
 }
 

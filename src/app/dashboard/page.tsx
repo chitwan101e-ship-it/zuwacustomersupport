@@ -64,6 +64,7 @@ import { FeedPostImage } from '@/components/FeedPostImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
 import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
+import { listBusinessMemberIds } from '@/lib/resolveCustomerRecipient'
 
 type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
 type UsersPanelTab = 'pending' | 'active' | 'suspended'
@@ -127,6 +128,19 @@ type ThreadMessage = {
 const INBOX_THREAD_LIMIT = 500
 /** PostgREST `.in()` filters are sent on the URL; chunk to stay under proxy length limits. */
 const PROFILE_ID_IN_CHUNK = 200
+
+/** Computed inbox chip — not stored in conversation_inbox_labels (like Meta Business Suite). */
+const INBOX_UNREAD_VIRTUAL_LABEL: InboxLabelRow = {
+  id: '__virtual_unread__',
+  name: 'Unread',
+  color: '#ff3b5c',
+  is_system: true,
+}
+
+function convoLabelsWithUnread(item: ConvoListItem): InboxLabelRow[] {
+  if (item.unreadCount <= 0) return item.labels
+  return [INBOX_UNREAD_VIRTUAL_LABEL, ...item.labels]
+}
 
 function oneEmbed<T>(v: T | T[] | null | undefined): T | null {
   if (v == null) return null
@@ -385,6 +399,7 @@ export default function DashboardPage() {
   const [notifyAudienceLabelIds, setNotifyAudienceLabelIds] = useState<string[]>([])
   const [notifyRecipientQuery, setNotifyRecipientQuery] = useState('')
   const [inboxThreadLabelFilterIds, setInboxThreadLabelFilterIds] = useState<string[]>([])
+  const [inboxUnreadFilterOnly, setInboxUnreadFilterOnly] = useState(false)
   const [notifyTitle, setNotifyTitle] = useState('')
   const [notifyBody, setNotifyBody] = useState('')
   const [oneUserQuery, setOneUserQuery] = useState('')
@@ -593,7 +608,7 @@ export default function DashboardPage() {
           }
         })
 
-      const [convRes, pendingRes, reportRes, convCustRes, followRes, cannedRes] = await Promise.all([
+      const [convRes, pendingRes, reportRes, memberIdsRes, cannedRes] = await Promise.all([
         supabase
           .from('conversations')
           .select('id, customer_id, updated_at')
@@ -607,8 +622,11 @@ export default function DashboardPage() {
           .eq('business_id', bid)
           .order('created_at', { ascending: false })
           .limit(20),
-        supabase.from('conversations').select('customer_id').eq('business_id', bid),
-        supabase.from('follows').select('user_id').eq('business_id', bid),
+        listBusinessMemberIds(supabase, bid)
+          .then((ids) => ({ ids }))
+          .catch((e: unknown) => ({
+            error: e instanceof Error ? e.message : 'Failed to load member list',
+          })),
         supabase
           .from('inbox_canned_replies')
           .select('id, title, body, sort_order')
@@ -621,8 +639,7 @@ export default function DashboardPage() {
       if (convRes.error) errs.push(`conversations: ${convRes.error.message}`)
       if (pendingRes.error) errs.push(`pending: ${pendingRes.error}`)
       if (reportRes.error) errs.push(`reports: ${reportRes.error.message}`)
-      if (convCustRes.error) errs.push(`members(conv): ${convCustRes.error.message}`)
-      if (followRes.error) errs.push(`members(follows): ${followRes.error.message}`)
+      if ('error' in memberIdsRes && memberIdsRes.error) errs.push(`members: ${memberIdsRes.error}`)
       if (cannedRes.error) errs.push(`canned replies: ${cannedRes.error.message}`)
       if (errs.length) setLoadError(errs.join(' · '))
 
@@ -804,10 +821,7 @@ export default function DashboardPage() {
         if (!bellErr) setStaffNotifyUnread(bellCount ?? 0)
       }
 
-      const memberIds = new Set<string>()
-      for (const r of convCustRes.data || []) memberIds.add((r as { customer_id: string }).customer_id)
-      for (const r of followRes.data || []) memberIds.add((r as { user_id: string }).user_id)
-      const merged = [...memberIds]
+      const merged = 'ids' in memberIdsRes ? memberIdsRes.ids : []
 
       if (merged.length === 0) {
         setActiveMembers([])
@@ -2148,7 +2162,13 @@ export default function DashboardPage() {
       customerId
     )
     if (readErr) console.error(readErr)
+    const now = new Date().toISOString()
     setConvoList((prev) => prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c)))
+    setThreadMessages((prev) =>
+      prev.map((m) =>
+        m.sender_id === customerId && m.read !== true ? { ...m, read: true, read_at: now } : m
+      )
+    )
     if (p?.id) {
       const { errorMessage: nErr } = await markConversationNotificationsRead(supabase, p.id, conversationId)
       if (nErr) console.error(nErr)
@@ -2222,7 +2242,7 @@ export default function DashboardPage() {
     setReplyDraft('')
     setReplyTarget(null)
     clearReplyPendingImage()
-    await reloadThreadMessages(conversationId, { markRead: true, showLoading: true })
+    await reloadThreadMessages(conversationId, { markRead: false, showLoading: true })
   }
 
   openMessageFromNotifyRef.current = (conversationId: string) => {
@@ -2727,10 +2747,7 @@ export default function DashboardPage() {
       const recipientIds = new Set<string>()
 
       if (audience === 'all') {
-        const { data: convos } = await supabase.from('conversations').select('customer_id').eq('business_id', profile.business_id)
-        for (const c of convos || []) recipientIds.add((c as { customer_id: string }).customer_id)
-        const { data: follows } = await supabase.from('follows').select('user_id').eq('business_id', profile.business_id)
-        for (const f of follows || []) recipientIds.add((f as { user_id: string }).user_id)
+        for (const id of await listBusinessMemberIds(supabase, profile.business_id)) recipientIds.add(id)
       } else if (audience === 'one') {
         const raw = oneUserQuery.trim()
         if (!raw) {
@@ -2990,18 +3007,20 @@ export default function DashboardPage() {
   }, [convoListForInbox, inboxSearchQuery])
 
   const inboxDisplayList = useMemo(() => {
-    if (inboxThreadLabelFilterIds.length === 0) return filteredConvoList
-    return filteredConvoList.filter((c) =>
+    let list = filteredConvoList
+    if (inboxUnreadFilterOnly) list = list.filter((c) => c.unreadCount > 0)
+    if (inboxThreadLabelFilterIds.length === 0) return list
+    return list.filter((c) =>
       inboxThreadLabelFilterIds.some((lid) => c.labels.some((l) => l.id === lid))
     )
-  }, [filteredConvoList, inboxThreadLabelFilterIds])
+  }, [filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly])
 
-  /** Drop open thread when it falls outside the active label filter. */
+  /** Drop open thread when it falls outside the active inbox filter. */
   useEffect(() => {
-    if (inboxThreadLabelFilterIds.length === 0 || !selectedConvoId) return
+    if ((inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly) || !selectedConvoId) return
     const stillVisible = inboxDisplayList.some((c) => c.id === selectedConvoId)
     if (!stillVisible) setSelectedConvoId(null)
-  }, [inboxThreadLabelFilterIds, inboxDisplayList, selectedConvoId])
+  }, [inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxDisplayList, selectedConvoId])
 
   /** Active members matching inbox search who have no thread in results (often: follow only, no messages yet). */
   const inboxSearchMemberMatches = useMemo(() => {
@@ -3056,6 +3075,16 @@ export default function DashboardPage() {
     if (!q) return cannedReplies
     return cannedReplies.filter((r) => r.title.toLowerCase().includes(q) || r.body.toLowerCase().includes(q))
   }, [cannedReplies, cannedPickerQuery])
+
+  const threadFirstUnreadIndex = useMemo(() => {
+    const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
+    if (!customerId) return -1
+    for (let i = 0; i < threadMessages.length; i++) {
+      const m = threadMessages[i]
+      if (m.sender_id === customerId && m.read !== true) return i
+    }
+    return -1
+  }, [threadMessages, selectedConvoId, convoList])
 
   const threadSeenIndexes = useMemo(() => {
     const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
@@ -3121,9 +3150,20 @@ export default function DashboardPage() {
   }
 
   function selectInboxThreadLabelFilter(labelId: string) {
+    setInboxUnreadFilterOnly(false)
     setInboxThreadLabelFilterIds((prev) =>
       prev.length === 1 && prev[0] === labelId ? [] : [labelId]
     )
+  }
+
+  function toggleInboxUnreadFilter() {
+    setInboxThreadLabelFilterIds([])
+    setInboxUnreadFilterOnly((v) => !v)
+  }
+
+  function clearInboxThreadFilters() {
+    setInboxThreadLabelFilterIds([])
+    setInboxUnreadFilterOnly(false)
   }
 
   function selectAllNotifyRecipients() {
@@ -3408,9 +3448,25 @@ export default function DashboardPage() {
                         ) : null}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-semibold text-white truncate">{item.customerName}</p>
+                        <p
+                          className={`text-[13px] truncate ${
+                            item.unreadCount > 0 ? 'font-bold text-white' : 'font-semibold text-white'
+                          }`}
+                        >
+                          {item.customerName}
+                        </p>
                         <p className="text-[11px] text-[#8892b0] truncate max-w-[min(100%,240px)]">{item.preview}</p>
-                        <p className="text-[10px] text-[#4e5a7a] mt-0.5">{timeAgo(item.updated_at)}</p>
+                        <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                          {item.unreadCount > 0 ? (
+                            <span
+                              className="inline-flex rounded px-1 py-px text-[9px] font-semibold border"
+                              style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                            >
+                              Unread
+                            </span>
+                          ) : null}
+                          <p className="text-[10px] text-[#4e5a7a]">{timeAgo(item.updated_at)}</p>
+                        </div>
                       </div>
                     </button>
                   ))
@@ -3885,10 +3941,10 @@ export default function DashboardPage() {
                   </span>
                 ) : null}
                 <span className="text-[11px] text-[#8892b0] tabular-nums">
-                  {inboxSearchQuery.trim() || inboxThreadLabelFilterIds.length > 0
+                  {inboxSearchQuery.trim() || inboxThreadLabelFilterIds.length > 0 || inboxUnreadFilterOnly
                     ? `${inboxDisplayList.length} of ${convoListMerged.length} threads`
                     : `${convoListMerged.length} threads`}
-                  {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0
+                  {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly
                     ? ` · ${INBOX_THREAD_LIMIT} most recent`
                     : ''}
                 </span>
@@ -3952,44 +4008,67 @@ export default function DashboardPage() {
                         aria-label="Search threads"
                       />
                     </div>
-                    {inboxLabelCatalog.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5 items-center">
-                        <span className="text-[10px] text-[#5c647e] w-full">Filter by label</span>
-                        <button
-                          type="button"
-                          onClick={() => setInboxThreadLabelFilterIds([])}
-                          className={`inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
-                            inboxThreadLabelFilterIds.length === 0
-                              ? 'border-[#8d63ff]/50 bg-[rgba(141,99,255,0.15)] text-[#c4b8ff] ring-1 ring-[#8d63ff]/50'
-                              : 'border-white/[0.12] bg-white/[0.04] text-[#9ea8cc] opacity-90 hover:opacity-100 hover:text-white'
-                          }`}
-                        >
-                          All threads
-                        </button>
-                        {inboxLabelCatalog.map((lbl) => {
-                          const on = inboxThreadLabelFilterIds.includes(lbl.id)
-                          return (
-                            <button
-                              key={lbl.id}
-                              type="button"
-                              onClick={() => selectInboxThreadLabelFilter(lbl.id)}
-                              className={`inline-flex max-w-full truncate rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
-                                on ? 'ring-1 ring-[#8d63ff]/50' : 'opacity-80 hover:opacity-100'
-                              }`}
-                              style={inboxLabelChipStyle(lbl.color)}
-                            >
-                              {lbl.name}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    ) : null}
+                    <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                      <span className="text-[10px] text-[#5c647e] w-full">Filter</span>
+                      <button
+                        type="button"
+                        onClick={clearInboxThreadFilters}
+                        className={`inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                          inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly
+                            ? 'border-[#8d63ff]/50 bg-[rgba(141,99,255,0.15)] text-[#c4b8ff] ring-1 ring-[#8d63ff]/50'
+                            : 'border-white/[0.12] bg-white/[0.04] text-[#9ea8cc] opacity-90 hover:opacity-100 hover:text-white'
+                        }`}
+                      >
+                        All threads
+                      </button>
+                      <button
+                        type="button"
+                        onClick={toggleInboxUnreadFilter}
+                        className={`inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                          inboxUnreadFilterOnly ? 'ring-1 ring-[#ff3b5c]/50' : 'opacity-90 hover:opacity-100'
+                        }`}
+                        style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                      >
+                        Unread{inboxUnreadTotal > 0 ? ` (${inboxUnreadTotal > 99 ? '99+' : inboxUnreadTotal})` : ''}
+                      </button>
+                      {inboxLabelCatalog.map((lbl) => {
+                        const on = inboxThreadLabelFilterIds.includes(lbl.id)
+                        return (
+                          <button
+                            key={lbl.id}
+                            type="button"
+                            onClick={() => selectInboxThreadLabelFilter(lbl.id)}
+                            className={`inline-flex max-w-full truncate rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                              on ? 'ring-1 ring-[#8d63ff]/50' : 'opacity-80 hover:opacity-100'
+                            }`}
+                            style={inboxLabelChipStyle(lbl.color)}
+                          >
+                            {lbl.name}
+                          </button>
+                        )
+                      })}
+                    </div>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-white/[0.08] max-h-[44vh] lg:max-h-none pt-1 pb-0.5">
-                    {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0 ? (
+                    {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly ? (
                       <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
                         Showing the {INBOX_THREAD_LIMIT} most recently active threads. Chats do not expire — search by
                         name to find older conversations (e.g. Bayern).
+                      </p>
+                    ) : inboxUnreadFilterOnly ? (
+                      <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
+                        {inboxDisplayList.length === 0
+                          ? 'No unread threads in the recent load.'
+                          : `${inboxDisplayList.length} unread thread${inboxDisplayList.length === 1 ? '' : 's'} in the recent load.`}{' '}
+                        Search by name to find older unread conversations, or{' '}
+                        <button
+                          type="button"
+                          onClick={clearInboxThreadFilters}
+                          className="font-semibold text-[#8d63ff] hover:underline"
+                        >
+                          view all threads
+                        </button>
+                        .
                       </p>
                     ) : inboxThreadLabelFilterIds.length > 0 ? (
                       <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
@@ -3999,7 +4078,7 @@ export default function DashboardPage() {
                         Search by name to find older labeled conversations, or{' '}
                         <button
                           type="button"
-                          onClick={() => setInboxThreadLabelFilterIds([])}
+                          onClick={clearInboxThreadFilters}
                           className="font-semibold text-[#8d63ff] hover:underline"
                         >
                           view all threads
@@ -4054,6 +4133,7 @@ export default function DashboardPage() {
                     ) : (
                     inboxDisplayList.map((item) => {
                       const active = selectedConvoId === item.id
+                      const displayLabels = convoLabelsWithUnread(item)
                       return (
                         <button
                           type="button"
@@ -4061,7 +4141,7 @@ export default function DashboardPage() {
                           onClick={() => void openThread(item.id)}
                           className={`w-full text-left px-3 py-2.5 flex gap-2 items-start transition-colors ${
                             active ? 'bg-[rgba(141,99,255,0.07)]' : 'hover:bg-white/[0.03]'
-                          }`}
+                          } ${item.unreadCount > 0 && !active ? 'border-l-2 border-[#ff3b5c]/70' : ''}`}
                         >
                           <div className="relative shrink-0">
                             <div className="w-9 h-9 rounded-[10px] bg-[#131e3e] flex items-center justify-center text-[12px] font-bold overflow-hidden border border-white/[0.06] text-white">
@@ -4079,14 +4159,26 @@ export default function DashboardPage() {
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
-                              <p className="text-[13px] font-semibold text-white truncate">{item.customerName}</p>
+                              <p
+                                className={`text-[13px] truncate ${
+                                  item.unreadCount > 0 ? 'font-bold text-white' : 'font-semibold text-white'
+                                }`}
+                              >
+                                {item.customerName}
+                              </p>
                               <p className="shrink-0 text-[10px] text-[#4e5a7a]">{timeAgo(item.updated_at)}</p>
                             </div>
                             <p className="text-[11px] text-[#8892b0] truncate">@{item.customerUsername}</p>
-                            <p className="text-[11px] text-[#8892b0] truncate mt-0.5 max-w-[min(100%,220px)]">{item.preview}</p>
-                            {item.labels.length > 0 ? (
+                            <p
+                              className={`text-[11px] truncate mt-0.5 max-w-[min(100%,220px)] ${
+                                item.unreadCount > 0 ? 'text-[#c4cbe6] font-medium' : 'text-[#8892b0]'
+                              }`}
+                            >
+                              {item.preview}
+                            </p>
+                            {displayLabels.length > 0 ? (
                               <div className="flex flex-wrap gap-1 mt-1.5 max-w-[min(100%,220px)]">
-                                {item.labels.slice(0, 4).map((l) => (
+                                {displayLabels.slice(0, 4).map((l) => (
                                   <span
                                     key={l.id}
                                     className="inline-flex max-w-full truncate rounded px-1 py-px text-[9px] font-semibold border"
@@ -4095,8 +4187,8 @@ export default function DashboardPage() {
                                     {l.name}
                                   </span>
                                 ))}
-                                {item.labels.length > 4 ? (
-                                  <span className="text-[9px] text-[#5c647e] font-medium">+{item.labels.length - 4}</span>
+                                {displayLabels.length > 4 ? (
+                                  <span className="text-[9px] text-[#5c647e] font-medium">+{displayLabels.length - 4}</span>
                                 ) : null}
                               </div>
                             ) : null}
@@ -4127,6 +4219,19 @@ export default function DashboardPage() {
                             </div>
                           </div>
                           <div className="flex items-center gap-0.5 shrink-0 relative">
+                            {selectedConvo.unreadCount > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void markActiveThreadRead(selectedConvo.id, selectedConvo.customer_id)
+                                }
+                                className="rounded-lg border px-2 py-1 text-[11px] font-semibold transition"
+                                style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                                title="Mark customer messages as read"
+                              >
+                                Mark read
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               onClick={() => {
@@ -4244,22 +4349,32 @@ export default function DashboardPage() {
                             ) : null}
                           </div>
                         </div>
-                        {selectedConvo.labels.length > 0 ? (
+                        {convoLabelsWithUnread(selectedConvo).length > 0 ? (
                           <div className="flex flex-wrap gap-1.5 items-center pl-[42px]">
-                            {selectedConvo.labels.map((l) => (
-                              <button
-                                key={l.id}
-                                type="button"
-                                disabled={inboxLabelRowBusy === l.id}
-                                onClick={() => void applyInboxLabelOnThread(l.id, false, l)}
-                                className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold max-w-[200px] group disabled:opacity-40"
-                                style={inboxLabelChipStyle(l.color)}
-                                title="Remove label"
-                              >
-                                <span className="truncate">{l.name}</span>
-                                <X className="w-3 h-3 shrink-0 opacity-70 group-hover:opacity-100" />
-                              </button>
-                            ))}
+                            {convoLabelsWithUnread(selectedConvo).map((l) =>
+                              l.id === INBOX_UNREAD_VIRTUAL_LABEL.id ? (
+                                <span
+                                  key={l.id}
+                                  className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold max-w-[200px]"
+                                  style={inboxLabelChipStyle(l.color)}
+                                >
+                                  <span className="truncate">{l.name}</span>
+                                </span>
+                              ) : (
+                                <button
+                                  key={l.id}
+                                  type="button"
+                                  disabled={inboxLabelRowBusy === l.id}
+                                  onClick={() => void applyInboxLabelOnThread(l.id, false, l)}
+                                  className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold max-w-[200px] group disabled:opacity-40"
+                                  style={inboxLabelChipStyle(l.color)}
+                                  title="Remove label"
+                                >
+                                  <span className="truncate">{l.name}</span>
+                                  <X className="w-3 h-3 shrink-0 opacity-70 group-hover:opacity-100" />
+                                </button>
+                              )
+                            )}
                           </div>
                         ) : (
                           <p className="text-[10px] text-[#5c647e] pl-[42px]">No labels — use the tag icon to add some.</p>
@@ -4324,12 +4439,29 @@ export default function DashboardPage() {
                                 .getElementById(`inbox-msg-${messageId}`)
                                 ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
                             }
+                            const showUnreadDivider = i === threadFirstUnreadIndex
                             return (
-                              <div
-                                key={m.id}
-                                id={`inbox-msg-${m.id}`}
-                                className={`flex flex-col w-full min-w-0 ${isFromTeam ? 'items-end' : 'items-start'}`}
-                              >
+                              <div key={m.id} className="contents">
+                                {showUnreadDivider ? (
+                                  <div
+                                    className="col-span-full flex items-center gap-2 py-1"
+                                    role="separator"
+                                    aria-label="Unread messages"
+                                  >
+                                    <div className="h-px flex-1 bg-[#ff3b5c]/35" />
+                                    <span
+                                      className="shrink-0 rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                                      style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                                    >
+                                      Unread
+                                    </span>
+                                    <div className="h-px flex-1 bg-[#ff3b5c]/35" />
+                                  </div>
+                                ) : null}
+                                <div
+                                  id={`inbox-msg-${m.id}`}
+                                  className={`flex flex-col w-full min-w-0 ${isFromTeam ? 'items-end' : 'items-start'}`}
+                                >
                                 {teamLine ? (
                                   <p
                                     className="text-[10px] text-[#7d86a8] px-1 pb-0.5 font-medium truncate max-w-full text-right"
@@ -4405,6 +4537,7 @@ export default function DashboardPage() {
                                   ) : null}
                                 </div>
                               </div>
+                            </div>
                             )
                           })
                         )}
