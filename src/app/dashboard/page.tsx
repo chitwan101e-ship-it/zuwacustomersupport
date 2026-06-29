@@ -65,6 +65,9 @@ import { LinkifiedText } from '@/components/LinkifiedText'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
 import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
 import { listBusinessMemberIds } from '@/lib/resolveCustomerRecipient'
+import { isAutoApproveSignupsEnabled } from '@/lib/signupApproval'
+
+const autoApproveSignups = isAutoApproveSignupsEnabled()
 
 type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
 type UsersPanelTab = 'pending' | 'active' | 'suspended'
@@ -460,7 +463,7 @@ export default function DashboardPage() {
   const [businessInfo, setBusinessInfo] = useState<{ name: string; slug: string } | null>(null)
   const [activeMembers, setActiveMembers] = useState<ActiveMember[]>([])
   const [suspendedMembers, setSuspendedMembers] = useState<ActiveMember[]>([])
-  const [usersPanelTab, setUsersPanelTab] = useState<UsersPanelTab>('pending')
+  const [usersPanelTab, setUsersPanelTab] = useState<UsersPanelTab>(autoApproveSignups ? 'active' : 'pending')
   const [modBusyId, setModBusyId] = useState<string | null>(null)
   const [memberMessageDrafts, setMemberMessageDrafts] = useState<Record<string, string>>({})
   const [memberSendBusyId, setMemberSendBusyId] = useState<string | null>(null)
@@ -1309,14 +1312,14 @@ export default function DashboardPage() {
       timer = window.setTimeout(() => {
         const current = profileRef.current
         if (current?.business_id) void refreshDashboard(current)
-      }, 100)
+      }, 400)
     }
     const queueSlowRefresh = () => {
       if (slowTimer) window.clearTimeout(slowTimer)
       slowTimer = window.setTimeout(() => {
         const current = profileRef.current
         if (current?.business_id) void refreshDashboard(current)
-      }, 450)
+      }, 900)
     }
 
     const bumpInboxOnCustomerMessage = (payload: { new: Record<string, unknown> }): boolean => {
@@ -1387,7 +1390,6 @@ export default function DashboardPage() {
         }
       )
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, queueRefresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_inbox_labels' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_label_definitions' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_canned_replies' }, queueRefresh)

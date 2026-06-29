@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
-import { sendApprovalWelcomeMessage } from '@/lib/approvalWelcomeMessage'
 import { notifyBusinessTeamAdmins } from '@/lib/notifyStaffAdmins'
-import { sendAccountApprovedEmail } from '@/lib/sendApprovalEmail'
+import { completeCustomerApproval } from '@/lib/signupApproval'
 
 export async function POST(req: NextRequest) {
   try {
@@ -97,7 +96,6 @@ export async function POST(req: NextRequest) {
       { excludeUserId: user.id }
     )
 
-    // Approved customers automatically follow this business (feed + messaging without a manual Follow step).
     if (decision === 'approve') {
       const bid = staff.business_id as string | null
       let businessName = 'your team'
@@ -105,41 +103,15 @@ export async function POST(req: NextRequest) {
         const { data: biz } = await admin.from('businesses').select('name').eq('id', bid).maybeSingle()
         if (biz?.name) businessName = biz.name as string
 
-        const { error: fErr } = await admin.from('follows').insert({
-          user_id: targetUserId,
-          business_id: bid,
-        })
-        if (fErr && fErr.code !== '23505') {
-          console.error('[review-account] follow insert:', fErr)
-        }
-
-        const { error: nErr } = await admin.from('notifications').insert({
-          user_id: targetUserId,
-          business_id: bid,
-          type: 'account_approved',
-          title: 'Your account is approved',
-          body: `You're all set. Open your feed for updates from ${businessName}.`,
-          link: '/feed',
-        })
-        if (nErr) console.error('[review-account] customer notification:', nErr)
-
-        await sendApprovalWelcomeMessage(admin, {
-          businessId: bid,
+        await completeCustomerApproval(admin, {
           customerId: targetUserId,
-          staffSenderId: user.id,
           customerName: name,
           username: t.username,
+          email: email !== '—' ? email : null,
+          businessId: bid,
           businessName,
+          staffSenderId: user.id,
         })
-
-        if (email && email !== '—' && email.includes('@')) {
-          await sendAccountApprovedEmail({
-            to: email,
-            customerName: name,
-            username: t.username,
-            businessName,
-          })
-        }
       }
     }
 

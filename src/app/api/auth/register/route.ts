@@ -8,6 +8,12 @@ import { rateLimitRegister } from '@/lib/authRateLimit'
 import { verifyTurnstileToken } from '@/lib/verifyTurnstile'
 import { SIGNUP_OTP_VERIFICATION_FAILED } from '@/lib/signupOtp'
 import { isAuthEmailTakenError, resolveSignupEmailConflict } from '@/lib/authEmailTaken'
+import {
+  completeCustomerApproval,
+  isAutoApproveSignupsEnabled,
+  resolveBusinessAdminStaffId,
+  resolvePrimaryBusinessForSignup,
+} from '@/lib/signupApproval'
 import crypto from 'crypto'
 
 function hashToken(token: string) {
@@ -200,7 +206,7 @@ export async function POST(req: NextRequest) {
       role: 'customer',
       business_id: null,
       business_role: null,
-      account_status: 'pending',
+      account_status: isAutoApproveSignupsEnabled() ? 'approved' : 'pending',
       email_verified: otpEnabled,
     })
 
@@ -219,11 +225,36 @@ export async function POST(req: NextRequest) {
 
     await logAttempt(false, null)
 
-    await notifyEveryBusinessAdmin(supabase, {
-      title: 'New customer signup pending',
-      body: `@${cleanUsername} (${firstName} ${lastName}) — phone: ${String(phone).trim()}${referral ? ` — referral: @${referral}` : ''}${question ? ` — question: "${question.slice(0, 120)}${question.length > 120 ? '…' : ''}"` : ''}. Review pending accounts in the dashboard.`,
-      link: '/notifications',
-    })
+    const autoApproved = isAutoApproveSignupsEnabled()
+    const customerName = `${firstName} ${lastName}`.trim() || cleanUsername
+
+    if (autoApproved) {
+      const business = await resolvePrimaryBusinessForSignup(supabase)
+      if (business) {
+        const staffSenderId = (await resolveBusinessAdminStaffId(supabase, business.id)) ?? userId
+        await completeCustomerApproval(supabase, {
+          customerId: userId,
+          customerName,
+          username: cleanUsername,
+          email: String(email).trim().toLowerCase(),
+          businessId: business.id,
+          businessName: business.name,
+          staffSenderId,
+        })
+      }
+
+      await notifyEveryBusinessAdmin(supabase, {
+        title: 'New customer signed up',
+        body: `@${cleanUsername} (${customerName}) — phone: ${String(phone).trim()}${referral ? ` — referral: @${referral}` : ''}${question ? ` — question: "${question.slice(0, 120)}${question.length > 120 ? '…' : ''}"` : ''}. Account was approved automatically.`,
+        link: '/notifications',
+      })
+    } else {
+      await notifyEveryBusinessAdmin(supabase, {
+        title: 'New customer signup pending',
+        body: `@${cleanUsername} (${customerName}) — phone: ${String(phone).trim()}${referral ? ` — referral: @${referral}` : ''}${question ? ` — question: "${question.slice(0, 120)}${question.length > 120 ? '…' : ''}"` : ''}. Review pending accounts in the dashboard.`,
+        link: '/notifications',
+      })
+    }
 
     return NextResponse.json({
       success: true,

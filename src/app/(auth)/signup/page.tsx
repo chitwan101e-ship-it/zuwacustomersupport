@@ -2,7 +2,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { redirectIfAuthenticated } from '@/lib/authRouting'
+import { redirectIfAuthenticated, finalizeSessionAfterSignIn } from '@/lib/authRouting'
 import RelayLogo from '@/components/RelayLogo'
 import { User, Eye, EyeOff, ArrowLeft, Loader2 } from 'lucide-react'
 import clsx from 'clsx'
@@ -11,7 +11,10 @@ import { combineInternationalPhone, COUNTRY_DIAL_OPTIONS } from '@/lib/countryDi
 import { normalizePhoneForDedup } from '@/lib/phoneNormalize'
 import { SIGNUP_OTP_VERIFICATION_FAILED } from '@/lib/signupOtp'
 import { TURNSTILE_LOAD_ERROR, TURNSTILE_WIDGET_ERROR } from '@/lib/userFacingErrors'
+import { isManualSignupApprovalRequired } from '@/lib/signupApproval'
 import { PendingApprovalPanel } from '@/components/PendingApprovalPanel'
+
+const manualSignupApproval = isManualSignupApprovalRequired()
 
 type Step = 1 | 2 | 3 | 4
 
@@ -230,7 +233,11 @@ export default function SignUpPage() {
         email: form.email.trim().toLowerCase(),
         password: form.password,
       })
-      setSignupNeedsSignIn(Boolean(signErr))
+      if (!signErr) {
+        await finalizeSessionAfterSignIn(supabase, router)
+        return
+      }
+      setSignupNeedsSignIn(true)
       setStep(4)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Registration failed')
@@ -265,9 +272,9 @@ export default function SignUpPage() {
           <div className="text-center mb-6">
             <RelayLogo size="lg" className="justify-center mb-2" />
             <p className="text-[#7f8bad] text-sm">Private messaging, beautifully simple.</p>
-            <div className="inline-flex items-center gap-2 mt-4 px-4 py-2 rounded-full bg-[#2c220f] text-[#f6b332] text-sm font-semibold">
-              <span className="w-2 h-2 rounded-full bg-[#f6b332]" />
-              Access requires staff approval
+            <div className="inline-flex items-center gap-2 mt-4 px-4 py-2 rounded-full bg-[#14291f] text-[#4ade80] text-sm font-semibold">
+              <span className="w-2 h-2 rounded-full bg-[#4ade80]" />
+              {manualSignupApproval ? 'Access requires staff approval' : 'Accounts are active right after signup'}
             </div>
             <div className="mt-5 rounded-2xl border border-white/10 bg-[#11172a] p-1 flex">
               <a
@@ -622,9 +629,29 @@ export default function SignUpPage() {
             </>
           )}
 
-          {/* Step 4: Request submitted + waiting for approval */}
-          {step === 4 && (
+          {/* Step 4: only when auto sign-in after register failed */}
+          {step === 4 && manualSignupApproval && (
             <PendingApprovalPanel embedded needsSignIn={signupNeedsSignIn} />
+          )}
+          {step === 4 && !manualSignupApproval && (
+            <div className="text-center py-2 space-y-4">
+              <div className="w-16 h-16 rounded-full bg-emerald-500/15 flex items-center justify-center mx-auto">
+                <span className="text-2xl">✓</span>
+              </div>
+              <div>
+                <h2 className="font-display font-bold text-2xl mb-2 text-white">Account created</h2>
+                <p className="text-[#7f8bad] text-sm leading-relaxed">
+                  Your account is ready. Sign in with the same email and password to open your feed.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => router.push('/login')}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-[#7c5af6] to-[#5a7ff6] text-white font-semibold hover:opacity-90 transition-opacity"
+              >
+                Go to sign in
+              </button>
+            </div>
           )}
         </div>
       </main>

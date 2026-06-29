@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { isAutoApproveSignupsEnabled } from '@/lib/signupApproval'
 import { withTimeout } from '@/lib/withTimeout'
 
 export const runtime = 'nodejs'
@@ -64,6 +65,7 @@ export async function GET() {
     }
 
     const rows = profiles ?? []
+    const skipAuthEmailLookup = isAutoApproveSignupsEnabled()
     const enriched: {
       id: string
       first_name: string
@@ -77,6 +79,25 @@ export async function GET() {
       email: string | null
       email_verified: boolean
     }[] = []
+
+    if (skipAuthEmailLookup) {
+      for (const p of rows) {
+        enriched.push({
+          id: p.id as string,
+          first_name: (p.first_name as string) ?? '',
+          last_name: (p.last_name as string) ?? '',
+          username: (p.username as string) ?? '',
+          phone: (p.phone as string | null) ?? null,
+          referral_username: (p.referral_username as string | null) ?? null,
+          signup_question: (p.signup_question as string | null) ?? null,
+          created_at: p.created_at as string,
+          account_status: p.account_status as string,
+          email: null,
+          email_verified: false,
+        })
+      }
+      return NextResponse.json({ pending: enriched })
+    }
 
     for (let i = 0; i < rows.length; i += BATCH) {
       const slice = rows.slice(i, i + BATCH)
