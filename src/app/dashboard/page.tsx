@@ -131,6 +131,7 @@ type ThreadMessage = {
 const INBOX_THREAD_LIMIT = 500
 /** PostgREST `.in()` filters are sent on the URL; chunk to stay under proxy length limits. */
 const PROFILE_ID_IN_CHUNK = 200
+const CONVO_ID_IN_CHUNK = 200
 
 /** Computed inbox chip — not stored in conversation_inbox_labels (like Meta Business Suite). */
 const INBOX_UNREAD_VIRTUAL_LABEL: InboxLabelRow = {
@@ -493,6 +494,8 @@ export default function DashboardPage() {
   const [inboxSearchQuery, setInboxSearchQuery] = useState('')
   const [inboxSearchExtraConvos, setInboxSearchExtraConvos] = useState<ConvoListItem[]>([])
   const [inboxSearchExtraBusy, setInboxSearchExtraBusy] = useState(false)
+  const [inboxLabelFilterExtraConvos, setInboxLabelFilterExtraConvos] = useState<ConvoListItem[]>([])
+  const [inboxLabelFilterBusy, setInboxLabelFilterBusy] = useState(false)
   const [cannedReplies, setCannedReplies] = useState<CannedReplyRow[]>([])
   const [cannedPopoverOpen, setCannedPopoverOpen] = useState(false)
   const cannedPopoverRef = useRef<HTMLDivElement>(null)
@@ -1828,6 +1831,205 @@ export default function DashboardPage() {
     return () => window.clearTimeout(timer)
   }, [activeTab, inboxSearchQuery, profile?.business_id, convoList, activeMembers, suspendedMembers, supabase])
 
+  /** Load every thread with the selected inbox label (not only the recent-thread cap). */
+  useEffect(() => {
+    if (activeTab !== 'inbox') {
+      setInboxLabelFilterExtraConvos([])
+      return
+    }
+    const labelId = inboxThreadLabelFilterIds.length === 1 ? inboxThreadLabelFilterIds[0] : null
+    const bid = profile?.business_id
+    if (!labelId || !bid) {
+      setInboxLabelFilterExtraConvos([])
+      return
+    }
+
+    let cancelled = false
+    setInboxLabelFilterBusy(true)
+
+    void (async () => {
+      try {
+        const { data: assignRows, error: assignErr } = await supabase
+          .from('conversation_inbox_labels')
+          .select('conversation_id')
+          .eq('label_id', labelId)
+        if (cancelled) return
+        if (assignErr) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const labeledConvoIds = [...new Set((assignRows ?? []).map((r) => r.conversation_id as string))]
+        if (labeledConvoIds.length === 0) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const loadedConvoIds = new Set(convoList.map((c) => c.id))
+        const missingIds = labeledConvoIds.filter((id) => !loadedConvoIds.has(id))
+        if (missingIds.length === 0) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const convoRows: { id: string; customer_id: string; updated_at: string }[] = []
+        for (let i = 0; i < missingIds.length; i += CONVO_ID_IN_CHUNK) {
+          const slice = missingIds.slice(i, i + CONVO_ID_IN_CHUNK)
+          const { data, error } = await supabase
+            .from('conversations')
+            .select('id, customer_id, updated_at')
+            .eq('business_id', bid)
+            .in('id', slice)
+          if (cancelled) return
+          if (error) throw error
+          for (const row of data ?? []) {
+            convoRows.push(row as { id: string; customer_id: string; updated_at: string })
+          }
+        }
+
+        if (convoRows.length === 0) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const convIds = convoRows.map((c) => c.id)
+        const customerIds = [...new Set(convoRows.map((c) => c.customer_id))]
+        const defById = Object.fromEntries(inboxLabelCatalog.map((d) => [d.id, d])) as Record<
+          string,
+          InboxLabelRow
+        >
+
+        const profileById: Record<
+          string,
+          { first_name: string; last_name: string; username: string; avatar_url?: string | null }
+        > = {}
+        for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
+          const slice = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+          const { data: profs } = await supabase
+            .from('profiles')
+            .select('id, first_name, last_name, username, avatar_url')
+            .in('id', slice)
+          if (cancelled) return
+          for (const row of profs ?? []) {
+            const r = row as {
+              id: string
+              first_name: string
+              last_name: string
+              username: string
+              avatar_url?: string | null
+            }
+            profileById[r.id] = r
+          }
+        }
+
+        const previewByConvo: Record<string, { body: string; created_at: string }> = {}
+        const { data: previews, error: previewErr } = await supabase.rpc('inbox_latest_previews', {
+          p_conversation_ids: convIds,
+        })
+        if (cancelled) return
+        if (previewErr) {
+          const { data: msgs } = await supabase
+            .from('messages')
+            .select('conversation_id, body, created_at')
+            .in('conversation_id', convIds)
+            .order('created_at', { ascending: false })
+            .limit(10000)
+          if (cancelled) return
+          for (const m of msgs ?? []) {
+            const row = m as { conversation_id: string; body: string; created_at: string }
+            const prev = previewByConvo[row.conversation_id]
+            if (!prev || new Date(row.created_at) > new Date(prev.created_at)) {
+              previewByConvo[row.conversation_id] = { body: row.body, created_at: row.created_at }
+            }
+          }
+        } else {
+          for (const row of previews ?? []) {
+            const r = row as { conversation_id: string; body: string; created_at: string }
+            previewByConvo[r.conversation_id] = { body: r.body, created_at: r.created_at }
+          }
+        }
+
+        const customerByConvo = Object.fromEntries(convoRows.map((r) => [r.id, r.customer_id])) as Record<
+          string,
+          string
+        >
+        const unreadByConvo: Record<string, number> = {}
+        const { data: unreadRows } = await supabase
+          .from('messages')
+          .select('conversation_id, sender_id')
+          .in('conversation_id', convIds)
+          .or('read.eq.false,read.is.null')
+        if (cancelled) return
+        for (const m of unreadRows ?? []) {
+          const row = m as { conversation_id: string; sender_id: string }
+          const cust = customerByConvo[row.conversation_id]
+          if (cust && row.sender_id === cust) {
+            unreadByConvo[row.conversation_id] = (unreadByConvo[row.conversation_id] || 0) + 1
+          }
+        }
+
+        const labelsByConvo: Record<string, InboxLabelRow[]> = {}
+        for (let i = 0; i < convIds.length; i += CONVO_ID_IN_CHUNK) {
+          const slice = convIds.slice(i, i + CONVO_ID_IN_CHUNK)
+          const { data: labelAssigns } = await supabase
+            .from('conversation_inbox_labels')
+            .select('conversation_id, label_id')
+            .in('conversation_id', slice)
+          if (cancelled) return
+          for (const row of labelAssigns ?? []) {
+            const r = row as { conversation_id: string; label_id: string }
+            const d = defById[r.label_id]
+            if (!d) continue
+            if (!labelsByConvo[r.conversation_id]) labelsByConvo[r.conversation_id] = []
+            labelsByConvo[r.conversation_id].push(d)
+          }
+        }
+        for (const cid of Object.keys(labelsByConvo)) {
+          labelsByConvo[cid].sort((a, b) => {
+            if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+            return a.name.localeCompare(b.name)
+          })
+        }
+
+        const extras: ConvoListItem[] = convoRows.map((row) => {
+          const pr = profileById[row.customer_id]
+          const name = pr
+            ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
+            : 'Customer'
+          const pv = previewByConvo[row.id]
+          return {
+            id: row.id,
+            customer_id: row.customer_id,
+            customerName: name,
+            customerUsername: pr?.username ?? '…',
+            customerAvatar: pr?.avatar_url ?? null,
+            preview: pv?.body || 'No messages yet',
+            updated_at: row.updated_at,
+            unreadCount: unreadByConvo[row.id] || 0,
+            labels: labelsByConvo[row.id] || [],
+          }
+        })
+
+        if (!cancelled) setInboxLabelFilterExtraConvos(extras)
+      } catch {
+        if (!cancelled) setInboxLabelFilterExtraConvos([])
+      } finally {
+        if (!cancelled) setInboxLabelFilterBusy(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeTab,
+    inboxThreadLabelFilterIds,
+    profile?.business_id,
+    convoList,
+    inboxLabelCatalog,
+    supabase,
+  ])
+
   async function manualRefresh() {
     const p = profileRef.current
     if (!p?.business_id) return
@@ -2968,8 +3170,11 @@ export default function DashboardPage() {
     for (const c of inboxSearchExtraConvos) {
       if (!byId.has(c.id)) byId.set(c.id, c)
     }
+    for (const c of inboxLabelFilterExtraConvos) {
+      if (!byId.has(c.id)) byId.set(c.id, c)
+    }
     return [...byId.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-  }, [convoList, inboxSearchExtraConvos])
+  }, [convoList, inboxSearchExtraConvos, inboxLabelFilterExtraConvos])
 
   const inboxShowsRecentCap = convoList.length >= INBOX_THREAD_LIMIT
 
@@ -3966,9 +4171,13 @@ export default function DashboardPage() {
                   </span>
                 ) : null}
                 <span className="text-[11px] text-[#8892b0] tabular-nums">
-                  {inboxSearchQuery.trim() || inboxThreadLabelFilterIds.length > 0 || inboxUnreadFilterOnly
-                    ? `${inboxDisplayList.length} of ${convoListMerged.length} threads`
-                    : `${convoListMerged.length} threads`}
+                  {inboxThreadLabelFilterIds.length > 0 && !inboxSearchQuery.trim()
+                    ? inboxLabelFilterBusy
+                      ? 'Loading labeled threads…'
+                      : `${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label`
+                    : inboxSearchQuery.trim() || inboxUnreadFilterOnly
+                      ? `${inboxDisplayList.length} of ${convoListMerged.length} threads`
+                      : `${convoListMerged.length} threads`}
                   {inboxShowsRecentCap && !inboxSearchQuery.trim() && inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly
                     ? ` · ${INBOX_THREAD_LIMIT} most recent`
                     : ''}
@@ -4108,18 +4317,24 @@ export default function DashboardPage() {
                       </p>
                     ) : inboxThreadLabelFilterIds.length > 0 ? (
                       <p className="px-3 py-2 text-[11px] text-[#8892b0] border-b border-white/[0.06]">
-                        {inboxDisplayList.length === 0
-                          ? 'No labeled threads in the recent load.'
-                          : `${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label in the recent load.`}{' '}
-                        Search by name to find older labeled conversations, or{' '}
-                        <button
-                          type="button"
-                          onClick={clearInboxThreadFilters}
-                          className="font-semibold text-[#8d63ff] hover:underline"
-                        >
-                          view all threads
-                        </button>
-                        .
+                        {inboxLabelFilterBusy
+                          ? 'Loading all threads with this label…'
+                          : inboxDisplayList.length === 0
+                            ? 'No threads have this label.'
+                            : `Showing all ${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label.`}{' '}
+                        {!inboxLabelFilterBusy ? (
+                          <>
+                            Search by name to narrow the list, or{' '}
+                            <button
+                              type="button"
+                              onClick={clearInboxThreadFilters}
+                              className="font-semibold text-[#8d63ff] hover:underline"
+                            >
+                              view all threads
+                            </button>
+                            .
+                          </>
+                        ) : null}
                       </p>
                     ) : null}
                     {inboxSearchExtraBusy && inboxSearchQuery.trim().length >= 2 ? (
