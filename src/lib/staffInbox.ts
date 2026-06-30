@@ -49,7 +49,10 @@ export async function fetchInboxPreviews(
     const { data: previews, error: previewErr } = await client.rpc('inbox_latest_previews', {
       p_conversation_ids: slice,
     })
-    if (previewErr) throw previewErr
+    if (previewErr) {
+      Object.assign(previewByConvo, await fetchInboxPreviewsLegacy(client, slice))
+      continue
+    }
     for (const row of previews || []) {
       const r = row as { conversation_id: string; body: string; created_at: string }
       previewByConvo[r.conversation_id] = { body: r.body, created_at: r.created_at }

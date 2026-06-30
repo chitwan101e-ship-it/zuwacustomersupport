@@ -748,22 +748,8 @@ export default function DashboardPage() {
         try {
           Object.assign(previewByConvo, await fetchInboxPreviews(supabase, convIds))
         } catch (previewErr) {
-          const err = previewErr as { message?: string; code?: string }
-          const msg = err.message || ''
-          const missingRpc =
-            err.code === 'PGRST202' ||
-            err.code === '42883' ||
-            /does not exist|schema cache|Could not find the function/i.test(msg)
-          if (missingRpc) {
-            try {
-              Object.assign(previewByConvo, await fetchInboxPreviewsLegacy(supabase, convIds))
-            } catch (legacyErr) {
-              const legacyMsg = legacyErr instanceof Error ? legacyErr.message : 'messages preview failed'
-              setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${legacyMsg}`)
-            }
-          } else {
-            setLoadError((prev) => (prev ? `${prev} · ` : '') + `inbox_latest_previews: ${msg}`)
-          }
+          const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
+          setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${msg}`)
         }
 
         try {
@@ -2044,50 +2030,15 @@ export default function DashboardPage() {
         }
 
         const previewByConvo: Record<string, { body: string; created_at: string }> = {}
-        const { data: previews, error: previewErr } = await supabase.rpc('inbox_latest_previews', {
-          p_conversation_ids: convIds,
-        })
-        if (cancelled) return
-        if (previewErr) {
-          const { data: msgs } = await supabase
-            .from('messages')
-            .select('conversation_id, body, created_at')
-            .in('conversation_id', convIds)
-            .order('created_at', { ascending: false })
-            .limit(10000)
-          if (cancelled) return
-          for (const m of msgs ?? []) {
-            const row = m as { conversation_id: string; body: string; created_at: string }
-            const prev = previewByConvo[row.conversation_id]
-            if (!prev || new Date(row.created_at) > new Date(prev.created_at)) {
-              previewByConvo[row.conversation_id] = { body: row.body, created_at: row.created_at }
-            }
-          }
-        } else {
-          for (const row of previews ?? []) {
-            const r = row as { conversation_id: string; body: string; created_at: string }
-            previewByConvo[r.conversation_id] = { body: r.body, created_at: r.created_at }
-          }
+        try {
+          Object.assign(previewByConvo, await fetchInboxPreviews(supabase, convIds))
+        } catch {
+          Object.assign(previewByConvo, await fetchInboxPreviewsLegacy(supabase, convIds))
         }
+        if (cancelled) return
 
-        const customerByConvo = Object.fromEntries(convoRows.map((r) => [r.id, r.customer_id])) as Record<
-          string,
-          string
-        >
-        const unreadByConvo: Record<string, number> = {}
-        const { data: unreadRows } = await supabase
-          .from('messages')
-          .select('conversation_id, sender_id')
-          .in('conversation_id', convIds)
-          .or('read.eq.false,read.is.null')
+        const unreadByConvo = await fetchInboxUnreadCounts(supabase, convoRows)
         if (cancelled) return
-        for (const m of unreadRows ?? []) {
-          const row = m as { conversation_id: string; sender_id: string }
-          const cust = customerByConvo[row.conversation_id]
-          if (cust && row.sender_id === cust) {
-            unreadByConvo[row.conversation_id] = (unreadByConvo[row.conversation_id] || 0) + 1
-          }
-        }
 
         const labelsByConvo: Record<string, InboxLabelRow[]> = {}
         for (let i = 0; i < convIds.length; i += CONVO_ID_IN_CHUNK) {

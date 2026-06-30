@@ -16,15 +16,20 @@ export async function countUnreadStaffMessages(
   const ids = (convos || []).map((c) => (c as { id: string }).id)
   if (ids.length === 0) return { count: 0, error: null }
 
-  const { count, error } = await supabase
-    .from('messages')
-    .select('*', { count: 'exact', head: true })
-    .in('conversation_id', ids)
-    .neq('sender_id', customerId)
-    .or('read.is.false,read.is.null')
-
-  if (error) return { count: 0, error: error.message }
-  return { count: count ?? 0, error: null }
+  const QUERY_CHUNK = 200
+  let total = 0
+  for (let i = 0; i < ids.length; i += QUERY_CHUNK) {
+    const slice = ids.slice(i, i + QUERY_CHUNK)
+    const { count, error } = await supabase
+      .from('messages')
+      .select('*', { count: 'exact', head: true })
+      .in('conversation_id', slice)
+      .neq('sender_id', customerId)
+      .or('read.eq.false,read.is.null')
+    if (error) return { count: 0, error: error.message }
+    total += count ?? 0
+  }
+  return { count: total, error: null }
 }
 
 export type ChatPreview = {
@@ -53,23 +58,27 @@ export async function loadCustomerChatPreviews(
   const convIds = list.map((c) => c.id)
   const convMeta = new Map(list.map((c) => [c.id, c]))
 
-  const { data: msgs, error: mErr } = await supabase
-    .from('messages')
-    .select('id, conversation_id, sender_id, body, created_at, read, image_url')
-    .in('conversation_id', convIds)
-
-  if (mErr) return { previews: new Map(), error: mErr.message }
-
-  type M = {
+  const QUERY_CHUNK = 200
+  const rows: {
     conversation_id: string
     sender_id: string
     body: string
     created_at: string
     read: boolean | null
     image_url?: string | null
+  }[] = []
+
+  for (let i = 0; i < convIds.length; i += QUERY_CHUNK) {
+    const slice = convIds.slice(i, i + QUERY_CHUNK)
+    const { data: msgs, error: mErr } = await supabase
+      .from('messages')
+      .select('id, conversation_id, sender_id, body, created_at, read, image_url')
+      .in('conversation_id', slice)
+    if (mErr) return { previews: new Map(), error: mErr.message }
+    rows.push(...((msgs || []) as typeof rows))
   }
 
-  const rows = (msgs || []) as M[]
+  type M = (typeof rows)[number]
 
   const latestByConvo = new Map<string, M>()
   for (const m of rows) {
