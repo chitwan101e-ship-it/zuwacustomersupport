@@ -176,6 +176,53 @@ export async function listAllApprovedCustomerIds(client: SupabaseClient): Promis
   return profiles.map((p) => p.id)
 }
 
+const MEMBER_PROFILE_CHUNK = 200
+
+/** Approved customers linked to a business via follow or support thread. */
+export async function listBusinessMemberProfiles(
+  client: SupabaseClient,
+  businessId: string,
+  opts?: { statuses?: ('approved' | 'suspended')[] }
+): Promise<CustomerProfileSummary[]> {
+  const statuses = opts?.statuses ?? ['approved', 'suspended']
+  const memberIds = await listBusinessMemberIds(client, businessId)
+  if (memberIds.length === 0) return []
+
+  const rows: CustomerProfileSummary[] = []
+  for (let i = 0; i < memberIds.length; i += MEMBER_PROFILE_CHUNK) {
+    const slice = memberIds.slice(i, i + MEMBER_PROFILE_CHUNK)
+    const { data, error } = await client
+      .from('profiles')
+      .select('id, first_name, last_name, username, account_status, avatar_url')
+      .in('id', slice)
+      .eq('role', 'customer')
+      .in('account_status', statuses)
+      .is('deleted_at', null)
+    if (error) throw error
+    for (const row of data || []) {
+      rows.push({
+        id: row.id as string,
+        first_name: (row.first_name as string) ?? '',
+        last_name: (row.last_name as string) ?? '',
+        username: (row.username as string) ?? '',
+        account_status: (row.account_status as string) ?? '',
+        avatar_url: (row.avatar_url as string | null) ?? null,
+      })
+    }
+  }
+  rows.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+  return rows
+}
+
+/** Approved customer ids linked to a business (followers + support threads). */
+export async function listBusinessApprovedCustomerIds(
+  client: SupabaseClient,
+  businessId: string
+): Promise<string[]> {
+  const profiles = await listBusinessMemberProfiles(client, businessId, { statuses: ['approved'] })
+  return profiles.map((p) => p.id)
+}
+
 async function fetchBusinessMemberIdColumn(
   client: SupabaseClient,
   businessId: string,

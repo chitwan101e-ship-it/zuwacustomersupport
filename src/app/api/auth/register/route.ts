@@ -243,14 +243,24 @@ export async function POST(req: NextRequest) {
       : ''
 
     if (autoApproved) {
-      const target = await resolveBusinessForNewCustomerSignup(supabase)
-      if (target) {
+      const userIdForApproval = userId
+      const customerNameForApproval = customerName
+      const cleanUsernameForApproval = cleanUsername
+      const emailNormForApproval = emailNorm
+      deferRegisterFollowUp(async () => {
+        const target = await resolveBusinessForNewCustomerSignup(supabase)
+        if (!target) {
+          console.error(
+            '[register] auto-approve: no business with staff found — welcome DM and follow skipped. Set PRIMARY_SUPPORT_BUSINESS_SLUG=juwa-bros in env.'
+          )
+          return
+        }
         try {
           await completeCustomerApproval(supabase, {
-            customerId: userId,
-            customerName,
-            username: cleanUsername,
-            email: emailNorm,
+            customerId: userIdForApproval,
+            customerName: customerNameForApproval,
+            username: cleanUsernameForApproval,
+            email: emailNormForApproval,
             businessId: target.id,
             businessName: target.name,
             staffSenderId: target.staffSenderId,
@@ -258,11 +268,7 @@ export async function POST(req: NextRequest) {
         } catch (err) {
           console.error('[register] completeCustomerApproval:', err)
         }
-      } else {
-        console.error(
-          '[register] auto-approve: no business with staff found — welcome DM and follow skipped. Set PRIMARY_SUPPORT_BUSINESS_SLUG=juwa-bros in env.'
-        )
-      }
+      })
     }
 
     deferRegisterFollowUp(async () => {

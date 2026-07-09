@@ -1,6 +1,6 @@
 ﻿'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, memo, startTransition } from 'react'
 import type { ChangeEvent, ComponentType, CSSProperties, ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
@@ -65,12 +65,17 @@ import { FeedPostImage } from '@/components/FeedPostImage'
 import { LinkifiedText } from '@/components/LinkifiedText'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
 import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
-import { listAllApprovedCustomerIds, listAllCustomerProfiles } from '@/lib/resolveCustomerRecipient'
+import {
+  listBusinessApprovedCustomerIds,
+  listBusinessMemberProfiles,
+  type CustomerProfileSummary,
+} from '@/lib/resolveCustomerRecipient'
 import {
   fetchAllBusinessConversations,
   fetchInboxPreviews,
   fetchInboxPreviewsLegacy,
   fetchInboxUnreadCounts,
+  INBOX_LIST_DEFAULT_MAX,
   INBOX_QUERY_CHUNK,
 } from '@/lib/staffInbox'
 import { isAutoApproveSignupsEnabled } from '@/lib/signupApproval'
@@ -78,6 +83,7 @@ import { isAutoApproveSignupsEnabled } from '@/lib/signupApproval'
 const autoApproveSignups = isAutoApproveSignupsEnabled()
 
 type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
+type RefreshScope = 'full' | 'light' | 'inbox' | 'users'
 type UsersPanelTab = 'pending' | 'active' | 'suspended'
 
 type ProfileRow = {
@@ -387,6 +393,211 @@ function mergeCannedIntoDraft(draft: string, chunk: string) {
   return `${d}\n\n${c}`
 }
 
+const DASH_CACHE_TTL_MS = 10 * 60_000
+
+type DashSessionCache = {
+  at: number
+  convoList: ConvoListItem[]
+  activeMembers: CustomerProfileSummary[]
+  suspendedMembers: CustomerProfileSummary[]
+  pendingCustomers: PendingCustomer[]
+  pendingSignupCount: number
+}
+
+function dashCacheKey(businessId: string) {
+  return `relay-staff-dash-${businessId}`
+}
+
+function readDashCache(businessId: string): DashSessionCache | null {
+  try {
+    const raw = sessionStorage.getItem(dashCacheKey(businessId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as DashSessionCache
+    if (!parsed?.at || Date.now() - parsed.at > DASH_CACHE_TTL_MS) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeDashCache(businessId: string, data: Omit<DashSessionCache, 'at'>) {
+  try {
+    sessionStorage.setItem(dashCacheKey(businessId), JSON.stringify({ ...data, at: Date.now() }))
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+/** Keep tab panels mounted after first visit; only re-render visible tab content. */
+function StaffTabPanel({
+  tab,
+  activeTab,
+  mountedTabs,
+  className,
+  render,
+}: {
+  tab: AppTab
+  activeTab: AppTab
+  mountedTabs: ReadonlySet<AppTab>
+  className?: string
+  render: () => ReactNode
+}) {
+  const cacheRef = useRef<ReactNode>(null)
+  const hasRenderedRef = useRef(false)
+
+  if (!mountedTabs.has(tab)) return null
+  const visible = activeTab === tab
+
+  if (visible) {
+    const content = render()
+    cacheRef.current = content
+    hasRenderedRef.current = true
+    return (
+      <section className={className} aria-hidden={false}>
+        {content}
+      </section>
+    )
+  }
+
+  if (!hasRenderedRef.current || cacheRef.current == null) return null
+
+  return (
+    <section
+      hidden
+      className="hidden [content-visibility:hidden] [contain:strict] pointer-events-none"
+      aria-hidden
+    >
+      {cacheRef.current}
+    </section>
+  )
+}
+
+/** Keep users sub-panels mounted after first visit (Pending / Active / Suspended). */
+function StaffUsersSubPanel({
+  panel,
+  activePanel,
+  mountedPanels,
+  className,
+  render,
+}: {
+  panel: UsersPanelTab
+  activePanel: UsersPanelTab
+  mountedPanels: ReadonlySet<UsersPanelTab>
+  className?: string
+  render: () => ReactNode
+}) {
+  const cacheRef = useRef<ReactNode>(null)
+  const hasRenderedRef = useRef(false)
+
+  if (!mountedPanels.has(panel)) return null
+  const visible = activePanel === panel
+
+  if (visible) {
+    const content = render()
+    cacheRef.current = content
+    hasRenderedRef.current = true
+    return (
+      <div className={className} aria-hidden={false}>
+        {content}
+      </div>
+    )
+  }
+
+  if (!hasRenderedRef.current || cacheRef.current == null) return null
+
+  return (
+    <div
+      hidden
+      className="hidden [content-visibility:hidden] [contain:strict] pointer-events-none"
+      aria-hidden
+    >
+      {cacheRef.current}
+    </div>
+  )
+}
+
+type DashboardNavButtonProps = {
+  navItems: { id: AppTab; label: string; icon: ComponentType<{ className?: string }>; adminOnly?: boolean }[]
+  activeTab: AppTab
+  inboxUnreadTotal: number
+  onSelect: (tab: AppTab) => void
+  layout: 'sidebar' | 'mobile'
+  mobileGridClass?: string
+  hideMobile?: boolean
+}
+
+const DashboardNavButtons = memo(function DashboardNavButtons({
+  navItems,
+  activeTab,
+  inboxUnreadTotal,
+  onSelect,
+  layout,
+  mobileGridClass,
+  hideMobile,
+}: DashboardNavButtonProps) {
+  if (layout === 'sidebar') {
+    return (
+      <nav className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
+        {navItems.map((item) => {
+          const Icon = item.icon
+          const active = item.id === activeTab
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onSelect(item.id)}
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left text-[13px] font-medium ${
+                active
+                  ? 'border-[rgba(141,99,255,0.4)] bg-[rgba(141,99,255,0.1)] text-white shadow-[0_4px_16px_-8px_rgba(124,90,246,0.4)]'
+                  : 'border-transparent text-[#8892b0] hover:bg-white/[0.04] hover:text-[#c4cbe6]'
+              }`}
+            >
+              <Icon className="w-[15px] h-[15px] shrink-0 opacity-90" />
+              <span className="flex-1 min-w-0">{item.label}</span>
+              {item.id === 'inbox' && inboxUnreadTotal > 0 ? (
+                <span className="shrink-0 min-w-4 h-4 px-1 rounded-full bg-[#8d63ff] text-white text-[9px] font-bold flex items-center justify-center tabular-nums">
+                  {inboxUnreadTotal > 99 ? '99+' : inboxUnreadTotal}
+                </span>
+              ) : null}
+            </button>
+          )
+        })}
+      </nav>
+    )
+  }
+
+  return (
+    <nav
+      className={`relay-footer-bar fixed bottom-0 left-0 right-0 lg:hidden border-t border-white/[0.08] bg-[rgba(9,14,32,0.97)] backdrop-blur-md px-1 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] grid ${mobileGridClass ?? 'grid-cols-5'} ${hideMobile ? 'max-lg:hidden' : ''}`}
+    >
+      {navItems.map((item) => {
+        const Icon = item.icon
+        const active = activeTab === item.id
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onSelect(item.id)}
+            className={`flex flex-col items-center gap-0.5 py-1.5 min-w-0 relative ${
+              active ? 'text-[#8d63ff]' : 'text-[#8892b0]'
+            }`}
+          >
+            <span className="relative inline-flex shrink-0">
+              <Icon className="w-[21px] h-[21px] shrink-0" />
+              {item.id === 'inbox' && inboxUnreadTotal > 0 ? (
+                <span className="absolute -top-1.5 -right-2 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#090e20]">
+                  {inboxUnreadTotal > 9 ? '9+' : inboxUnreadTotal}
+                </span>
+              ) : null}
+            </span>
+            <span className="text-[10px] font-semibold leading-tight text-center truncate w-full px-0.5">{item.label}</span>
+          </button>
+        )
+      })}
+    </nav>
+  )
+})
+
 export default function DashboardPage() {
   const router = useRouter()
   const supabase = useMemo(() => createClient(), [])
@@ -394,6 +605,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [profile, setProfile] = useState<ProfileRow | null>(null)
   const [activeTab, setActiveTab] = useState<AppTab>('home')
+  const [mountedTabs, setMountedTabs] = useState<Set<AppTab>>(() => new Set(['home']))
   const activeTabRef = useRef<AppTab>('home')
   activeTabRef.current = activeTab
 
@@ -419,6 +631,10 @@ export default function DashboardPage() {
 
   const [pendingCustomers, setPendingCustomers] = useState<PendingCustomer[]>([])
   const [pendingSignupCount, setPendingSignupCount] = useState(0)
+  const pendingCustomersRef = useRef(pendingCustomers)
+  pendingCustomersRef.current = pendingCustomers
+  const pendingSignupCountRef = useRef(pendingSignupCount)
+  pendingSignupCountRef.current = pendingSignupCount
   const [reviewBusyId, setReviewBusyId] = useState<string | null>(null)
 
   const [reports, setReports] = useState<ReportItem[]>([])
@@ -490,7 +706,14 @@ export default function DashboardPage() {
   const [businessInfo, setBusinessInfo] = useState<{ name: string; slug: string } | null>(null)
   const [activeMembers, setActiveMembers] = useState<ActiveMember[]>([])
   const [suspendedMembers, setSuspendedMembers] = useState<ActiveMember[]>([])
+  const activeMembersRef = useRef(activeMembers)
+  activeMembersRef.current = activeMembers
+  const suspendedMembersRef = useRef(suspendedMembers)
+  suspendedMembersRef.current = suspendedMembers
   const [usersPanelTab, setUsersPanelTab] = useState<UsersPanelTab>(autoApproveSignups ? 'active' : 'pending')
+  const [mountedUsersPanels, setMountedUsersPanels] = useState<Set<UsersPanelTab>>(() =>
+    new Set([autoApproveSignups ? 'active' : 'pending'])
+  )
   const [modBusyId, setModBusyId] = useState<string | null>(null)
   const [memberMessageDrafts, setMemberMessageDrafts] = useState<Record<string, string>>({})
   const [memberSendBusyId, setMemberSendBusyId] = useState<string | null>(null)
@@ -507,6 +730,9 @@ export default function DashboardPage() {
   } | null>(null)
   const [activeMemberLookupBusy, setActiveMemberLookupBusy] = useState(false)
   const [dashRefreshing, setDashRefreshing] = useState(false)
+  const [inboxLoading, setInboxLoading] = useState(false)
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [usersRefreshing, setUsersRefreshing] = useState(false)
   const [inboxContactOpen, setInboxContactOpen] = useState(false)
   const [staffNotifyUnread, setStaffNotifyUnread] = useState(0)
   const [inboxRefreshing, setInboxRefreshing] = useState(false)
@@ -549,6 +775,12 @@ export default function DashboardPage() {
 
   const profileRef = useRef<ProfileRow | null>(null)
   profileRef.current = profile
+  const businessInfoBidRef = useRef<string | null>(null)
+  const scopeLoadedAtRef = useRef<Partial<Record<RefreshScope, number>>>({})
+  const scopeInflightRef = useRef<Partial<Record<RefreshScope, boolean>>>({})
+  const refreshDashboardRef = useRef<
+    (p: ProfileRow, opts?: { pendingDetail?: boolean; scope?: RefreshScope; force?: boolean }) => Promise<void>
+  >(async () => {})
 
   const scrollThreadToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
     const el = threadScrollRef.current
@@ -600,8 +832,13 @@ export default function DashboardPage() {
   }, [supabase])
 
   const refreshDashboard = useCallback(
-    async (p: ProfileRow, opts?: { pendingDetail?: boolean }) => {
-      setLoadError(null)
+    async (
+      p: ProfileRow,
+      opts?: { pendingDetail?: boolean; scope?: RefreshScope; force?: boolean }
+    ) => {
+      const scope = opts?.scope ?? 'full'
+      if (scopeInflightRef.current[scope] && !opts?.force) return
+
       if (!p.business_id) {
         setLoadError('Staff profile is missing business_id. Fix it in Supabase public.profiles for your admin user.')
         setBusinessInfo(null)
@@ -616,11 +853,37 @@ export default function DashboardPage() {
         return
       }
 
+      scopeInflightRef.current[scope] = true
+      const wantInbox = scope === 'full' || scope === 'inbox'
+      const wantMembers = scope === 'full' || scope === 'users'
+      const wantCanned = scope === 'full' || scope === 'inbox'
+      const wantReports = scope === 'full' || scope === 'light'
+      const wantBell = scope === 'full' || scope === 'light'
       const bid = p.business_id
-      const wantPendingDetail = opts?.pendingDetail ?? activeTabRef.current === 'users'
+      const wantPendingDetail =
+        opts?.pendingDetail ?? (scope === 'users' || activeTabRef.current === 'users')
 
-      const { data: bizRow } = await supabase.from('businesses').select('name, slug').eq('id', bid).maybeSingle()
-      setBusinessInfo(bizRow ? { name: bizRow.name, slug: bizRow.slug } : null)
+      if (wantInbox && convoListRef.current.length === 0) setInboxLoading(true)
+      const hasUsersCache =
+        activeMembersRef.current.length > 0 ||
+        suspendedMembersRef.current.length > 0 ||
+        pendingCustomersRef.current.length > 0 ||
+        pendingSignupCountRef.current > 0
+      if (wantMembers && !hasUsersCache) setUsersLoading(true)
+      if (opts?.force) setLoadError(null)
+
+      let nextConvoList: ConvoListItem[] | null = null
+      let nextActiveMembers: CustomerProfileSummary[] | null = null
+      let nextSuspendedMembers: CustomerProfileSummary[] | null = null
+      let nextPendingCustomers: PendingCustomer[] | null = null
+      let nextPendingCount: number | null = null
+
+      try {
+        if (businessInfoBidRef.current !== bid) {
+          const { data: bizRow } = await supabase.from('businesses').select('name, slug').eq('id', bid).maybeSingle()
+          businessInfoBidRef.current = bid
+          setBusinessInfo(bizRow ? { name: bizRow.name, slug: bizRow.slug } : null)
+        }
 
       const pendingFetch: Promise<{ pending?: PendingCustomer[]; count?: number; error?: string }> = fetch(
         wantPendingDetail ? '/api/staff/pending-signups' : '/api/staff/pending-signups?countOnly=1',
@@ -649,43 +912,55 @@ export default function DashboardPage() {
         })
 
       let convoRows: { id: string; customer_id: string; updated_at: string }[] = []
-      const errs: string[] = []
 
-      try {
-        convoRows = await fetchAllBusinessConversations(supabase, bid)
-      } catch (convErr) {
-        const msg = convErr instanceof Error ? convErr.message : 'Failed to load conversations'
-        errs.push(`conversations: ${msg}`)
-      }
+      const convoPromise = wantInbox
+        ? fetchAllBusinessConversations(supabase, bid, { maxRows: INBOX_LIST_DEFAULT_MAX })
+            .then((rows) => ({ rows }))
+            .catch((convErr) => {
+              const msg = convErr instanceof Error ? convErr.message : 'Failed to load conversations'
+              return { error: msg, rows: [] as typeof convoRows }
+            })
+        : Promise.resolve({ rows: [] as typeof convoRows })
 
-      const [pendingRes, reportRes, memberProfilesRes, cannedRes] = await Promise.all([
+      const [convoRes, pendingRes, reportRes, memberProfilesRes, cannedRes] = await Promise.all([
+        convoPromise,
         pendingFetch,
-        supabase
-          .from('admin_reports')
-          .select('id, reporter_name, category, status, details, created_at')
-          .eq('business_id', bid)
-          .order('created_at', { ascending: false })
-          .limit(20),
-        listAllCustomerProfiles(supabase)
-          .then((rows) => ({ rows }))
-          .catch((e: unknown) => ({
-            error: e instanceof Error ? e.message : 'Failed to load member list',
-          })),
-        supabase
-          .from('inbox_canned_replies')
-          .select('id, title, body, sort_order')
-          .eq('business_id', bid)
-          .order('sort_order', { ascending: true })
-          .order('title', { ascending: true }),
+        wantReports
+          ? supabase
+              .from('admin_reports')
+              .select('id, reporter_name, category, status, details, created_at')
+              .eq('business_id', bid)
+              .order('created_at', { ascending: false })
+              .limit(20)
+          : Promise.resolve({ data: [] as Record<string, unknown>[], error: null }),
+        wantMembers
+          ? listBusinessMemberProfiles(supabase, bid)
+              .then((rows) => ({ rows }))
+              .catch((e: unknown) => ({
+                error: e instanceof Error ? e.message : 'Failed to load member list',
+              }))
+          : Promise.resolve({ rows: [] as CustomerProfileSummary[] }),
+        wantCanned
+          ? supabase
+              .from('inbox_canned_replies')
+              .select('id, title, body, sort_order')
+              .eq('business_id', bid)
+              .order('sort_order', { ascending: true })
+              .order('title', { ascending: true })
+          : Promise.resolve({ data: null, error: null }),
       ])
+
+      const errs: string[] = []
+      if ('error' in convoRes && convoRes.error) errs.push(`conversations: ${convoRes.error}`)
+      else if (wantInbox) convoRows = convoRes.rows
 
       if (pendingRes.error) errs.push(`pending: ${pendingRes.error}`)
       if (reportRes.error) errs.push(`reports: ${reportRes.error.message}`)
       if ('error' in memberProfilesRes && memberProfilesRes.error) errs.push(`members: ${memberProfilesRes.error}`)
-      if (cannedRes.error) errs.push(`canned replies: ${cannedRes.error.message}`)
+      if (wantCanned && cannedRes.error) errs.push(`canned replies: ${cannedRes.error.message}`)
       if (errs.length) setLoadError(errs.join(' · '))
 
-      if (!cannedRes.error) {
+      if (wantCanned && !cannedRes.error) {
         setCannedReplies(
           (cannedRes.data || []).map((r: Record<string, unknown>) => ({
             id: r.id as string,
@@ -694,137 +969,157 @@ export default function DashboardPage() {
             sort_order: Number(r.sort_order ?? 0),
           }))
         )
-      } else {
-        setCannedReplies([])
       }
 
       if (wantPendingDetail) {
         const list = (pendingRes.pending || []) as PendingCustomer[]
+        nextPendingCustomers = list
         setPendingCustomers(list)
-        setPendingSignupCount(list.filter((c) => c.account_status === 'pending').length)
+        nextPendingCount = list.filter((c) => c.account_status === 'pending').length
+        setPendingSignupCount(nextPendingCount)
       } else if (typeof pendingRes.count === 'number') {
+        nextPendingCount = pendingRes.count
         setPendingSignupCount(pendingRes.count)
       }
 
-      if (Array.isArray(reportRes.data) && reportRes.data.length > 0) {
-        setReports(
-          reportRes.data.map((r: Record<string, unknown>) => ({
-            id: r.id as string,
-            name: r.reporter_name as string,
-            type: r.category as string,
-            status: r.status as ReportItem['status'],
-            details: r.details as string,
-          }))
+      if (wantReports) {
+        if (Array.isArray(reportRes.data) && reportRes.data.length > 0) {
+          setReports(
+            reportRes.data.map((r: Record<string, unknown>) => ({
+              id: r.id as string,
+              name: r.reporter_name as string,
+              type: r.category as string,
+              status: r.status as ReportItem['status'],
+              details: r.details as string,
+            }))
+          )
+        } else {
+          setReports([])
+        }
+      }
+
+      if (wantInbox) {
+        const convIds = convoRows.map((c: { id: string }) => c.id)
+        const customerIds = [...new Set(convoRows.map((c: { customer_id: string }) => c.customer_id))]
+
+        const loadConvoProfiles = async () => {
+          const profileById: Record<
+            string,
+            { first_name: string; last_name: string; username: string; avatar_url?: string | null }
+          > = {}
+          if (customerIds.length === 0) return profileById
+          for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
+            const slice = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+            const { data: profs, error: pe } = await supabase
+              .from('profiles')
+              .select('id, first_name, last_name, username, avatar_url')
+              .in('id', slice)
+            if (pe) {
+              setLoadError((prev) => (prev ? `${prev} · ` : '') + `profiles: ${pe.message}`)
+              break
+            }
+            for (const row of profs || []) {
+              const r = row as {
+                id: string
+                first_name: string
+                last_name: string
+                username: string
+                avatar_url?: string | null
+              }
+              profileById[r.id] = r
+            }
+          }
+          return profileById
+        }
+
+        const [profileById, previewByConvo, unreadByConvo, defResult] = await Promise.all([
+          loadConvoProfiles(),
+          convIds.length > 0
+            ? fetchInboxPreviews(supabase, convIds).catch((previewErr) => {
+                const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
+                setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${msg}`)
+                return {} as Record<string, { body: string; created_at: string }>
+              })
+            : Promise.resolve({} as Record<string, { body: string; created_at: string }>),
+          convIds.length > 0
+            ? fetchInboxUnreadCounts(supabase, convoRows).catch((ue) => {
+                const ueMsg = ue instanceof Error ? ue.message : 'unread count failed'
+                setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages(unread): ${ueMsg}`)
+                return {} as Record<string, number>
+              })
+            : Promise.resolve({} as Record<string, number>),
+          supabase
+            .from('inbox_label_definitions')
+            .select('id, name, color, is_system')
+            .eq('business_id', bid)
+            .order('is_system', { ascending: false })
+            .order('name'),
+        ])
+
+        const { data: defRows, error: defErr } = defResult
+        if (defErr)
+          setLoadError((prev) => (prev ? `${prev} · ` : '') + `inbox_label_definitions: ${defErr.message}`)
+        const labelCatalog: InboxLabelRow[] = (defRows || []).map((r: Record<string, unknown>) => ({
+          id: r.id as string,
+          name: r.name as string,
+          color: (r.color as string | null) ?? null,
+          is_system: Boolean(r.is_system),
+        }))
+        setInboxLabelCatalog(labelCatalog)
+        const defById = Object.fromEntries(labelCatalog.map((d) => [d.id, d])) as Record<string, InboxLabelRow>
+        const labelsByConvo: Record<string, InboxLabelRow[]> = {}
+        if (convIds.length > 0 && !defErr) {
+          for (let i = 0; i < convIds.length; i += INBOX_QUERY_CHUNK) {
+            const slice = convIds.slice(i, i + INBOX_QUERY_CHUNK)
+            const { data: assignRows, error: assignErr } = await supabase
+              .from('conversation_inbox_labels')
+              .select('conversation_id, label_id')
+              .in('conversation_id', slice)
+            if (assignErr) {
+              setLoadError((prev) => (prev ? `${prev} · ` : '') + `conversation_inbox_labels: ${assignErr.message}`)
+              break
+            }
+            for (const row of assignRows || []) {
+              const r = row as { conversation_id: string; label_id: string }
+              const d = defById[r.label_id]
+              if (!d) continue
+              if (!labelsByConvo[r.conversation_id]) labelsByConvo[r.conversation_id] = []
+              labelsByConvo[r.conversation_id].push(d)
+            }
+          }
+          for (const cid of Object.keys(labelsByConvo)) {
+            labelsByConvo[cid].sort((a, b) => {
+              if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+              return a.name.localeCompare(b.name)
+            })
+          }
+        }
+
+        const list: ConvoListItem[] = convoRows.map(
+          (row: { id: string; customer_id: string; updated_at: string }) => {
+            const pr = profileById[row.customer_id]
+            const name = pr
+              ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
+              : 'Customer'
+            const pv = previewByConvo[row.id]
+            return {
+              id: row.id,
+              customer_id: row.customer_id,
+              customerName: name,
+              customerUsername: pr?.username ?? '…',
+              customerAvatar: pr?.avatar_url ?? null,
+              preview: pv?.body || 'No messages yet',
+              updated_at: row.updated_at,
+              unreadCount: unreadByConvo[row.id] || 0,
+              labels: labelsByConvo[row.id] || [],
+            }
+          }
         )
-      } else {
-        setReports([])
+        nextConvoList = list
+        setConvoList(list)
       }
 
-      const convIds = convoRows.map((c: { id: string }) => c.id)
-      const customerIds = [...new Set(convoRows.map((c: { customer_id: string }) => c.customer_id))]
-
-      const profileById: Record<string, { first_name: string; last_name: string; username: string; avatar_url?: string | null }> = {}
-      if (customerIds.length > 0) {
-        for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
-          const slice = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
-          const { data: profs, error: pe } = await supabase
-            .from('profiles')
-            .select('id, first_name, last_name, username, avatar_url')
-            .in('id', slice)
-          if (pe) {
-            setLoadError((prev) => (prev ? `${prev} · ` : '') + `profiles: ${pe.message}`)
-            break
-          }
-          for (const row of profs || []) {
-            const r = row as { id: string; first_name: string; last_name: string; username: string; avatar_url?: string | null }
-            profileById[r.id] = r
-          }
-        }
-      }
-
-      const previewByConvo: Record<string, { body: string; created_at: string }> = {}
-      let unreadByConvo: Record<string, number> = {}
-      if (convIds.length > 0) {
-        try {
-          Object.assign(previewByConvo, await fetchInboxPreviews(supabase, convIds))
-        } catch (previewErr) {
-          const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
-          setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${msg}`)
-        }
-
-        try {
-          unreadByConvo = await fetchInboxUnreadCounts(supabase, convoRows)
-        } catch (ue) {
-          const ueMsg = ue instanceof Error ? ue.message : 'unread count failed'
-          setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages(unread): ${ueMsg}`)
-        }
-      }
-
-      const { data: defRows, error: defErr } = await supabase
-        .from('inbox_label_definitions')
-        .select('id, name, color, is_system')
-        .eq('business_id', bid)
-        .order('is_system', { ascending: false })
-        .order('name')
-      if (defErr)
-        setLoadError((prev) => (prev ? `${prev} · ` : '') + `inbox_label_definitions: ${defErr.message}`)
-      const labelCatalog: InboxLabelRow[] = (defRows || []).map((r: Record<string, unknown>) => ({
-        id: r.id as string,
-        name: r.name as string,
-        color: (r.color as string | null) ?? null,
-        is_system: Boolean(r.is_system),
-      }))
-      setInboxLabelCatalog(labelCatalog)
-      const defById = Object.fromEntries(labelCatalog.map((d) => [d.id, d])) as Record<string, InboxLabelRow>
-      const labelsByConvo: Record<string, InboxLabelRow[]> = {}
-      if (convIds.length > 0 && !defErr) {
-        for (let i = 0; i < convIds.length; i += INBOX_QUERY_CHUNK) {
-          const slice = convIds.slice(i, i + INBOX_QUERY_CHUNK)
-          const { data: assignRows, error: assignErr } = await supabase
-            .from('conversation_inbox_labels')
-            .select('conversation_id, label_id')
-            .in('conversation_id', slice)
-          if (assignErr) {
-            setLoadError((prev) => (prev ? `${prev} · ` : '') + `conversation_inbox_labels: ${assignErr.message}`)
-            break
-          }
-          for (const row of assignRows || []) {
-            const r = row as { conversation_id: string; label_id: string }
-            const d = defById[r.label_id]
-            if (!d) continue
-            if (!labelsByConvo[r.conversation_id]) labelsByConvo[r.conversation_id] = []
-            labelsByConvo[r.conversation_id].push(d)
-          }
-        }
-        for (const cid of Object.keys(labelsByConvo)) {
-          labelsByConvo[cid].sort((a, b) => {
-            if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
-            return a.name.localeCompare(b.name)
-          })
-        }
-      }
-
-      const list: ConvoListItem[] = convoRows.map((row: { id: string; customer_id: string; updated_at: string }) => {
-        const pr = profileById[row.customer_id]
-        const name = pr
-          ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
-          : 'Customer'
-        const pv = previewByConvo[row.id]
-        return {
-          id: row.id,
-          customer_id: row.customer_id,
-          customerName: name,
-          customerUsername: pr?.username ?? '…',
-          customerAvatar: pr?.avatar_url ?? null,
-          preview: pv?.body || 'No messages yet',
-          updated_at: row.updated_at,
-          unreadCount: unreadByConvo[row.id] || 0,
-          labels: labelsByConvo[row.id] || [],
-        }
-      })
-      setConvoList(list)
-
-      {
+      if (wantBell) {
         const { count: bellCount, error: bellErr } = await supabase
           .from('notifications')
           .select('*', { count: 'exact', head: true })
@@ -833,16 +1128,84 @@ export default function DashboardPage() {
         if (!bellErr) setStaffNotifyUnread(bellCount ?? 0)
       }
 
-      const memberProfiles = 'rows' in memberProfilesRes ? memberProfilesRes.rows : []
-      const approved = memberProfiles.filter((r) => r.account_status === 'approved')
-      const suspended = memberProfiles.filter((r) => r.account_status === 'suspended')
-      approved.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
-      suspended.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
-      setActiveMembers(approved)
-      setSuspendedMembers(suspended)
+      if (wantMembers) {
+        const memberProfiles = 'rows' in memberProfilesRes ? memberProfilesRes.rows : []
+        const approved = memberProfiles.filter((r) => r.account_status === 'approved')
+        const suspended = memberProfiles.filter((r) => r.account_status === 'suspended')
+        approved.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+        suspended.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+        nextActiveMembers = approved
+        nextSuspendedMembers = suspended
+        setActiveMembers(approved)
+        setSuspendedMembers(suspended)
+      }
+
+      if (
+        nextConvoList ||
+        nextActiveMembers ||
+        nextSuspendedMembers ||
+        nextPendingCustomers ||
+        nextPendingCount !== null
+      ) {
+        writeDashCache(bid, {
+          convoList: nextConvoList ?? convoListRef.current,
+          activeMembers: nextActiveMembers ?? activeMembersRef.current,
+          suspendedMembers: nextSuspendedMembers ?? suspendedMembersRef.current,
+          pendingCustomers: nextPendingCustomers ?? pendingCustomersRef.current,
+          pendingSignupCount: nextPendingCount ?? pendingSignupCountRef.current,
+        })
+      }
+
+      scopeLoadedAtRef.current[scope] = Date.now()
+      } catch (e) {
+        console.error('[refreshDashboard]', e)
+        setLoadError((prev) => {
+          const msg = e instanceof Error ? e.message : 'Dashboard refresh failed'
+          return prev ? `${prev} · ${msg}` : msg
+        })
+      } finally {
+        if (wantInbox) setInboxLoading(false)
+        if (wantMembers) setUsersLoading(false)
+        scopeInflightRef.current[scope] = false
+      }
     },
     [supabase]
   )
+
+  refreshDashboardRef.current = refreshDashboard
+
+  const switchTab = useCallback((tab: AppTab) => {
+    setActiveTab(tab)
+    setMountedTabs((prev) => {
+      if (prev.has(tab)) return prev
+      const next = new Set(prev)
+      next.add(tab)
+      return next
+    })
+
+    window.requestAnimationFrame(() => {
+      const p = profileRef.current
+      if (!p?.business_id) return
+      const staleMs = 60_000
+      const now = Date.now()
+      if (tab === 'inbox' && now - (scopeLoadedAtRef.current.inbox ?? 0) > staleMs) {
+        void refreshDashboardRef.current(p, { scope: 'inbox' })
+      } else if (tab === 'users' && now - (scopeLoadedAtRef.current.users ?? 0) > staleMs) {
+        void refreshDashboardRef.current(p, { scope: 'users', pendingDetail: true })
+      }
+    })
+  }, [])
+
+  const switchUsersPanelTab = useCallback((panel: UsersPanelTab) => {
+    setUsersPanelTab(panel)
+    if (panel !== 'active') setActiveMemberQuery('')
+    setMountedUsersPanels((prev) => {
+      if (prev.has(panel)) return prev
+      const next = new Set(prev)
+      next.add(panel)
+      return next
+    })
+  }, [])
 
   const loadMyAnnouncements = useCallback(
     async (businessId: string) => {
@@ -1217,28 +1580,53 @@ export default function DashboardPage() {
         return
       }
       if (cancelled) return
+      const cached = readDashCache(pRow.business_id!)
+      if (cached) {
+        setConvoList(cached.convoList)
+        setActiveMembers(cached.activeMembers)
+        setSuspendedMembers(cached.suspendedMembers)
+        setPendingCustomers(cached.pendingCustomers ?? [])
+        setPendingSignupCount(cached.pendingSignupCount)
+        scopeLoadedAtRef.current.inbox = cached.at
+        scopeLoadedAtRef.current.users = cached.at
+        scopeLoadedAtRef.current.light = cached.at
+      }
       setProfile(pRow)
       setLoading(false)
-      await refreshDashboard(pRow)
+      void refreshDashboardRef.current(pRow, { scope: 'light' })
+      void refreshDashboardRef.current(pRow, { scope: 'inbox' })
+      void refreshDashboardRef.current(pRow, { scope: 'users', pendingDetail: true })
+      window.setTimeout(() => {
+        setMountedTabs((prev) => {
+          const next = new Set(prev)
+          next.add('inbox')
+          next.add('users')
+          return prev.has('inbox') && prev.has('users') ? prev : next
+        })
+        setMountedUsersPanels((prev) => {
+          const next = new Set(prev)
+          next.add('active')
+          next.add('pending')
+          next.add('suspended')
+          return next
+        })
+      }, 50)
     }
     void init()
     return () => {
       cancelled = true
     }
-  }, [router, supabase, refreshDashboard])
-
-  useEffect(() => {
-    if (activeTab !== 'users') return
-    const p = profileRef.current
-    if (!p?.business_id) return
-    void refreshDashboard(p, { pendingDetail: true })
-  }, [activeTab, refreshDashboard])
+  }, [router, supabase])
 
   useEffect(() => {
     const id = window.setInterval(() => {
       const p = profileRef.current
-      if (p?.business_id) void refreshDashboard(p)
-    }, 30_000)
+      if (!p?.business_id) return
+      const tab = activeTabRef.current
+      if (tab === 'inbox') void refreshDashboard(p, { scope: 'inbox' })
+      else if (tab === 'users') void refreshDashboard(p, { pendingDetail: true, scope: 'users' })
+      else void refreshDashboard(p, { scope: 'light' })
+    }, 60_000)
     return () => window.clearInterval(id)
   }, [refreshDashboard])
 
@@ -1299,25 +1687,46 @@ export default function DashboardPage() {
   useEffect(() => {
     if (activeTab === 'inbox') return
     if (!selectedConvoIdRef.current) return
-    setSelectedConvoId(null)
-    setThreadMessages([])
-    setReplyTarget(null)
-    clearReplyPendingImage()
+    const frame = window.requestAnimationFrame(() => {
+      startTransition(() => {
+        setSelectedConvoId(null)
+        setThreadMessages([])
+        setReplyTarget(null)
+        clearReplyPendingImage()
+      })
+    })
+    return () => window.cancelAnimationFrame(frame)
   }, [activeTab])
 
   useEffect(() => {
     const p = profileRef.current
     if (!p?.business_id) return
     const businessId = p.business_id
-    const staffUserId = p.id
 
     let timer: number | null = null
     const queueRefresh = () => {
       if (timer) window.clearTimeout(timer)
       timer = window.setTimeout(() => {
         const current = profileRef.current
-        if (current?.business_id) void refreshDashboard(current)
+        if (current?.business_id) void refreshDashboard(current, { scope: 'inbox' })
       }, 400)
+    }
+
+    const patchInboxOnMessageRead = (payload: { new: Record<string, unknown>; old: Record<string, unknown> }) => {
+      const msg = payload.new as {
+        conversation_id?: string
+        sender_id?: string
+        read?: boolean
+      }
+      const prev = payload.old as { read?: boolean | null }
+      if (!msg.conversation_id || msg.read !== true || prev?.read === true) return
+      const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
+      if (!conv || msg.sender_id !== conv.customer_id) return
+      setConvoList((list) =>
+        list.map((c) =>
+          c.id === msg.conversation_id ? { ...c, unreadCount: Math.max(0, c.unreadCount - 1) } : c
+        )
+      )
     }
 
     const bumpInboxOnCustomerMessage = (payload: { new: Record<string, unknown> }): boolean => {
@@ -1521,15 +1930,10 @@ export default function DashboardPage() {
           resolveOutboundTeamMessage(payload)
         }
       )
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, queueRefresh)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, patchInboxOnMessageRead)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_inbox_labels' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_label_definitions' }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_canned_replies' }, queueRefresh)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${staffUserId}` },
-        () => queueRefresh()
-      )
       .subscribe((status, err) => {
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           console.error('[staff-dashboard] Realtime subscription failed:', status, err)
@@ -1694,7 +2098,6 @@ export default function DashboardPage() {
           if (row?.type === 'support_message' || row?.type === 'staff_alert') {
             setStaffNotifyUnread((n) => n + 1)
           }
-          void bumpBell()
         }
       )
       .on(
@@ -2107,7 +2510,7 @@ export default function DashboardPage() {
     if (!p?.business_id) return
     setDashRefreshing(true)
     try {
-      await refreshDashboard(p)
+      await refreshDashboard(p, { scope: 'full', force: true })
       if (p.business_role === 'admin' && activeTabRef.current === 'team') await loadTeam()
     } finally {
       setDashRefreshing(false)
@@ -2233,7 +2636,7 @@ export default function DashboardPage() {
       const j = (await res.json()) as { error?: string }
       if (!res.ok) throw new Error(j.error || 'Request failed')
       const p = profileRef.current
-      if (p) await refreshDashboard(p)
+      if (p) await refreshDashboard(p, { scope: 'users', pendingDetail: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Request failed')
     } finally {
@@ -2286,7 +2689,7 @@ export default function DashboardPage() {
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Could not update label')
       const cur = profileRef.current
-      if (cur?.business_id) void refreshDashboard(cur)
+      if (cur?.business_id) void refreshDashboard(cur, { scope: 'inbox' })
     } finally {
       setInboxLabelRowBusy(null)
     }
@@ -2553,7 +2956,7 @@ export default function DashboardPage() {
   }
 
   openMessageFromNotifyRef.current = (conversationId: string) => {
-    setActiveTab('inbox')
+    switchTab('inbox')
     void openThread(conversationId)
   }
 
@@ -2741,7 +3144,7 @@ export default function DashboardPage() {
       setReplyDraft('')
       setReplyTarget(null)
       clearReplyPendingImage()
-      await refreshDashboard(profileRef.current!)
+      await refreshDashboard(profileRef.current!, { scope: 'inbox' })
     } catch (e) {
       console.error(e)
       alert(
@@ -2768,7 +3171,7 @@ export default function DashboardPage() {
       }
       if (!conversationId) throw new Error('Could not start conversation')
       setInboxSearchQuery('')
-      await refreshDashboard(profileRef.current!)
+      await refreshDashboard(profileRef.current!, { scope: 'inbox' })
       await openThread(conversationId)
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Could not open conversation')
@@ -2804,7 +3207,7 @@ export default function DashboardPage() {
         return next
       })
       setMemberComposeOpenId(null)
-      await refreshDashboard(profileRef.current!)
+      await refreshDashboard(profileRef.current!, { scope: 'inbox' })
     } catch (e) {
       console.error(e)
       alert(e instanceof Error ? e.message : 'Could not send message. Check you are signed in and try again.')
@@ -2818,11 +3221,22 @@ export default function DashboardPage() {
     if (!p?.business_id) return
     setInboxRefreshing(true)
     try {
-      await refreshDashboard(p)
+      await refreshDashboard(p, { scope: 'inbox' })
       const cid = selectedConvoIdRef.current
       if (cid) await reloadThreadMessages(cid, { markRead: false })
     } finally {
       setInboxRefreshing(false)
+    }
+  }
+
+  async function refreshUsers() {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setUsersRefreshing(true)
+    try {
+      await refreshDashboard(p, { scope: 'users', pendingDetail: true, force: true })
+    } finally {
+      setUsersRefreshing(false)
     }
   }
 
@@ -2864,7 +3278,7 @@ export default function DashboardPage() {
       })
       const j = (await res.json()) as { error?: string }
       if (!res.ok) throw new Error(j.error || 'Request failed')
-      await refreshDashboard(profileRef.current!)
+      await refreshDashboard(profileRef.current!, { scope: 'users', pendingDetail: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Failed to update account')
     } finally {
@@ -2970,7 +3384,9 @@ export default function DashboardPage() {
       if (insErr) throw insErr
       const announcementId = (inserted as { id: string }).id
 
-      const approvedIds = await listAllApprovedCustomerIds(supabase)
+      const approvedIds = profile.business_id
+        ? await listBusinessApprovedCustomerIds(supabase, profile.business_id)
+        : []
       let notificationsOk = true
       notified = approvedIds.length
       const preview = body.length > 120 ? `${body.slice(0, 117)}…` : body
@@ -3042,7 +3458,12 @@ export default function DashboardPage() {
       const recipientIds = new Set<string>()
 
       if (audience === 'all') {
-        for (const id of await listAllApprovedCustomerIds(supabase)) recipientIds.add(id)
+        if (!profile.business_id) {
+          alert('Missing business context.')
+          setNotifyBusy(false)
+          return
+        }
+        for (const id of await listBusinessApprovedCustomerIds(supabase, profile.business_id)) recipientIds.add(id)
       } else if (audience === 'one') {
         const raw = oneUserQuery.trim()
         if (!raw) {
@@ -3253,7 +3674,21 @@ export default function DashboardPage() {
     [convoList]
   )
 
+  const hasUsersData = useMemo(
+    () =>
+      pendingCustomers.length > 0 ||
+      activeMembers.length > 0 ||
+      suspendedMembers.length > 0 ||
+      pendingSignupCount > 0,
+    [pendingCustomers, activeMembers, suspendedMembers, pendingSignupCount]
+  )
+
+  const needsInboxLists = activeTab === 'inbox'
+  const needsUsersLists = activeTab === 'users'
+  const needsNotifyLists = activeTab === 'notify'
+
   const convoListMerged = useMemo(() => {
+    if (!needsInboxLists) return convoList
     const byId = new Map<string, ConvoListItem>()
     for (const c of convoList) byId.set(c.id, c)
     for (const c of inboxSearchExtraConvos) {
@@ -3263,10 +3698,11 @@ export default function DashboardPage() {
       if (!byId.has(c.id)) byId.set(c.id, c)
     }
     return [...byId.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-  }, [convoList, inboxSearchExtraConvos, inboxLabelFilterExtraConvos])
+  }, [needsInboxLists, convoList, inboxSearchExtraConvos, inboxLabelFilterExtraConvos])
 
   /** Merge active-member profile data when inbox thread rows lack names (RLS gaps). */
   const convoListForInbox = useMemo(() => {
+    if (!needsInboxLists) return convoList
     const memberById = new Map<string, ActiveMember>()
     for (const m of activeMembers) memberById.set(m.id, m)
     for (const m of suspendedMembers) memberById.set(m.id, m)
@@ -3285,9 +3721,10 @@ export default function DashboardPage() {
         customerAvatar: c.customerAvatar ?? m.avatar_url ?? null,
       }
     })
-  }, [convoListMerged, activeMembers, suspendedMembers])
+  }, [needsInboxLists, convoListMerged, activeMembers, suspendedMembers])
 
   const filteredConvoList = useMemo(() => {
+    if (!needsInboxLists) return convoList
     const q = inboxSearchQuery.trim().toLowerCase().replace(/^@+/, '')
     if (!q) return convoListForInbox
     return convoListForInbox.filter((c) => {
@@ -3300,16 +3737,17 @@ export default function DashboardPage() {
         labelsText.includes(q)
       )
     })
-  }, [convoListForInbox, inboxSearchQuery])
+  }, [needsInboxLists, convoListForInbox, inboxSearchQuery])
 
   const inboxDisplayList = useMemo(() => {
+    if (!needsInboxLists) return convoList
     let list = filteredConvoList
     if (inboxUnreadFilterOnly) list = list.filter((c) => c.unreadCount > 0)
     if (inboxThreadLabelFilterIds.length === 0) return list
     return list.filter((c) =>
       inboxThreadLabelFilterIds.some((lid) => c.labels.some((l) => l.id === lid))
     )
-  }, [filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly])
+  }, [needsInboxLists, filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly])
 
   /** Drop open thread when it falls outside the active inbox filter. */
   useEffect(() => {
@@ -3320,6 +3758,7 @@ export default function DashboardPage() {
 
   /** Active members matching inbox search who have no thread in results (often: follow only, no messages yet). */
   const inboxSearchMemberMatches = useMemo(() => {
+    if (!needsInboxLists) return []
     const q = inboxSearchQuery.trim().toLowerCase().replace(/^@+/, '')
     if (q.length < 2) return []
 
@@ -3364,15 +3803,17 @@ export default function DashboardPage() {
     }
 
     return out.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
-  }, [inboxSearchQuery, activeMembers, activeMemberLookup, inboxDisplayList])
+  }, [needsInboxLists, inboxSearchQuery, activeMembers, activeMemberLookup, inboxDisplayList])
 
   const filteredCannedPickerList = useMemo(() => {
+    if (!needsInboxLists) return cannedReplies
     const q = cannedPickerQuery.trim().toLowerCase()
     if (!q) return cannedReplies
     return cannedReplies.filter((r) => r.title.toLowerCase().includes(q) || r.body.toLowerCase().includes(q))
   }, [cannedReplies, cannedPickerQuery])
 
   const threadFirstUnreadIndex = useMemo(() => {
+    if (!needsInboxLists || !selectedConvoId) return -1
     const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
     if (!customerId) return -1
     for (let i = 0; i < threadMessages.length; i++) {
@@ -3380,9 +3821,10 @@ export default function DashboardPage() {
       if (m.sender_id === customerId && m.read !== true) return i
     }
     return -1
-  }, [threadMessages, selectedConvoId, convoList])
+  }, [needsInboxLists, threadMessages, selectedConvoId, convoList])
 
   const threadSeenIndexes = useMemo(() => {
+    if (!needsInboxLists || !selectedConvoId) return { lastStaff: -1, lastOther: -1 }
     const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
     if (!customerId || threadMessages.length === 0) return { lastStaff: -1, lastOther: -1 }
     let lastStaff = -1
@@ -3392,7 +3834,7 @@ export default function DashboardPage() {
       if (lastOther < 0 && threadMessages[i].sender_id === customerId) lastOther = i
     }
     return { lastStaff, lastOther }
-  }, [threadMessages, selectedConvoId, convoList])
+  }, [needsInboxLists, threadMessages, selectedConvoId, convoList])
 
   const convoIdByCustomerId = useMemo(() => {
     const map = new Map<string, string>()
@@ -3401,6 +3843,7 @@ export default function DashboardPage() {
   }, [convoList])
 
   const filteredActiveMembers = useMemo(() => {
+    if (!needsUsersLists) return activeMembers
     const q = activeMemberQuery.trim().toLowerCase().replace(/^@+/, '')
     if (!q) return activeMembers
     return activeMembers.filter((m) => {
@@ -3410,15 +3853,17 @@ export default function DashboardPage() {
       const username = (m.username ?? '').toLowerCase().replace(/^@+/, '')
       return label.includes(q) || first.includes(q) || last.includes(q) || username.includes(q)
     })
-  }, [activeMembers, activeMemberQuery])
+  }, [needsUsersLists, activeMembers, activeMemberQuery])
 
   const selectableRecipients = useMemo(() => {
+    if (!needsNotifyLists) return []
     const map = new Map<string, ActiveMember>()
     for (const member of activeMembers) map.set(member.id, member)
     return [...map.values()].sort((a, b) => (a.username || '').localeCompare(b.username || ''))
-  }, [activeMembers])
+  }, [needsNotifyLists, activeMembers])
 
   const filteredSelectableRecipients = useMemo(() => {
+    if (!needsNotifyLists) return []
     const q = notifyRecipientQuery.trim().toLowerCase()
     if (q) {
       return notifySearchResults.map((r) => ({
@@ -3431,7 +3876,7 @@ export default function DashboardPage() {
       }))
     }
     return selectableRecipients.map((m) => ({ ...m, email: null as string | null }))
-  }, [selectableRecipients, notifyRecipientQuery, notifySearchResults])
+  }, [needsNotifyLists, selectableRecipients, notifyRecipientQuery, notifySearchResults])
 
   function toggleSelectedRecipient(userId: string) {
     setSelectedRecipientIds((prev) =>
@@ -3568,34 +4013,13 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
-        <nav className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
-          {navItems.map((item) => {
-            const Icon = item.icon
-            const active = item.id === activeTab
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  setActiveTab(item.id)
-                }}
-                className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left text-[13px] font-medium transition-all ${
-                  active
-                    ? 'border-[rgba(141,99,255,0.4)] bg-[rgba(141,99,255,0.1)] text-white shadow-[0_4px_16px_-8px_rgba(124,90,246,0.4)]'
-                    : 'border-transparent text-[#8892b0] hover:bg-white/[0.04] hover:text-[#c4cbe6]'
-                }`}
-              >
-                <Icon className="w-[15px] h-[15px] shrink-0 opacity-90" />
-                <span className="flex-1 min-w-0">{item.label}</span>
-                {item.id === 'inbox' && inboxUnreadTotal > 0 ? (
-                  <span className="shrink-0 min-w-4 h-4 px-1 rounded-full bg-[#8d63ff] text-white text-[9px] font-bold flex items-center justify-center tabular-nums">
-                    {inboxUnreadTotal > 99 ? '99+' : inboxUnreadTotal}
-                  </span>
-                ) : null}
-              </button>
-            )
-          })}
-        </nav>
+        <DashboardNavButtons
+          navItems={navItems}
+          activeTab={activeTab}
+          inboxUnreadTotal={inboxUnreadTotal}
+          onSelect={switchTab}
+          layout="sidebar"
+        />
         <div className="shrink-0 mt-auto pt-3 border-t border-white/[0.06] px-1 space-y-2">
           <DesktopNotificationPrompt variant="staff" layout="sidebar" />
           <button
@@ -3701,8 +4125,8 @@ export default function DashboardPage() {
             </div>
           ) : null}
 
-        {activeTab === 'home' ? (
-          <section className="space-y-3">
+        <StaffTabPanel tab="home" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3" render={() => (
+          <>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
               <StatCard icon={<User2 className="w-4 h-4" />} label="Pending" value={metrics.pending} accent="yellow" />
               <StatCard icon={<Inbox className="w-4 h-4" />} label="Threads" value={metrics.unread} accent="purple" />
@@ -3710,18 +4134,18 @@ export default function DashboardPage() {
               <StatCard icon={<Users className="w-4 h-4" />} label="Active members" value={metrics.members} accent="green" />
             </div>
             <div className={`grid gap-2 ${isAdmin ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'}`}>
-              <QuickButton icon={<User2 className="w-4 h-4" />} label="Review Queue" onClick={() => setActiveTab('users')} />
+              <QuickButton icon={<User2 className="w-4 h-4" />} label="Review Queue" onClick={() => switchTab('users')} />
               <QuickButton
                 icon={<Inbox className="w-4 h-4" />}
                 label="Open Inbox"
                 badgeCount={inboxUnreadTotal}
-                onClick={() => setActiveTab('inbox')}
+                onClick={() => switchTab('inbox')}
               />
-              <QuickButton icon={<Megaphone className="w-4 h-4" />} label="Post" onClick={() => setActiveTab('post')} />
+              <QuickButton icon={<Megaphone className="w-4 h-4" />} label="Post" onClick={() => switchTab('post')} />
               {isAdmin ? (
-                <QuickButton icon={<UserCog className="w-4 h-4" />} label="Team" onClick={() => setActiveTab('team')} />
+                <QuickButton icon={<UserCog className="w-4 h-4" />} label="Team" onClick={() => switchTab('team')} />
               ) : (
-                <QuickButton icon={<Send className="w-4 h-4" />} label="Send Notify" onClick={() => setActiveTab('notify')} />
+                <QuickButton icon={<Send className="w-4 h-4" />} label="Send Notify" onClick={() => switchTab('notify')} />
               )}
             </div>
             <div className="rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] overflow-hidden">
@@ -3729,7 +4153,12 @@ export default function DashboardPage() {
                 <h3 className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#8892b0]">Recent Conversations</h3>
               </div>
               <div className="divide-y divide-white/[0.08] py-0.5">
-                {convoList.length === 0 ? (
+                {inboxLoading && convoList.length === 0 ? (
+                  <div className="flex items-center justify-center gap-2 px-3 py-8 text-[13px] text-[#8892b0]">
+                    <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                    Loading conversations…
+                  </div>
+                ) : convoList.length === 0 ? (
                   <p className="px-3 py-5 text-[13px] text-[#8892b0]">No customer threads yet.</p>
                 ) : (
                   convoList.slice(0, 4).map((item) => (
@@ -3737,7 +4166,7 @@ export default function DashboardPage() {
                       type="button"
                       key={item.id}
                       onClick={() => {
-                        setActiveTab('inbox')
+                        switchTab('inbox')
                         void openThread(item.id)
                       }}
                       className="w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-white/[0.03] transition-colors"
@@ -3786,11 +4215,11 @@ export default function DashboardPage() {
                 )}
               </div>
             </div>
-          </section>
-        ) : null}
+          
+          </>)} />
 
-        {activeTab === 'post' ? (
-          <section className="space-y-3 max-w-4xl">
+        <StaffTabPanel tab="post" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3 max-w-4xl" render={() => (
+          <>
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
               Goes to the public feed for all approved customers. They can like and comment. Everyone approved gets an in-app notification when you publish. Email goes only to customers labeled{' '}
               <strong className="text-[#c4cbe6]">Active player</strong> or <strong className="text-[#c4cbe6]">Account created</strong> on their support thread.
@@ -4241,11 +4670,16 @@ export default function DashboardPage() {
                 </ul>
               )}
             </div>
-          </section>
-        ) : null}
+          
+          </>)} />
 
-        {activeTab === 'inbox' ? (
-          <section className="space-y-3 max-lg:flex max-lg:flex-col max-lg:flex-1 max-lg:min-h-0 max-lg:overflow-hidden lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden">
+        <StaffTabPanel
+          tab="inbox"
+          activeTab={activeTab}
+          mountedTabs={mountedTabs}
+          className="space-y-3 max-lg:flex max-lg:flex-col max-lg:flex-1 max-lg:min-h-0 max-lg:overflow-hidden lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden"
+         render={() => (
+          <>
             <div
               className={`flex items-center justify-between gap-2 flex-wrap shrink-0 ${
                 inboxMobileThreadOpen ? 'max-lg:hidden' : ''
@@ -4297,7 +4731,12 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {convoList.length === 0 ? (
+            {inboxLoading && convoList.length === 0 ? (
+              <div className="flex items-center justify-center gap-2 rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] px-4 py-12 text-[13px] text-[#8892b0]">
+                <Loader2 className="w-5 h-5 animate-spin text-[#8d63ff]" />
+                Loading inbox threads…
+              </div>
+            ) : convoList.length === 0 && !inboxLoading ? (
               loadError ? (
                 <p className="text-sm text-red-300/90 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2">
                   Threads could not load — see the error banner above. Staff must have{' '}
@@ -5139,15 +5578,33 @@ export default function DashboardPage() {
 
               </div>
             )}
-          </section>
-        ) : null}
+          
+          </>)} />
 
-        {activeTab === 'users' ? (
-          <section className="space-y-4">
-            <p className="text-[12px] text-[#8892b0] leading-relaxed">
-              Approve new signups and manage active members for your business. Admins and support use the same tools here; pending customers cannot
-              use the app until approved.
-            </p>
+        <StaffTabPanel tab="users" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-4" render={() => (
+          <>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <p className="text-[12px] text-[#8892b0] leading-relaxed flex-1 min-w-[200px]">
+                Approve new signups and manage active members for your business. Admins and support use the same tools here; pending customers cannot
+                use the app until approved.
+              </p>
+              <button
+                type="button"
+                onClick={() => void refreshUsers()}
+                disabled={usersRefreshing || !profile.business_id}
+                className="inline-flex items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-[13px] font-semibold text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] disabled:opacity-40 shrink-0"
+                aria-label="Refresh users"
+              >
+                <RefreshCw className={`w-4 h-4 ${usersRefreshing ? 'animate-spin' : ''}`} />
+                <span className="max-sm:sr-only">Refresh users</span>
+              </button>
+            </div>
+            {usersLoading && hasUsersData ? (
+              <p className="text-[11px] text-[#8d63ff] inline-flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Refreshing members…
+              </p>
+            ) : null}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               <StatCard icon={<User2 className="w-4 h-4" />} label="Pending" value={pendingSignupCount} accent="yellow" />
               <StatCard icon={<Users className="w-4 h-4" />} label="Active" value={activeMembers.length} accent="green" />
@@ -5162,20 +5619,17 @@ export default function DashboardPage() {
               <div className="flex gap-0.5 rounded-[10px] bg-[#0f1834] p-0.5">
                 <button
                   type="button"
-                  onClick={() => {
-                    setUsersPanelTab('pending')
-                    setActiveMemberQuery('')
-                  }}
-                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold transition-colors ${
+                  onClick={() => switchUsersPanelTab('pending')}
+                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold ${
                     usersPanelTab === 'pending' ? 'bg-[rgba(141,99,255,0.15)] text-[#8d63ff]' : 'text-[#8892b0] hover:text-[#c4cbe6]'
                   }`}
                 >
-                  Pending ({pendingCustomers.length})
+                  Pending ({pendingCustomers.length || pendingSignupCount})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setUsersPanelTab('active')}
-                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold transition-colors ${
+                  onClick={() => switchUsersPanelTab('active')}
+                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold ${
                     usersPanelTab === 'active' ? 'bg-[rgba(141,99,255,0.15)] text-[#8d63ff]' : 'text-[#8892b0] hover:text-[#c4cbe6]'
                   }`}
                 >
@@ -5183,11 +5637,8 @@ export default function DashboardPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setUsersPanelTab('suspended')
-                    setActiveMemberQuery('')
-                  }}
-                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold transition-colors ${
+                  onClick={() => switchUsersPanelTab('suspended')}
+                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold ${
                     usersPanelTab === 'suspended' ? 'bg-[rgba(141,99,255,0.15)] text-[#8d63ff]' : 'text-[#8892b0] hover:text-[#c4cbe6]'
                   }`}
                 >
@@ -5195,11 +5646,16 @@ export default function DashboardPage() {
                 </button>
               </div>
 
-              {usersPanelTab === 'pending' ? (
-                <div className="space-y-2">
+              <StaffUsersSubPanel panel="pending" activePanel={usersPanelTab} mountedPanels={mountedUsersPanels} className="space-y-2" render={() => (
+                  <>
                   <h4 className="text-sm font-semibold tracking-wide text-[#9ea8cc] uppercase">Pending approval</h4>
                   <div className="rounded-2xl border border-white/10 bg-[#0d1428]/90 p-2.5 sm:p-3 space-y-2.5 shadow-[0_20px_50px_-35px_rgba(30,49,112,0.95)]">
-                    {pendingCustomers.length === 0 ? (
+                    {usersLoading && pendingCustomers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#7d86a8]">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                        Loading pending signups…
+                      </div>
+                    ) : pendingCustomers.length === 0 ? (
                       <p className="text-sm text-[#7d86a8] py-4 text-center">No pending signups.</p>
                     ) : (
                       pendingCustomers.map((cust) => (
@@ -5287,11 +5743,10 @@ export default function DashboardPage() {
                       ))
                     )}
                   </div>
-                </div>
-              ) : null}
+              </>)} />
 
-              {usersPanelTab === 'active' ? (
-                <div className="space-y-2">
+              <StaffUsersSubPanel panel="active" activePanel={usersPanelTab} mountedPanels={mountedUsersPanels} className="space-y-2" render={() => (
+                  <>
                   <h4 className="text-sm font-semibold tracking-wide text-[#9ea8cc] uppercase">Active members</h4>
                   <p className="text-[#7d86a8] text-xs">
                     Customers approved for the platform who follow your business or have a support thread with you.
@@ -5343,7 +5798,12 @@ export default function DashboardPage() {
                     {activeMemberLookupBusy && activeMemberQuery.trim().length >= 2 ? (
                       <p className="text-xs text-[#7d86a8] px-3 py-2">Looking up account…</p>
                     ) : null}
-                    {activeMembers.length === 0 ? (
+                    {usersLoading && activeMembers.length === 0 && suspendedMembers.length === 0 && pendingCustomers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#7d86a8]">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                        Loading members…
+                      </div>
+                    ) : activeMembers.length === 0 ? (
                       <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">
                         No active members linked to this business yet — approve customers and have them follow or message you.
                       </p>
@@ -5448,17 +5908,21 @@ export default function DashboardPage() {
                       })
                     )}
                   </div>
-                </div>
-              ) : null}
+              </>)} />
 
-              {usersPanelTab === 'suspended' ? (
-                <div className="space-y-2">
+              <StaffUsersSubPanel panel="suspended" activePanel={usersPanelTab} mountedPanels={mountedUsersPanels} className="space-y-2" render={() => (
+                  <>
                   <h4 className="text-sm font-semibold tracking-wide text-[#9ea8cc] uppercase">Suspended</h4>
                   <p className="text-[#7d86a8] text-xs">
                     These customers cannot use the app until you unsuspend them. Actions are recorded in the moderation log.
                   </p>
                   <div className="rounded-2xl border border-amber-500/20 bg-[#0d1428]/90 divide-y divide-white/10 shadow-[0_20px_50px_-35px_rgba(30,49,112,0.95)] max-h-[340px] overflow-y-auto">
-                    {suspendedMembers.length === 0 ? (
+                    {usersLoading && suspendedMembers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#7d86a8]">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                        Loading suspended members…
+                      </div>
+                    ) : suspendedMembers.length === 0 ? (
                       <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">No suspended members for this business.</p>
                     ) : (
                       suspendedMembers.map((m) => {
@@ -5483,13 +5947,13 @@ export default function DashboardPage() {
                       })
                     )}
                   </div>
-                </div>
-              ) : null}
-          </section>
-        ) : null}
+              </>)} />
+          
+          </>)} />
 
-        {activeTab === 'team' && isAdmin ? (
-          <section className="space-y-4 max-w-3xl">
+        {isAdmin ? (
+          <StaffTabPanel tab="team" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-4 max-w-3xl" render={() => (
+          <>
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
               Everyone on the business team shares this dashboard: inbox, users, posts, and reports. Customers see who sent each reply; in your
               inbox you see the same for every admin and support agent. Only admins can add or remove support accounts below.
@@ -5613,11 +6077,12 @@ export default function DashboardPage() {
                 )}
               </div>
             </div>
-          </section>
+          
+          </>)} />
         ) : null}
 
-        {activeTab === 'notify' ? (
-          <section className="space-y-3 max-w-3xl">
+        <StaffTabPanel tab="notify" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3 max-w-3xl" render={() => (
+          <>
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
               Sends an <strong className="text-[#c4cbe6]">in-app notification</strong> and <strong className="text-[#c4cbe6]">email</strong> to each recipient (bell / Notifications screen).{' '}
               This is <strong className="text-[#c4cbe6]">not</strong> SMS, email, or a DM in their support thread — only the notifications list.
@@ -5831,11 +6296,11 @@ export default function DashboardPage() {
                 {notifyBusy ? 'Sending…' : 'Send'}
               </button>
             </div>
-          </section>
-        ) : null}
+          
+          </>)} />
 
-        {activeTab === 'reports' ? (
-          <section className="space-y-3">
+        <StaffTabPanel tab="reports" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3" render={() => (
+          <>
             {reports.length === 0 ? (
               <p className="text-sm text-[#7d86a8]">No reports for this business.</p>
             ) : (
@@ -5869,44 +6334,21 @@ export default function DashboardPage() {
                 ))}
               </div>
             )}
-          </section>
-        ) : null}
+          
+          </>)} />
           </div>
         </div>
       </main>
 
-      <nav
-        className={`relay-footer-bar fixed bottom-0 left-0 right-0 lg:hidden border-t border-white/[0.08] bg-[rgba(9,14,32,0.97)] backdrop-blur-md px-1 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] grid ${mobileGridClass} ${
-          activeTab === 'inbox' && inboxMobileThreadOpen ? 'max-lg:hidden' : ''
-        }`}
-      >
-        {navItems.map((item) => {
-          const Icon = item.icon
-          const active = activeTab === item.id
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                setActiveTab(item.id)
-              }}
-              className={`flex flex-col items-center gap-0.5 py-1.5 min-w-0 relative ${
-                active ? 'text-[#8d63ff]' : 'text-[#8892b0]'
-              }`}
-            >
-              <span className="relative inline-flex shrink-0">
-                <Icon className="w-[21px] h-[21px] shrink-0" />
-                {item.id === 'inbox' && inboxUnreadTotal > 0 ? (
-                  <span className="absolute -top-1.5 -right-2 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#090e20]">
-                    {inboxUnreadTotal > 9 ? '9+' : inboxUnreadTotal}
-                  </span>
-                ) : null}
-              </span>
-              <span className="text-[10px] font-semibold leading-tight text-center truncate w-full px-0.5">{item.label}</span>
-            </button>
-          )
-        })}
-      </nav>
+      <DashboardNavButtons
+        navItems={navItems}
+        activeTab={activeTab}
+        inboxUnreadTotal={inboxUnreadTotal}
+        onSelect={switchTab}
+        layout="mobile"
+        mobileGridClass={mobileGridClass}
+        hideMobile={activeTab === 'inbox' && inboxMobileThreadOpen}
+      />
     </div>
   )
 }

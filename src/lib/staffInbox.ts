@@ -11,27 +11,37 @@ export type BusinessConversationRow = {
   updated_at: string
 }
 
-/** Load every support thread for a business (paginated). */
+/** Cap inbox list size on staff dashboard (most recent threads). */
+export const INBOX_LIST_DEFAULT_MAX = 300
+
+/** Load support threads for a business (paginated, optional cap). */
 export async function fetchAllBusinessConversations(
   client: SupabaseClient,
-  businessId: string
+  businessId: string,
+  opts?: { maxRows?: number }
 ): Promise<BusinessConversationRow[]> {
+  const maxRows = opts?.maxRows
   const rows: BusinessConversationRow[] = []
   let from = 0
   while (true) {
+    const pageSize =
+      maxRows != null ? Math.min(CONVO_LIST_PAGE_SIZE, maxRows - rows.length) : CONVO_LIST_PAGE_SIZE
+    if (maxRows != null && pageSize <= 0) break
+
     const { data, error } = await client
       .from('conversations')
       .select('id, customer_id, updated_at')
       .eq('business_id', businessId)
       .order('updated_at', { ascending: false })
-      .range(from, from + CONVO_LIST_PAGE_SIZE - 1)
+      .range(from, from + pageSize - 1)
     if (error) throw error
     if (!data?.length) break
     for (const row of data) {
       rows.push(row as BusinessConversationRow)
     }
-    if (data.length < CONVO_LIST_PAGE_SIZE) break
-    from += CONVO_LIST_PAGE_SIZE
+    if (maxRows != null && rows.length >= maxRows) break
+    if (data.length < pageSize) break
+    from += pageSize
   }
   return rows
 }
@@ -87,14 +97,40 @@ export async function fetchInboxPreviewsLegacy(
   return previewByConvo
 }
 
-/** Unread inbound customer messages per conversation (chunked). */
+/** Unread inbound customer messages per conversation (chunked RPC, legacy row-scan fallback). */
 export async function fetchInboxUnreadCounts(
   client: SupabaseClient,
   convoRows: BusinessConversationRow[]
 ): Promise<Record<string, number>> {
   const unreadByConvo: Record<string, number> = {}
-  const customerByConvo = Object.fromEntries(convoRows.map((r) => [r.id, r.customer_id]))
   const convIds = convoRows.map((r) => r.id)
+  if (convIds.length === 0) return unreadByConvo
+
+  for (let i = 0; i < convIds.length; i += INBOX_PREVIEW_CHUNK) {
+    const slice = convIds.slice(i, i + INBOX_PREVIEW_CHUNK)
+    const { data: counts, error: rpcErr } = await client.rpc('inbox_unread_customer_counts', {
+      p_conversation_ids: slice,
+    })
+    if (rpcErr) {
+      Object.assign(unreadByConvo, await fetchInboxUnreadCountsLegacy(client, convoRows, slice))
+      continue
+    }
+    for (const row of counts || []) {
+      const r = row as { conversation_id: string; unread_count: number | string }
+      unreadByConvo[r.conversation_id] = Number(r.unread_count) || 0
+    }
+  }
+  return unreadByConvo
+}
+
+/** Fallback when inbox_unread_customer_counts RPC is missing. */
+async function fetchInboxUnreadCountsLegacy(
+  client: SupabaseClient,
+  convoRows: BusinessConversationRow[],
+  convIds: string[]
+): Promise<Record<string, number>> {
+  const unreadByConvo: Record<string, number> = {}
+  const customerByConvo = Object.fromEntries(convoRows.map((r) => [r.id, r.customer_id]))
 
   for (let i = 0; i < convIds.length; i += INBOX_QUERY_CHUNK) {
     const slice = convIds.slice(i, i + INBOX_QUERY_CHUNK)

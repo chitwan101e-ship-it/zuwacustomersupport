@@ -46,6 +46,7 @@ export default function NotificationsPage() {
         .select('id, type, title, body, link, read, created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false })
+        .limit(100)
 
       if (error) {
         console.error(error)
@@ -128,8 +129,24 @@ export default function NotificationsPage() {
         .channel(`notifications-${uid}`)
         .on(
           'postgres_changes',
-          { event: '*', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
-          () => void load(uid)
+          { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+          (payload) => {
+            const row = payload.new as NotificationRow
+            if (!row?.id) return
+            setItems((prev) => {
+              if (prev.some((n) => n.id === row.id)) return prev
+              return [row, ...prev].slice(0, 100)
+            })
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+          (payload) => {
+            const row = payload.new as NotificationRow
+            if (!row?.id) return
+            setItems((prev) => prev.map((n) => (n.id === row.id ? { ...n, ...row } : n)))
+          }
         )
         .subscribe()
     }
@@ -156,7 +173,7 @@ export default function NotificationsPage() {
 
     timer = window.setInterval(() => {
       void tick()
-    }, 15000)
+    }, 45_000)
     void tick()
 
     return () => {
