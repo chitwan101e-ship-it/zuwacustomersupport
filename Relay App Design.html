@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relay — Complete App</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════
+   RESET & BASE
+═══════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #050814;
+  color: #fff;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: inherit; cursor: pointer; border: none; background: none; }
+input, textarea { font-family: inherit; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+img { display: block; }
+
+/* ═══════════════════════════════════════
+   DESIGN TOKENS
+═══════════════════════════════════════ */
+:root {
+  --bg0: #050814;
+  --bg1: #080d1c;
+  --bg2: #0b1228;
+  --bg3: #0f1834;
+  --bg4: #131e3e;
+  --bg5: #1a2550;
+  --panel: rgba(11,18,40,0.92);
+  --border: rgba(255,255,255,0.08);
+  --border-md: rgba(255,255,255,0.12);
+  --border-brand: rgba(141,99,255,0.5);
+  --purple: #8d63ff;
+  --purple-deep: #7c5af6;
+  --purple-btn: linear-gradient(135deg, #7c5af6 0%, #5a7ff6 100%);
+  --msg-blue: #7c5af6;
+  --msg-out: linear-gradient(135deg, #7c5af6, #5a7ff6);
+  --msg-in: #13213d;
+  --green: #2fd17f;
+  --red: #ff3b5c;
+  --amber: #f6b332;
+  --text1: #ffffff;
+  --text2: #c4cbe6;
+  --text3: #8892b0;
+  --text4: #4e5a7a;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-full: 9999px;
+  --shadow-card: 0 20px 60px -20px rgba(20,30,80,0.9);
+  --shadow-glow: 0 0 40px -10px rgba(124,90,246,0.4);
+}
+
+/* ═══════════════════════════════════════
+   SCREEN ROUTER
+═══════════════════════════════════════ */
+.screen { display: none; width: 100%; height: 100%; overflow: hidden; }
+.screen.active { display: flex; }
+
+/* ═══════════════════════════════════════
+   AUTH SCREENS (Login / Signup)
+═══════════════════════════════════════ */
+.auth-wrap {
+  width: 100%; height: 100%;
+  background: radial-gradient(ellipse at 60% 0%, #1a1060 0%, #080d1c 50%, #050814 100%);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; overflow-y: auto;
+  position: relative;
+}
+.auth-glow {
+  position: absolute; top: -120px; right: -120px; width: 500px; height: 500px;
+  border-radius: 50%; background: radial-gradient(circle, rgba(124,90,246,0.18) 0%, transparent 70%);
+  pointer-events: none;
+}
+.auth-card {
+  background: rgba(11,18,40,0.95);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-2xl);
+  padding: 36px 32px;
+  width: 100%; max-width: 420px;
+  box-shadow: var(--shadow-card), 0 0 80px -30px rgba(124,90,246,0.3);
+  position: relative;
+}
+.auth-logo { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 6px; }
+.auth-logomark {
+  width: 44px; height: 44px; border-radius: 14px;
+  background: linear-gradient(140deg, #8d63ff, #4c78ff);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 8px 24px -8px rgba(141,99,255,0.7);
+}
+.auth-logoword { font-size: 26px; font-weight: 800; letter-spacing: -0.03em; }
+.auth-tagline { text-align: center; color: var(--text3); font-size: 13px; margin-bottom: 20px; }
+.auth-tabs {
+  display: flex; background: var(--bg3); border-radius: 12px;
+  padding: 4px; margin-bottom: 24px; gap: 2px;
+}
+.auth-tab {
+  flex: 1; padding: 9px; border-radius: 9px; font-size: 13px; font-weight: 600;
+  color: var(--text3); transition: all .2s; text-align: center;
+}
+.auth-tab.active {
+  background: linear-gradient(135deg, #7c5af6, #5a7ff6);
+  color: #fff; box-shadow: 0 4px 12px rgba(124,90,246,0.4);
+}
+.pending-badge {
+  display: flex; align-items: center; gap: 8px; justify-content: center;
+  background: rgba(246,179,50,0.08); border: 1px solid rgba(246,179,50,0.2);
+  border-radius: var(--radius-full); padding: 8px 16px; margin-bottom: 20px;
+  font-size: 12px; font-weight: 600; color: var(--amber);
+}
+.pending-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+.field { margin-bottom: 16px; }
+.field-label {
+  display: block; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--text3); margin-bottom: 6px;
+}
+.field-input {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius-md); color: var(--text1); font-size: 13px;
+  padding: 11px 14px; outline: none; transition: border-color .2s, box-shadow .2s;
+}
+.field-input::placeholder { color: var(--text4); }
+.field-input:focus { border-color: var(--purple-deep); box-shadow: 0 0 0 3px rgba(124,90,246,0.18); }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.btn-primary {
+  width: 100%; padding: 13px; border-radius: var(--radius-md);
+  background: var(--purple-btn); color: #fff; font-size: 14px; font-weight: 600;
+  letter-spacing: 0.01em; transition: opacity .2s, transform .1s;
+  box-shadow: 0 8px 24px -8px rgba(124,90,246,0.5);
+}
+.btn-primary:hover { opacity: .92; }
+.btn-primary:active { transform: scale(.99); }
+.btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+.auth-link { text-align: center; margin-top: 14px; font-size: 12px; color: var(--text3); }
+.auth-link a { color: var(--purple); font-weight: 500; cursor: pointer; }
+.auth-link a:hover { text-decoration: underline; }
+.role-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 18px; }
+.role-card {
+  border: 2px solid var(--border); border-radius: var(--radius-lg);
+  padding: 14px; cursor: pointer; transition: all .2s; background: var(--bg3);
+}
+.role-card:hover { border-color: rgba(141,99,255,0.4); }
+.role-card.selected { border-color: var(--purple); background: rgba(141,99,255,0.08); }
+.role-card-icon { margin-bottom: 8px; }
+.role-card-title { font-size: 13px; font-weight: 600; color: var(--text1); }
+.role-card-desc { font-size: 11px; color: var(--text3); margin-top: 3px; line-height: 1.4; }
+.pw-strength { display: flex; gap: 3px; margin-top: 5px; }
+.pw-bar { height: 3px; flex: 1; border-radius: 3px; background: var(--bg4); transition: background .3s; }
+.pw-bar.filled-1 { background: var(--red); }
+.pw-bar.filled-2 { background: var(--amber); }
+.pw-bar.filled-3 { background: #22c55e; }
+.pw-bar.filled-4 { background: #16a34a; }
+.otp-row { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
+.otp-input {
+  width: 44px; height: 54px; text-align: center; font-size: 22px; font-weight: 700;
+  background: var(--bg3); border: 1px solid var(--border-md);
+  border-radius: var(--radius-md); color: var(--text1); outline: none;
+  transition: border-color .2s, box-shadow .2s;
+}
+.otp-input:focus { border-color: var(--purple-deep); box-shadow: 0 0 0 3px rgba(124,90,246,0.18); }
+.success-icon { width: 72px; height: 72px; border-radius: 50%; background: rgba(47,209,127,0.12); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; }
+.step-dots { display: flex; gap: 5px; justify-content: center; margin-bottom: 22px; }
+.step-dot { height: 4px; border-radius: 4px; background: var(--bg5); transition: all .3s; }
+.step-dot.active { width: 24px; background: var(--purple); }
+.step-dot.done { width: 16px; background: rgba(141,99,255,0.4); }
+.step-dot.future { width: 12px; }
+.divider { height: 1px; background: var(--border); margin: 20px 0; }
+.form-note { font-size: 11px; color: var(--text4); line-height: 1.5; margin-bottom: 16px; }
+
+/* ═══════════════════════════════════════
+   CUSTOMER FEED
+═══════════════════════════════════════ */
+.app-shell {
+  width: 100%; height: 100%;
+  background: radial-gradient(ellipse at top, #111d45 0%, #070a18 45%, #050814 100%);
+  display: grid; grid-template-rows: auto 1fr;
+  overflow: hidden;
+}
+
+/* Top nav */
+.top-nav {
+  padding: 10px 16px 0;
+  position: relative; z-index: 30;
+}
+.top-nav-inner {
+  background: rgba(11,18,40,0.88); border: 1px solid var(--border);
+  border-radius: 18px; backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-card);
+  padding: 0 14px;
+}
+.top-nav-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 0 10px;
+}
+.nav-logo { display: flex; align-items: center; gap: 8px; }
+.nav-logomark {
+  width: 32px; height: 32px; border-radius: 9px;
+  background: linear-gradient(140deg, #8d63ff, #4c78ff);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 12px -4px rgba(141,99,255,0.7);
+  flex-shrink: 0;
+}
+.nav-logoword { font-size: 17px; font-weight: 800; letter-spacing: -0.025em; }
+.nav-spacer { flex: 1; }
+.nav-icon-btn {
+  position: relative; width: 34px; height: 34px; border-radius: 50%;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; color: var(--text2);
+  transition: background .15s;
+}
+.nav-icon-btn:hover { background: rgba(255,255,255,0.10); }
+.nav-badge {
+  position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px;
+  padding: 0 4px; border-radius: var(--radius-full); background: var(--purple);
+  color: #fff; font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.nav-badge.red { background: var(--red); }
+.user-av-sm {
+  width: 34px; height: 34px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+  position: relative; flex-shrink: 0; cursor: pointer;
+}
+.user-online { position: absolute; bottom: 0; right: 0; width: 9px; height: 9px; border-radius: 50%; background: var(--green); border: 2px solid #0b1228; }
+
+/* Greeting banner */
+.greeting-banner {
+  background: rgba(11,18,40,0.6); border: 1px solid var(--border);
+  border-radius: 14px; padding: 12px 14px; margin: 8px 0 0;
+  position: relative; overflow: hidden;
+}
+.greeting-glow-inner {
+  position: absolute; right: -30px; top: -30px; width: 120px; height: 120px;
+  border-radius: 50%; background: radial-gradient(circle, rgba(141,99,255,0.25) 0%, transparent 70%);
+}
+.greeting-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text3); margin-bottom: 4px; }
+.greeting-main {
+  font-size: 1.6rem; font-weight: 800; letter-spacing: -0.025em; line-height: 1.1;
+  background: linear-gradient(to right, #e4daff, #fff, #b3efff);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+
+/* Bottom nav (mobile) */
+.bottom-nav {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+  background: rgba(9,14,32,0.96); border-top: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  display: flex; padding: 6px 0 max(env(safe-area-inset-bottom), 6px);
+}
+.bn-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 3px; padding: 5px; font-size: 10px; font-weight: 600; color: var(--text3);
+  transition: color .15s; position: relative;
+}
+.bn-item.active { color: var(--purple); }
+.bn-item svg { width: 22px; height: 22px; }
+.bn-dot { position: absolute; top: 3px; right: calc(50% - 18px); width: 8px; height: 8px; border-radius: 50%; background: var(--red); border: 2px solid #090e20; }
+
+/* Feed scroll area */
+.feed-scroll {
+  overflow-y: auto; padding: 10px 14px 90px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+
+/* Desktop 3-col layout */
+@media (min-width: 900px) {
+  .feed-body { display: grid; grid-template-columns: 220px 1fr 260px; gap: 16px; padding: 12px 20px 20px; overflow: hidden; }
+  .feed-scroll { padding: 0; }
+  .bottom-nav { display: none; }
+  .feed-rail, .feed-aside { display: block !important; }
+  .top-nav { padding: 12px 20px 0; }
+}
+.feed-body { overflow: hidden; display: block; }
+.feed-rail, .feed-aside { display: none; }
+
+/* Left rail */
+.rail-card { background: rgba(11,18,40,0.7); border: 1px solid var(--border); border-radius: 16px; padding: 10px; position: sticky; top: 0; }
+.rail-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 10px; font-size: 13px; font-weight: 500; color: var(--text2); cursor: pointer; transition: all .15s; }
+.rail-item:hover { background: rgba(255,255,255,0.05); }
+.rail-item.active { background: rgba(141,99,255,0.12); color: var(--purple); }
+.rail-av { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+
+/* Announcement card */
+.post-card {
+  background: rgba(11,18,40,0.85); border: 1px solid var(--border);
+  border-radius: var(--radius-xl); overflow: hidden;
+  box-shadow: var(--shadow-card);
+  transition: border-color .2s;
+}
+.post-card:hover { border-color: var(--border-md); }
+.post-card-body { padding: 14px; }
+.post-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.biz-av {
+  width: 40px; height: 40px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; font-size: 13px; font-weight: 700;
+  flex-shrink: 0; color: #fff;
+}
+.biz-name { font-size: 14px; font-weight: 600; color: var(--text1); cursor: pointer; }
+.biz-name:hover { text-decoration: underline; }
+.biz-meta { font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.post-title { font-size: 14px; font-weight: 600; color: var(--text1); margin-bottom: 5px; }
+.post-body-text { font-size: 14px; color: var(--text2); line-height: 1.5; }
+.post-img { width: 100%; max-height: 300px; object-fit: cover; border-radius: 12px; margin-top: 10px; }
+.like-row { display: flex; align-items: center; gap: 6px; padding: 6px 14px 0; font-size: 12px; color: var(--text3); }
+.like-pip { width: 18px; height: 18px; border-radius: 50%; background: var(--purple); display: flex; align-items: center; justify-content: center; }
+.action-bar { display: flex; border-top: 1px solid var(--border); padding: 2px 4px; margin-top: 8px; }
+.act-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 9px; font-size: 13px; font-weight: 500; color: var(--text3); border-radius: 8px; transition: all .15s; }
+.act-btn:hover { background: rgba(255,255,255,0.05); color: var(--text2); }
+.act-btn.liked { color: var(--purple); }
+.comments-area { border-top: 1px solid var(--border); padding: 10px 12px; background: rgba(5,8,20,0.4); display: flex; flex-direction: column; gap: 8px; }
+.comment { display: flex; gap: 8px; }
+.comment-av { width: 28px; height: 28px; border-radius: 50%; background: #3d4a6b; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+.comment-bubble { background: var(--bg4); border-radius: 14px; padding: 7px 11px; font-size: 13px; color: var(--text2); line-height: 1.35; flex: 1; }
+.comment-name { font-weight: 600; color: var(--text1); font-size: 12px; display: block; margin-bottom: 2px; }
+.comment-meta { font-size: 10px; color: var(--text4); margin-top: 4px; }
+.comment-input-wrap {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-full);
+  padding: 4px 6px 4px 14px;
+}
+.comment-input { flex: 1; background: transparent; border: none; color: var(--text1); font-size: 13px; outline: none; padding: 7px 0; }
+.comment-input::placeholder { color: var(--text4); }
+.send-btn-sm { width: 28px; height: 28px; border-radius: 50%; background: var(--purple); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: opacity .15s; }
+.send-btn-sm:hover { opacity: .85; }
+
+/* Right aside */
+.aside-card { background: rgba(11,18,40,0.7); border: 1px solid var(--border); border-radius: 16px; padding: 14px; position: sticky; top: 0; }
+.aside-label { font-size: 10px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text3); margin-bottom: 8px; }
+
+/* ═══════════════════════════════════════
+   MESSENGER FAB & CHAT WINDOW
+═══════════════════════════════════════ */
+.fab-wrap { position: fixed; bottom: 70px; right: 14px; z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+@media (min-width: 900px) { .fab-wrap { bottom: 16px; } }
+.new-msg-pill {
+  background: var(--red); color: #fff; font-size: 10px; font-weight: 700;
+  padding: 5px 11px; border-radius: var(--radius-full);
+  animation: pillPulse 2s ease-in-out infinite;
+  box-shadow: 0 4px 14px rgba(255,59,92,0.5);
+  white-space: nowrap;
+}
+@keyframes pillPulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.85;transform:scale(.98)} }
+.fab-btn {
+  width: 58px; height: 58px; border-radius: 50%;
+  background: linear-gradient(135deg, #7c5af6, #5a7ff6);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 8px 28px -6px rgba(124,90,246,0.7), 0 0 0 0 rgba(124,90,246,0.4);
+  transition: transform .2s, box-shadow .2s;
+  position: relative;
+}
+.fab-btn:hover { transform: scale(1.06) translateY(-2px); box-shadow: 0 12px 36px -6px rgba(124,90,246,0.8); }
+.fab-btn:active { transform: scale(.97); }
+.fab-unread {
+  position: absolute; top: -2px; right: -2px;
+  background: var(--red); color: #fff; font-size: 9px; font-weight: 800;
+  min-width: 18px; height: 18px; padding: 0 4px; border-radius: var(--radius-full);
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid #050814;
+}
+
+/* Chat window */
+.chat-win {
+  position: fixed; z-index: 51;
+  bottom: 140px; right: 14px;
+  width: min(340px, calc(100vw - 28px));
+  max-height: calc(100vh - 170px);
+  background: #0a1228;
+  border: 1px solid rgba(141,99,255,0.3);
+  border-radius: 20px; overflow: hidden;
+  box-shadow: 0 24px 60px -10px rgba(0,0,0,0.7), var(--shadow-glow);
+  display: flex; flex-direction: column;
+}
+@media (min-width: 900px) { .chat-win { bottom: 88px; } }
+.chat-win-header {
+  padding: 11px 14px; display: flex; align-items: center; gap: 8px;
+  background: linear-gradient(135deg, #7c5af6, #5a7ff6);
+  flex-shrink: 0;
+}
+.chat-win-header .bk { width: 30px; height: 30px; border-radius: 50%; background: rgba(255,255,255,0.15); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.chat-win-header .bk:hover { background: rgba(255,255,255,0.25); }
+.chat-win-hav { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: rgba(255,255,255,0.2); flex-shrink: 0; }
+.chat-win-title { font-size: 13px; font-weight: 600; color: #fff; }
+.chat-win-sub { font-size: 10px; color: rgba(255,255,255,0.8); }
+.chat-win-close { margin-left: auto; width: 28px; height: 28px; border-radius: 50%; background: rgba(255,255,255,0.15); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+.chat-win-close:hover { background: rgba(255,255,255,0.25); }
+
+.chat-list-view { flex: 1; overflow-y: auto; }
+.chat-biz-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .15s; }
+.chat-biz-row:hover { background: rgba(255,255,255,0.04); }
+.chat-biz-av { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #fff; flex-shrink: 0; position: relative; }
+.chat-biz-badge { position: absolute; top: -2px; right: -2px; background: var(--red); color: #fff; font-size: 8px; font-weight: 800; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #0a1228; }
+.chat-biz-name { font-size: 14px; font-weight: 600; color: var(--text1); }
+.chat-biz-preview { font-size: 12px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+
+.chat-thread-view { display: none; flex-direction: column; flex: 1; min-height: 0; }
+.thread-msgs { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; }
+.msg-bubble { max-width: 78%; padding: 9px 13px; font-size: 13px; line-height: 1.4; word-break: break-word; }
+.msg-bubble.out { background: linear-gradient(135deg, #7c5af6, #5a7ff6); color: #fff; border-radius: 16px 16px 4px 16px; align-self: flex-end; }
+.msg-bubble.in { background: var(--bg4); color: var(--text2); border-radius: 16px 16px 16px 4px; align-self: flex-start; border: 1px solid var(--border); }
+.msg-receipt { font-size: 10px; color: rgba(255,255,255,0.5); align-self: flex-end; display: flex; align-items: center; gap: 3px; margin-top: -2px; margin-bottom: 2px; }
+.chat-compose { padding: 8px 10px; border-top: 1px solid var(--border); background: var(--bg3); display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.chat-compose-input { flex: 1; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-full); color: var(--text1); font-size: 14px; padding: 9px 14px; outline: none; }
+.chat-compose-input::placeholder { color: var(--text4); }
+.chat-compose-input:focus { border-color: rgba(124,90,246,0.5); }
+.chat-send-btn { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #7c5af6, #5a7ff6); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: opacity .15s; }
+.chat-send-btn:hover { opacity: .85; }
+
+/* ═══════════════════════════════════════
+   NOTIFICATIONS SCREEN
+═══════════════════════════════════════ */
+.notif-scroll { overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; padding-bottom: 90px; }
+.notif-bar { display: flex; align-items: center; gap: 8px; padding: 12px 14px; }
+.back-icon-btn { width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,0.06); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; color: var(--text2); flex-shrink: 0; }
+.back-icon-btn:hover { background: rgba(255,255,255,0.10); }
+.notif-item {
+  background: rgba(11,18,40,0.85); border: 1px solid var(--border);
+  border-radius: 14px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px;
+  transition: border-color .15s;
+}
+.notif-item.unread { border-color: rgba(141,99,255,0.35); box-shadow: 0 0 0 1px rgba(141,99,255,0.08); }
+.notif-icon-wrap { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.notif-title-text { font-size: 13px; font-weight: 600; color: var(--text1); }
+.notif-body-text { font-size: 12px; color: var(--text2); margin-top: 3px; line-height: 1.4; }
+.notif-time-text { font-size: 10px; color: var(--text3); margin-top: 4px; }
+.unread-pip { width: 7px; height: 7px; border-radius: 50%; background: var(--purple); flex-shrink: 0; margin-top: 4px; }
+
+/* ═══════════════════════════════════════
+   ADMIN SHELL
+═══════════════════════════════════════ */
+.admin-shell {
+  width: 100%; height: 100%;
+  background: radial-gradient(ellipse at top left, #0f1840 0%, #070a18 45%, #050814 100%);
+  display: grid;
+  overflow: hidden;
+}
+@media (min-width: 900px) { .admin-shell { grid-template-columns: 240px 1fr; } }
+
+/* Admin sidebar */
+.admin-sidebar {
+  background: rgba(8,13,28,0.95); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: 18px 12px; gap: 2px;
+  overflow-y: auto;
+}
+@media (max-width: 899px) { .admin-sidebar { display: none; } }
+.admin-sidebar-top { padding: 4px 8px 16px; }
+.sidebar-eyebrow { font-size: 9px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; color: var(--text4); margin-bottom: 12px; }
+.sidebar-logo { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+.sidebar-profile { display: flex; align-items: center; gap: 9px; }
+.sidebar-av { width: 36px; height: 36px; border-radius: 50%; background: var(--bg5); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.sidebar-name { font-size: 13px; font-weight: 600; color: var(--text1); }
+.sidebar-role { font-size: 11px; color: var(--text3); }
+.s-nav-item {
+  display: flex; align-items: center; gap: 9px; padding: 9px 10px;
+  border-radius: var(--radius-md); border: 1px solid transparent;
+  font-size: 13px; font-weight: 500; color: var(--text3); width: 100%;
+  text-align: left; transition: all .15s;
+}
+.s-nav-item:hover { background: rgba(255,255,255,0.04); color: var(--text2); }
+.s-nav-item.active { background: rgba(141,99,255,0.1); border-color: rgba(141,99,255,0.4); color: var(--text1); box-shadow: 0 4px 16px -8px rgba(124,90,246,0.4); }
+.s-nav-badge { margin-left: auto; background: var(--purple); color: #fff; font-size: 9px; font-weight: 700; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--radius-full); display: flex; align-items: center; justify-content: center; }
+.s-nav-badge.red { background: var(--red); }
+.s-signout { margin-top: auto; display: flex; align-items: center; gap: 8px; color: var(--text4); font-size: 12px; padding: 8px 10px; width: 100%; text-align: left; transition: color .15s; }
+.s-signout:hover { color: var(--text2); }
+
+/* Admin main */
+.admin-main { overflow: hidden; display: flex; flex-direction: column; }
+.admin-header { background: rgba(11,18,40,0.9); border-bottom: 1px solid var(--border); backdrop-filter: blur(12px); padding: 14px 20px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.admin-title { font-size: 18px; font-weight: 700; color: var(--text1); letter-spacing: -0.02em; }
+.admin-sub { font-size: 12px; color: var(--text3); margin-top: 1px; }
+.admin-tabs { display: flex; gap: 1px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 0 16px; flex-shrink: 0; }
+.admin-tab { padding: 12px 14px; font-size: 12px; font-weight: 600; color: var(--text3); border-bottom: 2px solid transparent; white-space: nowrap; transition: all .15s; display: flex; align-items: center; gap: 5px; }
+.admin-tab:hover { color: var(--text2); }
+.admin-tab.active { color: var(--purple); border-bottom-color: var(--purple); }
+.tab-badge { background: rgba(141,99,255,0.2); color: var(--purple); font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 5px; }
+.tab-badge.red { background: rgba(255,59,92,0.15); color: var(--red); }
+.admin-content { flex: 1; overflow-y: auto; padding: 20px; }
+
+/* Stats grid */
+.stats-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 18px; }
+@media (max-width: 600px) { .stats-grid { grid-template-columns: repeat(2,1fr); } }
+.stat-tile { background: rgba(11,18,40,0.9); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px; display: flex; align-items: center; gap: 10px; }
+.stat-icon { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.stat-val { font-size: 22px; font-weight: 700; color: var(--text1); line-height: 1; }
+.stat-lbl { font-size: 11px; color: var(--text3); margin-top: 2px; }
+
+/* Quick actions */
+.quick-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 18px; }
+@media (max-width: 600px) { .quick-row { grid-template-columns: 1fr 1fr; } }
+.quick-tile { background: rgba(11,18,40,0.9); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px; display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; color: var(--text2); transition: all .15s; }
+.quick-tile:hover { border-color: rgba(141,99,255,0.3); color: var(--text1); background: rgba(141,99,255,0.06); }
+.quick-tile svg { color: var(--purple); }
+
+/* Inbox split */
+.inbox-grid { display: grid; grid-template-columns: 260px 1fr; height: 100%; gap: 0; border-radius: 16px; overflow: hidden; border: 1px solid var(--border); background: rgba(11,18,40,0.9); }
+@media (max-width: 700px) { .inbox-grid { grid-template-columns: 1fr; } .inbox-thread-panel { display: none; } }
+.convo-list { border-right: 1px solid var(--border); overflow-y: auto; }
+.convo-row { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .15s; }
+.convo-row:hover { background: rgba(255,255,255,0.03); }
+.convo-row.active { background: rgba(141,99,255,0.07); }
+.convo-av { width: 36px; height: 36px; background: var(--bg4); border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; position: relative; }
+.convo-unread { position: absolute; top: -4px; right: -4px; background: var(--red); color: #fff; font-size: 8px; font-weight: 700; width: 14px; height: 14px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #050814; }
+.convo-name { font-size: 13px; font-weight: 600; color: var(--text1); }
+.convo-preview { font-size: 11px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+.convo-time { font-size: 10px; color: var(--text4); margin-top: 1px; }
+.inbox-thread-panel { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.thread-top { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.thread-msgs-area { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.t-bubble { max-width: 72%; padding: 9px 13px; font-size: 13px; line-height: 1.4; }
+.t-bubble.out { background: linear-gradient(135deg,#7c5af6,#5a7ff6); color:#fff; border-radius:16px 16px 4px 16px; align-self:flex-end; }
+.t-bubble.in { background:var(--bg4); color:var(--text2); border-radius:16px 16px 16px 4px; align-self:flex-start; border:1px solid var(--border); }
+.t-receipt { font-size:10px; color:rgba(255,255,255,0.5); align-self:flex-end; display:flex; align-items:center; gap:3px; margin-top:-3px; }
+.thread-compose { padding:10px 14px; border-top:1px solid var(--border); display:flex; align-items:center; gap:8px; flex-shrink:0; }
+.thread-input { flex:1; background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius-full); color:var(--text1); font-size:13px; padding:9px 14px; outline:none; }
+.thread-input::placeholder { color:var(--text4); }
+.thread-input:focus { border-color:rgba(124,90,246,0.4); }
+.reply-btn { background:linear-gradient(135deg,#7c5af6,#5a7ff6); border-radius:10px; padding:9px 16px; color:#fff; font-size:13px; font-weight:600; display:flex; align-items:center; gap:5px; white-space:nowrap; }
+
+/* Users panel */
+.user-panel-tabs { display:flex; gap:2px; background:var(--bg3); border-radius:10px; padding:3px; margin-bottom:14px; }
+.upt { flex:1; padding:7px; border-radius:8px; font-size:11px; font-weight:600; color:var(--text3); transition:all .15s; }
+.upt.active { background:rgba(141,99,255,0.15); color:var(--purple); }
+.user-row { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--border); background:rgba(11,18,40,0.85); }
+.user-row:last-child { border-bottom:none; border-radius:0 0 16px 16px; }
+.user-row-av { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; flex-shrink:0; }
+.user-row-name { font-size:13px; font-weight:600; color:var(--text1); }
+.user-row-meta { font-size:11px; color:var(--text3); }
+.pill-approve { background:rgba(47,209,127,0.12); border:1px solid rgba(47,209,127,0.25); color:var(--green); border-radius:8px; padding:5px 11px; font-size:11px; font-weight:600; transition:opacity .15s; }
+.pill-approve:hover { opacity:.8; }
+.pill-reject { background:rgba(255,59,92,0.10); border:1px solid rgba(255,59,92,0.2); color:var(--red); border-radius:8px; padding:5px 11px; font-size:11px; font-weight:600; }
+.pill-suspend { background:rgba(246,179,50,0.08); border:1px solid rgba(246,179,50,0.2); color:var(--amber); border-radius:8px; padding:5px 11px; font-size:11px; font-weight:600; }
+.panel-box { background:rgba(11,18,40,0.9); border:1px solid var(--border); border-radius:16px; overflow:hidden; }
+.panel-box-header { padding:10px 14px; border-bottom:1px solid var(--border); }
+.panel-eyebrow { font-size:10px; font-weight:700; letter-spacing:0.16em; text-transform:uppercase; color:var(--text3); }
+
+/* Post tab */
+.compose-area { background:rgba(11,18,40,0.9); border:1px solid var(--border); border-radius:16px; padding:16px; margin-bottom:16px; }
+.compose-input { width:100%; background:var(--bg3); border:1px solid var(--border); border-radius:12px; color:var(--text1); font-size:14px; padding:12px 14px; outline:none; resize:none; font-family:inherit; transition:border-color .2s; min-height:80px; }
+.compose-input:focus { border-color:rgba(124,90,246,0.4); }
+.compose-input::placeholder { color:var(--text4); }
+.compose-footer { display:flex; align-items:center; justify-content:space-between; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+.compose-icon-btn { display:flex; align-items:center; gap:5px; color:var(--text3); font-size:12px; font-weight:500; padding:6px 8px; border-radius:8px; transition:all .15s; }
+.compose-icon-btn:hover { background:rgba(255,255,255,0.06); color:var(--purple); }
+.publish-btn { background:linear-gradient(135deg,#7c5af6,#5a7ff6); border-radius:10px; padding:9px 18px; color:#fff; font-size:13px; font-weight:600; box-shadow:0 4px 14px -6px rgba(124,90,246,0.5); transition:opacity .15s; }
+.publish-btn:hover { opacity:.9; }
+.ann-item { padding:14px; border-bottom:1px solid var(--border); }
+.ann-item:last-child { border-bottom:none; }
+.ann-item-title { font-size:13px; font-weight:600; color:var(--text1); margin-bottom:3px; }
+.ann-item-body { font-size:12px; color:var(--text2); line-height:1.45; }
+.ann-meta-row { display:flex; align-items:center; gap:12px; margin-top:8px; }
+.ann-meta-stat { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--text3); }
+
+/* Mobile admin nav */
+.admin-mobile-nav { position:fixed; bottom:0; left:0; right:0; z-index:40; background:rgba(9,14,32,0.97); border-top:1px solid var(--border); display:none; }
+@media (max-width:899px) { .admin-mobile-nav { display:flex; } }
+.amn-item { flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; padding:7px 4px; font-size:10px; font-weight:600; color:var(--text3); position:relative; }
+.amn-item.active { color:var(--purple); }
+.amn-item svg { width:21px; height:21px; }
+.amn-badge { position:absolute; top:5px; right:calc(50% - 20px); background:var(--red); color:#fff; font-size:8px; font-weight:700; width:14px; height:14px; border-radius:50%; display:flex; align-items:center; justify-content:center; border:2px solid #090e20; }
+
+/* ═══════════════════════════════════════
+   PROFILE / SETTINGS
+═══════════════════════════════════════ */
+.profile-wrap { max-width:400px; margin:0 auto; padding:16px 14px 90px; overflow-y:auto; height:100%; }
+.prof-av-lg { width:76px; height:76px; border-radius:50%; background:#d23a34; color:#fff; font-size:28px; font-weight:700; display:flex; align-items:center; justify-content:center; border:2px solid var(--border-md); }
+.prof-name-lg { font-size:1.9rem; font-weight:700; letter-spacing:-0.025em; color:var(--text1); }
+.approved-pill { display:inline-flex; align-items:center; gap:6px; background:rgba(47,209,127,0.1); border:1px solid rgba(47,209,127,0.2); border-radius:var(--radius-full); padding:4px 12px; font-size:11px; font-weight:600; color:var(--green); }
+.prof-section { background:rgba(11,18,40,0.9); border:1px solid var(--border); border-radius:18px; padding:16px; margin-top:14px; }
+.prof-section-label { font-size:10px; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--text3); margin-bottom:12px; }
+.prof-detail-row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }
+.prof-detail-row:last-child { border-bottom:none; }
+.prof-key { color:var(--text3); }
+.prof-val { font-weight:600; color:var(--text1); }
+
+/* ═══════════════════════════════════════
+   SHARED UTILS
+═══════════════════════════════════════ */
+.empty { padding:40px 20px; text-align:center; color:var(--text3); font-size:13px; }
+.chip-row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px; }
+.chip { padding:6px 14px; border-radius:var(--radius-full); border:1px solid var(--border-md); font-size:12px; font-weight:500; color:var(--text3); transition:all .15s; cursor:pointer; }
+.chip.active { background:rgba(141,99,255,0.15); border-color:var(--purple); color:var(--purple); }
+.form-group { margin-bottom:14px; }
+.form-label { display:block; font-size:10px; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--text3); margin-bottom:6px; }
+.form-field { width:100%; background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius-md); color:var(--text1); font-size:13px; padding:10px 13px; outline:none; font-family:inherit; transition:border-color .2s; }
+.form-field:focus { border-color:rgba(124,90,246,0.4); }
+.form-field::placeholder { color:var(--text4); }
+textarea.form-field { resize:none; min-height:80px; }
+
+/* Toaster */
+.toast { position:fixed; bottom:80px; left:50%; transform:translateX(-50%) translateY(20px); background:rgba(20,30,60,0.98); border:1px solid var(--border-md); border-radius:12px; padding:11px 20px; font-size:13px; color:var(--text1); box-shadow:var(--shadow-card); z-index:100; opacity:0; transition:all .3s; white-space:nowrap; }
+.toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+@media (min-width:900px) { .toast { bottom:24px; } }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ AUTH: LOGIN ═══════════════ -->
+<div class="screen active" id="screen-login">
+  <div class="auth-wrap">
+    <div class="auth-glow"></div>
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logomark">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round">
+            <path d="M3 8C4.6 6.5 6.2 6.5 7.8 8C9.4 9.5 11 9.5 12.6 8C14.2 6.5 15.8 6.5 17.4 8C19 9.5 20.6 9.5 22 8"/>
+            <path d="M3 13C4.6 11.5 6.2 11.5 7.8 13C9.4 14.5 11 14.5 12.6 13C14.2 11.5 15.8 11.5 17.4 13C19 14.5 20.6 14.5 22 13" opacity=".92"/>
+            <path d="M3 18C4.6 16.5 6.2 16.5 7.8 18C9.4 19.5 11 19.5 12.6 18C14.2 16.5 15.8 16.5 17.4 18C19 19.5 20.6 19.5 22 18" opacity=".85"/>
+          </svg>
+        </div>
+        <span class="auth-logoword">Relay</span>
+      </div>
+      <p class="auth-tagline">Private messaging, beautifully simple.</p>
+      <div class="pending-badge"><span class="pending-dot"></span>Access requires staff approval</div>
+      <div class="auth-tabs">
+        <div class="auth-tab active">Sign In</div>
+        <div class="auth-tab" onclick="goto('screen-signup')">Create Account</div>
+      </div>
+      <div class="field">
+        <label class="field-label">Email</label>
+        <input class="field-input" type="email" placeholder="you@email.com" value="jane@example.com" />
+      </div>
+      <div class="field">
+        <label class="field-label">Password</label>
+        <input class="field-input" type="password" placeholder="••••••••" value="password123" />
+      </div>
+      <div style="text-align:right;margin-bottom:16px">
+        <button style="font-size:12px;color:var(--purple);font-weight:500">Forgot password?</button>
+      </div>
+      <!-- Two demo paths -->
+      <button class="btn-primary" onclick="goto('screen-feed')" style="margin-bottom:8px">Sign In as Customer</button>
+      <button class="btn-primary" onclick="goto('screen-admin')" style="background:linear-gradient(135deg,#1a2550,#0f1840);border:1px solid var(--border-md);box-shadow:none">Sign In as Admin / Staff</button>
+      <div class="auth-link">Don't have an account? <a onclick="goto('screen-signup')">Create one</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ AUTH: SIGNUP ═══════════════ -->
+<div class="screen" id="screen-signup">
+  <div class="auth-wrap">
+    <div class="auth-glow"></div>
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logomark">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round">
+            <path d="M3 8C4.6 6.5 6.2 6.5 7.8 8C9.4 9.5 11 9.5 12.6 8C14.2 6.5 15.8 6.5 17.4 8C19 9.5 20.6 9.5 22 8"/>
+            <path d="M3 13C4.6 11.5 6.2 11.5 7.8 13C9.4 14.5 11 14.5 12.6 13C14.2 11.5 15.8 11.5 17.4 13C19 14.5 20.6 14.5 22 13" opacity=".92"/>
+            <path d="M3 18C4.6 16.5 6.2 16.5 7.8 18C9.4 19.5 11 19.5 12.6 18C14.2 16.5 15.8 16.5 17.4 18C19 19.5 20.6 19.5 22 18" opacity=".85"/>
+          </svg>
+        </div>
+        <span class="auth-logoword">Relay</span>
+      </div>
+      <p class="auth-tagline">Private messaging, beautifully simple.</p>
+      <div class="auth-tabs">
+        <div class="auth-tab" onclick="goto('screen-login')">Sign In</div>
+        <div class="auth-tab active">Create Account</div>
+      </div>
+
+      <!-- Step 1 -->
+      <div id="su-step1">
+        <div class="step-dots">
+          <div class="step-dot active"></div>
+          <div class="step-dot future"></div>
+          <div class="step-dot future"></div>
+        </div>
+        <p style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:4px">Your details</p>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:16px">Fill in your personal information to get started.</p>
+        <div class="field-row">
+          <div class="field"><label class="field-label">First name</label><input class="field-input" placeholder="Jane" /></div>
+          <div class="field"><label class="field-label">Last name</label><input class="field-input" placeholder="Doe" /></div>
+        </div>
+        <div class="field"><label class="field-label">Username</label><input class="field-input" placeholder="@janedoe" /></div>
+        <div class="field"><label class="field-label">Email</label><input class="field-input" type="email" placeholder="jane@example.com" /></div>
+        <div class="field">
+          <label class="field-label">Password</label>
+          <input class="field-input" type="password" placeholder="Min. 8 characters" id="su-pw" oninput="updatePwStrength(this.value)" />
+          <div class="pw-strength" id="pw-bars">
+            <div class="pw-bar" id="pb1"></div><div class="pw-bar" id="pb2"></div>
+            <div class="pw-bar" id="pb3"></div><div class="pw-bar" id="pb4"></div>
+          </div>
+        </div>
+        <button class="btn-primary" onclick="suGo(2)">Continue</button>
+        <div class="auth-link">Already have an account? <a onclick="goto('screen-login')">Sign in</a></div>
+      </div>
+
+      <!-- Step 2: Role -->
+      <div id="su-step2" style="display:none">
+        <div class="step-dots">
+          <div class="step-dot done"></div>
+          <div class="step-dot active"></div>
+          <div class="step-dot future"></div>
+        </div>
+        <button onclick="suGo(1)" style="display:flex;align-items:center;gap:4px;color:var(--purple);font-size:12px;font-weight:500;margin-bottom:14px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          Back
+        </button>
+        <p style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:4px">How will you use Relay?</p>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:16px">Choose your account type.</p>
+        <div class="role-grid">
+          <div class="role-card selected" onclick="selectRole(this)">
+            <div class="role-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+            <div class="role-card-title">Customer</div>
+            <div class="role-card-desc">Browse announcements, message businesses</div>
+          </div>
+          <div class="role-card" onclick="selectRole(this)">
+            <div class="role-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg></div>
+            <div class="role-card-title">Business</div>
+            <div class="role-card-desc">Post announcements, manage customer support</div>
+          </div>
+        </div>
+        <button class="btn-primary" onclick="suGo(3)">Continue</button>
+      </div>
+
+      <!-- Step 3: Success -->
+      <div id="su-step3" style="display:none">
+        <div class="step-dots">
+          <div class="step-dot done"></div>
+          <div class="step-dot done"></div>
+          <div class="step-dot active"></div>
+        </div>
+        <div class="success-icon">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <p style="font-size:18px;font-weight:700;color:var(--text1);text-align:center;margin-bottom:6px">Request submitted!</p>
+        <p style="font-size:13px;color:var(--text3);text-align:center;margin-bottom:20px;line-height:1.5">Your account is waiting for approval from the team. Sign in once approved.</p>
+        <button class="btn-primary" onclick="goto('screen-login')">Go to sign in</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ CUSTOMER FEED ═══════════════ -->
+<div class="screen" id="screen-feed">
+  <div class="app-shell">
+    <!-- Top nav -->
+    <div class="top-nav">
+      <div class="top-nav-inner">
+        <div class="top-nav-row">
+          <div class="nav-logo">
+            <div class="nav-logomark">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round">
+                <path d="M3 8C4.6 6.5 6.2 6.5 7.8 8C9.4 9.5 11 9.5 12.6 8C14.2 6.5 15.8 6.5 17.4 8C19 9.5 20.6 9.5 22 8"/>
+                <path d="M3 13C4.6 11.5 6.2 11.5 7.8 13C9.4 14.5 11 14.5 12.6 13C14.2 11.5 15.8 11.5 17.4 13C19 14.5 20.6 14.5 22 13" opacity=".92"/>
+                <path d="M3 18C4.6 16.5 6.2 16.5 7.8 18C9.4 19.5 11 19.5 12.6 18C14.2 16.5 15.8 16.5 17.4 18C19 19.5 20.6 19.5 22 18" opacity=".85"/>
+              </svg>
+            </div>
+            <span class="nav-logoword">Relay</span>
+          </div>
+          <div class="nav-spacer"></div>
+          <button class="nav-icon-btn" onclick="goto('screen-notifications')">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            <span class="nav-badge">4</span>
+          </button>
+          <div class="user-av-sm" style="background:#d23a34;" onclick="goto('screen-profile')">
+            JD
+            <div class="user-online"></div>
+          </div>
+        </div>
+        <div class="greeting-banner">
+          <div class="greeting-glow-inner"></div>
+          <div class="greeting-eyebrow">Start the day with the latest from your team.</div>
+          <div class="greeting-main">Good morning, Jane ☀️</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Feed body -->
+    <div class="feed-body" style="overflow:hidden;">
+      <!-- Desktop left rail -->
+      <div class="feed-rail">
+        <div class="rail-card">
+          <div class="rail-item">
+            <div class="rail-av" style="background:#d23a34;">JD</div>
+            Jane Doe
+          </div>
+          <div class="rail-item active">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+            Home
+          </div>
+          <div class="rail-item" onclick="goto('screen-notifications')">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            Notifications
+          </div>
+        </div>
+      </div>
+
+      <!-- Center feed -->
+      <div class="feed-scroll">
+        <!-- Post 1 -->
+        <article class="post-card">
+          <div class="post-card-body">
+            <div class="post-header">
+              <div class="biz-av" style="background:var(--purple);">AC</div>
+              <div>
+                <div class="biz-name">Acme Corp</div>
+                <div class="biz-meta">
+                  <span>2h ago</span><span>·</span>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+                  acmecorp
+                </div>
+              </div>
+            </div>
+            <div class="post-title">New messaging features rolling out this week</div>
+            <div class="post-body-text">We've improved the messaging experience for all customers. Messages now support read receipts, image attachments, and real-time delivery. Tap the chat button below to try it out.</div>
+          </div>
+          <div class="like-row">
+            <div class="like-pip"><svg width="10" height="10" viewBox="0 0 24 24" fill="white" stroke="none"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/></svg></div>
+            <span>14 people liked this</span>
+          </div>
+          <div class="action-bar">
+            <button class="act-btn liked" onclick="toggleLike(this)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="var(--purple)" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+              Like
+            </button>
+            <button class="act-btn" onclick="toggleComments(this)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              Comment
+            </button>
+          </div>
+          <div class="comments-area" style="display:none">
+            <div class="comment">
+              <div class="comment-av">SR</div>
+              <div>
+                <div class="comment-bubble"><span class="comment-name">Sarah R.</span> This is great! The read receipts are so useful for knowing when support has seen my message.</div>
+                <div class="comment-meta">1h ago · <span style="color:var(--purple);font-weight:600;cursor:pointer">Reply</span></div>
+              </div>
+            </div>
+            <div class="comment-input-wrap">
+              <input class="comment-input" placeholder="Write a comment…" onkeydown="if(event.key==='Enter')addComment(this)" />
+              <button class="send-btn-sm"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+            </div>
+          </div>
+        </article>
+
+        <!-- Post 2 -->
+        <article class="post-card">
+          <div class="post-card-body">
+            <div class="post-header">
+              <div class="biz-av" style="background:#5a7ff6;">HT</div>
+              <div>
+                <div class="biz-name">HT Corp</div>
+                <div class="biz-meta"><span>1d ago</span><span>·</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg><span>htcorp</span></div>
+              </div>
+            </div>
+            <div class="post-title">Scheduled maintenance — Saturday 2–4 AM EST</div>
+            <div class="post-body-text">We'll have planned downtime for infrastructure upgrades this Saturday. Messaging and announcements will be temporarily unavailable. We'll notify you once the maintenance window is complete.</div>
+          </div>
+          <div class="action-bar">
+            <button class="act-btn" onclick="toggleLike(this)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+              Like
+            </button>
+            <button class="act-btn" onclick="toggleComments(this)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              Comment
+            </button>
+          </div>
+          <div class="comments-area" style="display:none">
+            <div class="comment-input-wrap">
+              <input class="comment-input" placeholder="Write a comment…" onkeydown="if(event.key==='Enter')addComment(this)" />
+              <button class="send-btn-sm"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <!-- Desktop right aside -->
+      <div class="feed-aside">
+        <div class="aside-card">
+          <div class="aside-label">Quick tip</div>
+          <p style="font-size:13px;color:var(--text2);line-height:1.5">Tap the <strong style="color:var(--purple)">chat</strong> button to open Messages. Pick a business and send text or photos — just like Messenger.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom nav (mobile) -->
+    <nav class="bottom-nav">
+      <div class="bn-item active">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        Feed
+      </div>
+      <div class="bn-item" onclick="goto('screen-notifications')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <div class="bn-dot"></div>
+        Alerts
+      </div>
+      <div class="bn-item" onclick="toggleChatWin()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Chat
+      </div>
+      <div class="bn-item" onclick="goto('screen-profile')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        Profile
+      </div>
+    </nav>
+  </div>
+
+  <!-- Messenger FAB -->
+  <div class="fab-wrap" id="fab-wrap">
+    <div class="new-msg-pill" id="new-msg-pill">New team message</div>
+    <button class="fab-btn" onclick="toggleChatWin()" id="fab-btn" aria-label="Open messages">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span class="fab-unread">2</span>
+    </button>
+  </div>
+
+  <!-- Chat window -->
+  <div class="chat-win" id="chat-win" style="display:none">
+    <!-- List view -->
+    <div id="cw-list" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <div class="chat-win-header">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <div style="flex:1"><div class="chat-win-title">Messages</div><div class="chat-win-sub">Your organization · live</div></div>
+        <button class="chat-win-close" onclick="toggleChatWin()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="chat-list-view" style="flex:1;overflow-y:auto">
+        <div class="chat-biz-row" onclick="openChatThread('acme')">
+          <div class="chat-biz-av" style="background:var(--purple)">AC<div class="chat-biz-badge">2</div></div>
+          <div style="flex:1;min-width:0"><div class="chat-biz-name">Acme Corp</div><div class="chat-biz-preview">You: Thanks for reaching out!</div></div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="chat-biz-row" onclick="openChatThread('ht')">
+          <div class="chat-biz-av" style="background:#5a7ff6">HT</div>
+          <div style="flex:1;min-width:0"><div class="chat-biz-name">HT Corp</div><div class="chat-biz-preview">Tap to start messaging</div></div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+      </div>
+    </div>
+    <!-- Thread view -->
+    <div id="cw-thread" class="chat-thread-view">
+      <div class="chat-win-header">
+        <button class="chat-win-header bk" onclick="backToChatList()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+        <div class="chat-win-hav" id="cw-thread-av">AC</div>
+        <div style="flex:1"><div class="chat-win-title" id="cw-thread-name">Acme Corp</div><div class="chat-win-sub">Active now · Customer support</div></div>
+        <button class="chat-win-close" onclick="toggleChatWin()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="thread-msgs" id="cw-msgs"></div>
+      <div class="chat-compose">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        <input class="chat-compose-input" id="cw-input" placeholder="Aa" onkeydown="if(event.key==='Enter')sendChatMsg()" />
+        <button class="chat-send-btn" onclick="sendChatMsg()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ NOTIFICATIONS ═══════════════ -->
+<div class="screen" id="screen-notifications">
+  <div class="app-shell">
+    <div class="top-nav">
+      <div class="top-nav-inner">
+        <div class="top-nav-row">
+          <button class="back-icon-btn" onclick="goBack()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span style="font-size:15px;font-weight:700;color:var(--text1)">Notifications</span>
+          <span style="font-size:12px;color:var(--text3)">4 unread</span>
+          <button style="margin-left:auto;color:var(--purple);font-size:12px;font-weight:500" onclick="showToast('All marked as read')">Mark all read</button>
+        </div>
+      </div>
+    </div>
+    <div class="notif-scroll">
+      <div class="notif-item unread">
+        <div class="notif-icon-wrap" style="background:rgba(141,99,255,0.12)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px"><div class="notif-title-text">New reply from the team</div><div class="unread-pip"></div></div>
+          <div class="notif-body-text">Hi Jane! I'd be happy to help. Could you describe what's happening when you sign in?</div>
+          <div class="notif-time-text">5m ago</div>
+        </div>
+      </div>
+      <div class="notif-item unread">
+        <div class="notif-icon-wrap" style="background:rgba(141,99,255,0.12)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17H2a3 3 0 0 0 3-3V9a7 7 0 0 1 14 0v5a3 3 0 0 0 3 3zm-8.27 4a2 2 0 0 1-3.46 0"/></svg></div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px"><div class="notif-title-text">New post: New messaging features</div><div class="unread-pip"></div></div>
+          <div class="notif-body-text">We've improved the messaging experience. Messages now support read receipts and image attachments.</div>
+          <div class="notif-time-text">2h ago</div>
+        </div>
+      </div>
+      <div class="notif-item unread">
+        <div class="notif-icon-wrap" style="background:rgba(47,209,127,0.1)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px"><div class="notif-title-text">Account approved</div><div class="unread-pip"></div></div>
+          <div class="notif-body-text">Your account has been approved by the team. Welcome to Relay!</div>
+          <div class="notif-time-text">2d ago</div>
+        </div>
+      </div>
+      <div class="notif-item">
+        <div class="notif-icon-wrap" style="background:rgba(255,255,255,0.04)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17H2a3 3 0 0 0 3-3V9a7 7 0 0 1 14 0v5a3 3 0 0 0 3 3zm-8.27 4a2 2 0 0 1-3.46 0"/></svg></div>
+        <div style="flex:1;min-width:0">
+          <div class="notif-title-text">Scheduled maintenance Saturday</div>
+          <div class="notif-body-text">Planned downtime 2–4 AM EST. Messages temporarily unavailable.</div>
+          <div class="notif-time-text">3d ago</div>
+        </div>
+      </div>
+    </div>
+    <nav class="bottom-nav">
+      <div class="bn-item" onclick="goto('screen-feed')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        Feed
+      </div>
+      <div class="bn-item active">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        Alerts
+      </div>
+      <div class="bn-item" onclick="goto('screen-feed');setTimeout(toggleChatWin,200)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Chat
+      </div>
+      <div class="bn-item" onclick="goto('screen-profile')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        Profile
+      </div>
+    </nav>
+  </div>
+</div>
+
+<!-- ═══════════════ PROFILE ═══════════════ -->
+<div class="screen" id="screen-profile">
+  <div class="app-shell">
+    <div class="top-nav">
+      <div class="top-nav-inner">
+        <div class="top-nav-row">
+          <button class="back-icon-btn" onclick="goBack()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+          <span style="font-size:18px;font-weight:700;color:var(--text1);letter-spacing:-0.02em">Profile</span>
+        </div>
+      </div>
+    </div>
+    <div class="profile-wrap">
+      <div style="display:flex;align-items:center;gap:14px;margin-top:4px">
+        <div class="prof-av-lg">JD</div>
+        <div>
+          <div class="prof-name-lg">Jane Doe</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:3px"><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="1f757e717a5f7a677e726f737a317c7072">[email&#160;protected]</a></div>
+          <div class="approved-pill" style="margin-top:6px"><span style="width:6px;height:6px;border-radius:50%;background:var(--green)"></span>Approved</div>
+        </div>
+      </div>
+      <div class="prof-section">
+        <div class="prof-section-label">Account</div>
+        <div class="prof-detail-row"><span class="prof-key">Member since</span><span class="prof-val">Jan 15, 2025</span></div>
+        <div class="prof-detail-row"><span class="prof-key">Status</span><span class="prof-val">Approved</span></div>
+        <div class="prof-detail-row"><span class="prof-key">Role</span><span class="prof-val">Customer</span></div>
+        <div class="prof-detail-row"><span class="prof-key">Username</span><span class="prof-val">@janedoe</span></div>
+      </div>
+      <button style="width:100%;margin-top:14px;padding:12px;border-radius:12px;background:rgba(255,59,92,0.08);border:1px solid rgba(255,59,92,0.2);color:var(--red);font-size:13px;font-weight:600" onclick="goto('screen-login')">Sign Out</button>
+    </div>
+    <nav class="bottom-nav">
+      <div class="bn-item" onclick="goto('screen-feed')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>Feed</div>
+      <div class="bn-item" onclick="goto('screen-notifications')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Alerts</div>
+      <div class="bn-item" onclick="goto('screen-feed');setTimeout(toggleChatWin,200)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat</div>
+      <div class="bn-item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Profile</div>
+    </nav>
+  </div>
+</div>
+
+<!-- ═══════════════ ADMIN DASHBOARD ═══════════════ -->
+<div class="screen" id="screen-admin">
+  <div class="admin-shell">
+    <!-- Sidebar -->
+    <aside class="admin-sidebar">
+      <div class="admin-sidebar-top">
+        <div class="sidebar-eyebrow">Staff Portal</div>
+        <div class="sidebar-logo">
+          <div class="nav-logomark" style="width:30px;height:30px;border-radius:8px">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round"><path d="M3 8C4.6 6.5 6.2 6.5 7.8 8C9.4 9.5 11 9.5 12.6 8C14.2 6.5 15.8 6.5 17.4 8C19 9.5 20.6 9.5 22 8"/><path d="M3 13C4.6 11.5 6.2 11.5 7.8 13C9.4 14.5 11 14.5 12.6 13C14.2 11.5 15.8 11.5 17.4 13C19 14.5 20.6 14.5 22 13" opacity=".92"/><path d="M3 18C4.6 16.5 6.2 16.5 7.8 18C9.4 19.5 11 19.5 12.6 18C14.2 16.5 15.8 16.5 17.4 18C19 19.5 20.6 19.5 22 18" opacity=".85"/></svg>
+          </div>
+          <span style="font-size:16px;font-weight:800;letter-spacing:-0.025em">Relay</span>
+        </div>
+        <div class="sidebar-profile">
+          <div class="sidebar-av">AD</div>
+          <div><div class="sidebar-name">Admin User</div><div class="sidebar-role">@admin · Admin</div></div>
+        </div>
+      </div>
+      <button class="s-nav-item active" onclick="adminTab('home',this)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Home</button>
+      <button class="s-nav-item" onclick="adminTab('inbox',this)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Inbox<span class="s-nav-badge">5</span></button>
+      <button class="s-nav-item" onclick="adminTab('post',this)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17H2a3 3 0 0 0 3-3V9a7 7 0 0 1 14 0v5a3 3 0 0 0 3 3zm-8.27 4a2 2 0 0 1-3.46 0"/></svg>Post</button>
+      <button class="s-nav-item" onclick="adminTab('users',this)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Users<span class="s-nav-badge red">3</span></button>
+      <button class="s-nav-item" onclick="adminTab('notify',this)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Notify</button>
+      <button class="s-nav-item" onclick="goto('screen-login')" style="margin-top:auto"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Sign out</button>
+    </aside>
+
+    <!-- Main -->
+    <div class="admin-main">
+      <div class="admin-header">
+        <div style="flex:1">
+          <div class="admin-title" id="admin-title">Dashboard</div>
+          <div class="admin-sub">Relay Staff · Acme Corp</div>
+        </div>
+        <button class="back-icon-btn" title="Notifications"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
+      </div>
+
+      <!-- Tab bar -->
+      <div class="admin-tabs">
+        <button class="admin-tab active" id="atab-home" onclick="adminTab('home',this)">Home</button>
+        <button class="admin-tab" id="atab-inbox" onclick="adminTab('inbox',this)">Inbox <span class="tab-badge">5</span></button>
+        <button class="admin-tab" id="atab-post" onclick="adminTab('post',this)">Post</button>
+        <button class="admin-tab" id="atab-users" onclick="adminTab('users',this)">Users <span class="tab-badge red">3</span></button>
+        <button class="admin-tab" id="atab-notify" onclick="adminTab('notify',this)">Notify</button>
+      </div>
+
+      <!-- Tab content -->
+      <div class="admin-content" id="admin-content">
+        <!-- HOME -->
+        <div id="ac-home">
+          <div class="stats-grid">
+            <div class="stat-tile"><div class="stat-icon" style="background:rgba(246,179,50,0.1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><div><div class="stat-val">3</div><div class="stat-lbl">Pending</div></div></div>
+            <div class="stat-tile"><div class="stat-icon" style="background:rgba(141,99,255,0.1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div><div><div class="stat-val">12</div><div class="stat-lbl">Threads</div></div></div>
+            <div class="stat-tile"><div class="stat-icon" style="background:rgba(255,59,92,0.1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div><div class="stat-val">2</div><div class="stat-lbl">Reports</div></div></div>
+            <div class="stat-tile"><div class="stat-icon" style="background:rgba(47,209,127,0.1)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div><div class="stat-val">38</div><div class="stat-lbl">Members</div></div></div>
+          </div>
+          <div class="quick-row">
+            <button class="quick-tile" onclick="adminTab('users',null)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> Review Queue</button>
+            <button class="quick-tile" onclick="adminTab('inbox',null)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Open Inbox</button>
+            <button class="quick-tile" onclick="adminTab('post',null)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17H2a3 3 0 0 0 3-3V9a7 7 0 0 1 14 0v5a3 3 0 0 0 3 3zm-8.27 4a2 2 0 0 1-3.46 0"/></svg> Post</button>
+          </div>
+          <div class="panel-box">
+            <div class="panel-box-header"><div class="panel-eyebrow">Recent Conversations</div></div>
+            <div class="convo-row" onclick="adminTab('inbox',null)"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="convo-unread">3</span></div><div style="flex:1;min-width:0"><div class="convo-name">Sarah Johnson</div><div class="convo-preview">Hey, I'm having trouble with my account</div><div class="convo-time">5m ago</div></div></div>
+            <div class="convo-row" onclick="adminTab('inbox',null)"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="convo-unread">1</span></div><div style="flex:1;min-width:0"><div class="convo-name">Marcus Rivera</div><div class="convo-preview">Can you help me with billing?</div><div class="convo-time">22m ago</div></div></div>
+            <div class="convo-row" style="border-bottom:none"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div><div style="flex:1;min-width:0"><div class="convo-name">Priya Nair</div><div class="convo-preview">Thanks for the quick response!</div><div class="convo-time">2h ago</div></div></div>
+          </div>
+        </div>
+
+        <!-- INBOX -->
+        <div id="ac-inbox" style="display:none;height:calc(100vh - 180px)">
+          <div class="inbox-grid" style="height:100%">
+            <div class="convo-list">
+              <div style="padding:10px 14px;border-bottom:1px solid var(--border)"><div class="panel-eyebrow">All threads</div></div>
+              <div class="convo-row active" onclick="adminOpenThread('sarah',this)"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="convo-unread">3</span></div><div style="flex:1;min-width:0"><div class="convo-name">Sarah Johnson</div><div class="convo-preview">Hey, I'm having trouble</div><div class="convo-time">5m</div></div></div>
+              <div class="convo-row" onclick="adminOpenThread('marcus',this)"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="convo-unread">1</span></div><div style="flex:1;min-width:0"><div class="convo-name">Marcus Rivera</div><div class="convo-preview">Can you help me update...</div><div class="convo-time">22m</div></div></div>
+              <div class="convo-row" onclick="adminOpenThread('priya',this)"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div><div style="flex:1;min-width:0"><div class="convo-name">Priya Nair</div><div class="convo-preview">Thanks for quick response!</div><div class="convo-time">2h</div></div></div>
+              <div class="convo-row" style="border-bottom:none" onclick="adminOpenThread('tom',this)"><div class="convo-av"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div><div style="flex:1;min-width:0"><div class="convo-name">Tom Chen</div><div class="convo-preview">Got it, trying now.</div><div class="convo-time">5h</div></div></div>
+            </div>
+            <div class="inbox-thread-panel" id="admin-thread-panel">
+              <div class="thread-top">
+                <div style="width:32px;height:32px;border-radius:50%;background:#d23a34;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0" id="at-av">SJ</div>
+                <div><div style="font-size:13px;font-weight:600;color:var(--text1)" id="at-name">Sarah Johnson</div><div style="font-size:11px;color:var(--text3)">@sarahj · Customer</div></div>
+              </div>
+              <div class="thread-msgs-area" id="at-msgs">
+                <div class="t-bubble in">Hey, I'm having trouble logging in since yesterday.</div>
+                <div class="t-bubble out">Hi Sarah! I'd be happy to help. What happens when you try to sign in?</div>
+                <div class="t-receipt"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 8 22 12 18 16"/><polyline points="10 8 14 12 10 16"/><line x1="2" y1="12" x2="14" y2="12"/></svg> Read · 2m ago</div>
+                <div class="t-bubble in">It says "incorrect password" but I haven't changed it.</div>
+                <div class="t-bubble in">I've tried 3 times already 😩</div>
+              </div>
+              <div class="thread-compose">
+                <input class="thread-input" id="at-input" placeholder="Reply to Sarah…" onkeydown="if(event.key==='Enter')adminReply()" />
+                <button class="reply-btn" onclick="adminReply()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Reply</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- POST -->
+        <div id="ac-post" style="display:none">
+          <p style="font-size:13px;color:var(--text3);margin-bottom:16px">Publishes to all approved customers' feeds. They'll be notified in-app.</p>
+          <div class="compose-area">
+            <textarea class="compose-input" id="ac-post-input" placeholder="What's on your mind?"></textarea>
+            <div class="compose-footer">
+              <button class="compose-icon-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Photo</button>
+              <button class="publish-btn" onclick="adminPublish()">Publish to feed &amp; notify customers</button>
+            </div>
+          </div>
+          <div style="font-size:13px;font-weight:600;color:var(--text1);margin-bottom:10px">Your posts</div>
+          <div class="panel-box">
+            <div class="ann-item"><div style="font-size:10px;color:var(--text4);margin-bottom:4px">2h ago</div><div class="ann-item-title">New messaging features rolling out</div><div class="ann-item-body">We've improved the messaging experience — read receipts and photo support are now live.</div><div class="ann-meta-row"><div class="ann-meta-stat"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/></svg>14 likes</div><div class="ann-meta-stat"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>6 comments</div></div></div>
+            <div class="ann-item"><div style="font-size:10px;color:var(--text4);margin-bottom:4px">3d ago</div><div class="ann-item-title">Scheduled maintenance Saturday</div><div class="ann-item-body">Planned downtime 2–4 AM EST for infrastructure upgrades.</div><div class="ann-meta-row"><div class="ann-meta-stat"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/></svg>8 likes</div><div class="ann-meta-stat"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>3 comments</div></div></div>
+          </div>
+        </div>
+
+        <!-- USERS -->
+        <div id="ac-users" style="display:none">
+          <div class="user-panel-tabs">
+            <button class="upt active" onclick="userTab('pending',this)">Pending (3)</button>
+            <button class="upt" onclick="userTab('active',this)">Active (38)</button>
+            <button class="upt" onclick="userTab('suspended',this)">Suspended (1)</button>
+          </div>
+          <div class="panel-box">
+            <div id="ut-pending">
+              <div class="user-row"><div class="user-row-av" style="background:#d23a34">AK</div><div style="flex:1;min-width:0"><div class="user-row-name">Alex Kim</div><div class="user-row-meta">@alexkim · Joined 1h ago</div></div><div style="display:flex;gap:6px"><button class="pill-approve" onclick="approveUser(this)">Approve</button><button class="pill-reject">Reject</button></div></div>
+              <div class="user-row"><div class="user-row-av" style="background:#d23a34">LM</div><div style="flex:1;min-width:0"><div class="user-row-name">Lisa Müller</div><div class="user-row-meta">@lisamuller · Joined 3h ago</div></div><div style="display:flex;gap:6px"><button class="pill-approve" onclick="approveUser(this)">Approve</button><button class="pill-reject">Reject</button></div></div>
+              <div class="user-row"><div class="user-row-av" style="background:#d23a34">RB</div><div style="flex:1;min-width:0"><div class="user-row-name">Raj Bhat</div><div class="user-row-meta">@rajbhat · Joined 5h ago</div></div><div style="display:flex;gap:6px"><button class="pill-approve" onclick="approveUser(this)">Approve</button><button class="pill-reject">Reject</button></div></div>
+            </div>
+            <div id="ut-active" style="display:none">
+              <div class="user-row"><div class="user-row-av" style="background:var(--bg5)">SJ</div><div style="flex:1;min-width:0"><div class="user-row-name">Sarah Johnson</div><div class="user-row-meta">@sarahj · Active member</div></div><button class="pill-suspend">Suspend</button></div>
+              <div class="user-row"><div class="user-row-av" style="background:var(--bg5)">MR</div><div style="flex:1;min-width:0"><div class="user-row-name">Marcus Rivera</div><div class="user-row-meta">@marcusr · Active member</div></div><button class="pill-suspend">Suspend</button></div>
+              <div class="user-row"><div class="user-row-av" style="background:var(--bg5)">PN</div><div style="flex:1;min-width:0"><div class="user-row-name">Priya Nair</div><div class="user-row-meta">@priyan · Active member</div></div><button class="pill-suspend">Suspend</button></div>
+            </div>
+            <div id="ut-suspended" style="display:none">
+              <div class="user-row"><div class="user-row-av" style="background:var(--text4)">DX</div><div style="flex:1;min-width:0"><div class="user-row-name">Dave X</div><div class="user-row-meta">@davex · Suspended 2d ago</div></div><button class="pill-approve">Unsuspend</button></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- NOTIFY -->
+        <div id="ac-notify" style="display:none">
+          <p style="font-size:13px;color:var(--text3);margin-bottom:16px">Send a push notification to your members.</p>
+          <div class="form-group"><div class="form-label">Audience</div><div class="chip-row"><div class="chip active" onclick="setChip(this)">All members</div><div class="chip" onclick="setChip(this)">Selected</div><div class="chip" onclick="setChip(this)">One user</div></div></div>
+          <div class="form-group"><label class="form-label">Title</label><input class="form-field" placeholder="e.g. System update this weekend" id="notify-title-admin" /></div>
+          <div class="form-group"><label class="form-label">Message</label><textarea class="form-field" placeholder="Write your notification…" id="notify-body-admin"></textarea></div>
+          <button class="publish-btn" style="width:100%;padding:12px" onclick="adminSendNotify()">Send notification to all members</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mobile bottom nav -->
+    <nav class="admin-mobile-nav">
+      <div class="amn-item active" onclick="adminTab('home',null)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Home</div>
+      <div class="amn-item" onclick="adminTab('inbox',null)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Inbox<div class="amn-badge">5</div></div>
+      <div class="amn-item" onclick="adminTab('post',null)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17H2a3 3 0 0 0 3-3V9a7 7 0 0 1 14 0v5a3 3 0 0 0 3 3zm-8.27 4a2 2 0 0 1-3.46 0"/></svg>Post</div>
+      <div class="amn-item" onclick="adminTab('users',null)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>Users<div class="amn-badge">3</div></div>
+      <div class="amn-item" onclick="adminTab('notify',null)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Notify</div>
+    </nav>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+/* ─── Navigation ─── */
+let prevScreen = 'screen-login';
+function goto(id) {
+  const cur = document.querySelector('.screen.active');
+  if(cur) { prevScreen = cur.id; cur.classList.remove('active'); }
+  const next = document.getElementById(id);
+  if(next) next.classList.add('active');
+}
+function goBack() { goto(prevScreen); }
+
+/* ─── Auth ─── */
+function suGo(step) {
+  [1,2,3].forEach(n => {
+    const el = document.getElementById('su-step'+n);
+    if(el) el.style.display = n===step ? '' : 'none';
+  });
+}
+function selectRole(el) { document.querySelectorAll('.role-card').forEach(c => c.classList.remove('selected')); el.classList.add('selected'); }
+function updatePwStrength(pw) {
+  let score = 0;
+  if(pw.length>=8) score++; if(/[A-Z]/.test(pw)) score++; if(/[0-9]/.test(pw)) score++; if(/[^A-Za-z0-9]/.test(pw)) score++;
+  const cls = ['','filled-1','filled-2','filled-3','filled-4'];
+  for(let i=1;i<=4;i++) { const b=document.getElementById('pb'+i); if(b){b.className='pw-bar';if(i<=score)b.classList.add(cls[score]);} }
+}
+
+/* ─── Toast ─── */
+function showToast(msg) {
+  const t = document.getElementById('toast'); t.textContent=msg;
+  t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3000);
+}
+
+/* ─── Feed interactions ─── */
+function toggleLike(btn) { btn.classList.toggle('liked'); }
+function toggleComments(btn) {
+  const card=btn.closest('.post-card'); const ca=card.querySelector('.comments-area');
+  ca.style.display = ca.style.display==='none'?'':'none';
+}
+function addComment(inp) {
+  const text=inp.value.trim(); if(!text) return;
+  const ca=inp.closest('.comments-area');
+  const c=document.createElement('div'); c.className='comment';
+  c.innerHTML=`<div class="comment-av">JD</div><div><div class="comment-bubble"><span class="comment-name">Jane Doe</span> ${text}</div><div class="comment-meta">just now</div></div>`;
+  ca.insertBefore(c, inp.closest('.comment-input-wrap'));
+  inp.value='';
+}
+
+/* ─── Chat window ─── */
+let chatOpen=false;
+const chatThreads={
+  acme:{av:'AC',name:'Acme Corp',msgs:[
+    {t:'in',txt:'Hi there! How can we help you today?'},
+    {t:'out',txt:"I'm having trouble accessing my account."},
+    {t:'in',txt:"I'd be happy to help! Can you tell me more?"},
+    {t:'out',txt:'Thanks for reaching out!'}
+  ]},
+  ht:{av:'HT',name:'HT Corp',msgs:[]}
+};
+let curChat=null;
+
+function toggleChatWin() {
+  const w=document.getElementById('chat-win');
+  chatOpen=!chatOpen;
+  w.style.display=chatOpen?'flex':'none';
+  if(!chatOpen) return;
+  w.style.flexDirection='column';
+  showChatList();
+  document.getElementById('new-msg-pill').style.display='none';
+  const b=document.getElementById('fab-unread'); if(b) b.style.display='none';
+}
+function showChatList() {
+  document.getElementById('cw-list').style.display='flex';
+  document.getElementById('cw-list').style.flexDirection='column';
+  const tv=document.getElementById('cw-thread'); tv.style.display='none';
+}
+function backToChatList() { showChatList(); }
+function openChatThread(id) {
+  const t=chatThreads[id]; if(!t) return;
+  curChat=id;
+  document.getElementById('cw-thread-av').textContent=t.av;
+  document.getElementById('cw-thread-name').textContent=t.name;
+  const body=document.getElementById('cw-msgs');
+  body.innerHTML=t.msgs.length?t.msgs.map(m=>
+    m.t==='out'
+      ?`<div class="msg-bubble out">${m.txt}</div><div class="msg-receipt"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 8 22 12 18 16"/><polyline points="10 8 14 12 10 16"/><line x1="2" y1="12" x2="14" y2="12"/></svg> Read</div>`
+      :`<div class="msg-bubble in">${m.txt}</div>`
+  ).join(''):'<div style="text-align:center;padding:28px;color:var(--text3);font-size:13px">No messages yet. Say hello!</div>';
+  body.scrollTop=body.scrollHeight;
+  document.getElementById('cw-list').style.display='none';
+  const tv=document.getElementById('cw-thread'); tv.style.display='flex'; tv.style.flex='1';
+}
+function sendChatMsg() {
+  const inp=document.getElementById('cw-input'); const text=inp.value.trim(); if(!text) return;
+  const body=document.getElementById('cw-msgs');
+  body.innerHTML+=`<div class="msg-bubble out">${text}</div><div class="msg-receipt"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Delivered</div>`;
+  inp.value=''; body.scrollTop=body.scrollHeight;
+}
+
+/* ─── Admin tabs ─── */
+const adminTabs=['home','inbox','post','users','notify'];
+const adminTitles={home:'Dashboard',inbox:'Inbox',post:'Post Announcement',users:'User Management',notify:'Send Notification'};
+function adminTab(id,btn) {
+  adminTabs.forEach(t => { const el=document.getElementById('ac-'+t); if(el) el.style.display=t===id?'':'none'; });
+  document.getElementById('admin-title').textContent=adminTitles[id]||id;
+  document.querySelectorAll('.s-nav-item').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.admin-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.amn-item').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  const tab=document.getElementById('atab-'+id); if(tab) tab.classList.add('active');
+  // sync sidebar
+  document.querySelectorAll('.s-nav-item').forEach(b => { if(b.getAttribute('onclick')&&b.getAttribute('onclick').includes("'"+id+"'")) b.classList.add('active'); });
+  document.querySelectorAll('.amn-item').forEach(b => { if(b.getAttribute('onclick')&&b.getAttribute('onclick').includes("'"+id+"'")) b.classList.add('active'); });
+}
+function adminOpenThread(id,row) {
+  const threads={
+    sarah:{av:'SJ',name:'Sarah Johnson',msgs:[
+      {t:'in',txt:"Hey, I'm having trouble logging in since yesterday."},
+      {t:'out',txt:"Hi Sarah! I'd be happy to help. What happens when you sign in?"},
+      {t:'in',txt:"It says 'incorrect password' but I haven't changed it."},
+      {t:'in',txt:"I've tried 3 times already 😩"}
+    ]},
+    marcus:{av:'MR',name:'Marcus Rivera',msgs:[{t:'in',txt:"Can you help me update my billing info?"},{t:'out',txt:"Of course! Head to Profile → Billing to update it."}]},
+    priya:{av:'PN',name:'Priya Nair',msgs:[{t:'out',txt:"Hi Priya, your request has been processed."},{t:'in',txt:"Thanks for the quick response!"}]},
+    tom:{av:'TC',name:'Tom Chen',msgs:[{t:'in',txt:"Got it, I'll try again now."},{t:'out',txt:"Let me know if you run into any issues!"}]}
+  };
+  document.querySelectorAll('.convo-row').forEach(r => r.classList.remove('active'));
+  row.classList.add('active');
+  const t=threads[id]; if(!t) return;
+  document.getElementById('at-av').textContent=t.av;
+  document.getElementById('at-name').textContent=t.name;
+  document.getElementById('at-input').placeholder='Reply to '+t.name+'…';
+  const body=document.getElementById('at-msgs');
+  body.innerHTML=t.msgs.map(m=>
+    m.t==='out'
+      ?`<div class="t-bubble out">${m.txt}</div><div class="t-receipt"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 8 22 12 18 16"/><polyline points="10 8 14 12 10 16"/><line x1="2" y1="12" x2="14" y2="12"/></svg> Read · just now</div>`
+      :`<div class="t-bubble in">${m.txt}</div>`
+  ).join('');
+  body.scrollTop=body.scrollHeight;
+}
+function adminReply() {
+  const inp=document.getElementById('at-input'); const text=inp.value.trim(); if(!text) return;
+  const body=document.getElementById('at-msgs');
+  body.innerHTML+=`<div class="t-bubble out">${text}</div><div class="t-receipt"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Delivered</div>`;
+  inp.value=''; body.scrollTop=body.scrollHeight;
+}
+function approveUser(btn) { const row=btn.closest('.user-row'); btn.textContent='Approved ✓'; btn.disabled=true; btn.style.opacity='.5'; showToast('User approved'); }
+function userTab(id,btn) {
+  ['pending','active','suspended'].forEach(t => { const el=document.getElementById('ut-'+t); if(el) el.style.display=t===id?'':'none'; });
+  document.querySelectorAll('.upt').forEach(b => b.classList.remove('active')); btn.classList.add('active');
+}
+function setChip(el) { document.querySelectorAll('.chip').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
+function adminPublish() {
+  const txt=document.getElementById('ac-post-input').value.trim(); if(!txt){document.getElementById('ac-post-input').focus();return;}
+  showToast('Announcement published to all members!'); document.getElementById('ac-post-input').value='';
+}
+function adminSendNotify() {
+  const t=document.getElementById('notify-title-admin').value.trim();
+  const b=document.getElementById('notify-body-admin').value.trim();
+  if(!t||!b){showToast('Please fill in title and message.');return;}
+  showToast('Notification sent to all members!');
+  document.getElementById('notify-title-admin').value=''; document.getElementById('notify-body-admin').value='';
+}
+</script>
+</body>
+</html>

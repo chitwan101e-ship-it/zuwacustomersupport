@@ -1,0 +1,123 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { notifyBusinessTeamAdmins } from '@/lib/notifyStaffAdmins'
+import { completeCustomerApproval } from '@/lib/signupApproval'
+
+export async function POST(req: NextRequest) {
+  try {
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
+      return NextResponse.json(
+        { error: 'SUPABASE_SERVICE_ROLE_KEY is not set on the server.' },
+        { status: 500 }
+      )
+    }
+
+    const body = (await req.json()) as { targetUserId?: string; decision?: string }
+    const targetUserId = body.targetUserId
+    const decision = body.decision
+
+    if (!targetUserId || !['approve', 'reject', 'block'].includes(decision ?? '')) {
+      return NextResponse.json({ error: 'Invalid targetUserId or decision' }, { status: 400 })
+    }
+
+    const supabase = await createClient()
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    const { data: staff, error: staffErr } = await supabase
+      .from('profiles')
+      .select('id, role, business_role, business_id')
+      .eq('id', user.id)
+      .single()
+
+    if (
+      staffErr ||
+      !staff ||
+      staff.role !== 'business' ||
+      (staff.business_role !== 'admin' && staff.business_role !== 'support')
+    ) {
+      return NextResponse.json({ error: 'Only business team members can review customer accounts.' }, { status: 403 })
+    }
+
+    const admin = createServiceClient()
+    const { data: target, error: targetErr } = await admin
+      .from('profiles')
+      .select('id, role, first_name, last_name, username, phone, referral_username, signup_question')
+      .eq('id', targetUserId)
+      .single()
+
+    if (targetErr || !target || target.role !== 'customer') {
+      return NextResponse.json({ error: 'Target must be a customer profile.' }, { status: 400 })
+    }
+
+    const { data: authUser } = await admin.auth.admin.getUserById(targetUserId)
+    const email = authUser.user?.email ?? '—'
+
+    const nextStatus =
+      decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'blocked'
+
+    const { error: updErr } = await admin
+      .from('profiles')
+      .update({ account_status: nextStatus })
+      .eq('id', targetUserId)
+      .eq('role', 'customer')
+
+    if (updErr) {
+      return NextResponse.json({ error: updErr.message }, { status: 500 })
+    }
+
+    const t = target as {
+      first_name: string
+      last_name: string
+      username: string
+      phone: string | null
+      referral_username: string | null
+      signup_question: string | null
+    }
+    const name = `${t.first_name ?? ''} ${t.last_name ?? ''}`.trim() || t.username
+    const actionWord = decision === 'approve' ? 'Approved' : decision === 'reject' ? 'Rejected' : 'Blocked'
+    const phoneLine = t.phone?.trim() ? `Phone: ${t.phone.trim()}` : 'Phone: —'
+    const refLine = t.referral_username ? `Referral: @${t.referral_username}` : 'Referral: —'
+    const questionLine = t.signup_question?.trim()
+      ? `Question: ${t.signup_question.trim()}`
+      : 'Question: —'
+    await notifyBusinessTeamAdmins(
+      admin,
+      staff.business_id as string,
+      {
+        title: `Customer ${decision}`,
+        body: `${actionWord} ${name} (@${t.username}, ${email}). ${phoneLine}. ${refLine}. ${questionLine}.`,
+        link: '/notifications',
+      },
+      { excludeUserId: user.id }
+    )
+
+    if (decision === 'approve') {
+      const bid = staff.business_id as string | null
+      let businessName = 'your team'
+      if (bid) {
+        const { data: biz } = await admin.from('businesses').select('name').eq('id', bid).maybeSingle()
+        if (biz?.name) businessName = biz.name as string
+
+        await completeCustomerApproval(admin, {
+          customerId: targetUserId,
+          customerName: name,
+          username: t.username,
+          email: email !== '—' ? email : null,
+          businessId: bid,
+          businessName,
+          staffSenderId: user.id,
+        })
+      }
+    }
+
+    return NextResponse.json({ ok: true, account_status: nextStatus })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Server error'
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
+}

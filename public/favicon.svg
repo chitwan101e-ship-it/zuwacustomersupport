@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Relay">
+  <defs>
+    <linearGradient id="relayMark" x1="18%" y1="0%" x2="82%" y2="100%">
+      <stop offset="0%" stop-color="#8d63ff" />
+      <stop offset="100%" stop-color="#4c78ff" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#relayMark)" />
+  <g transform="translate(4,8) scale(0.92)" fill="none" stroke="#ffffff" stroke-width="2.3" stroke-linecap="round">
+    <path d="M3 8C4.6 6.5 6.2 6.5 7.8 8C9.4 9.5 11 9.5 12.6 8C14.2 6.5 15.8 6.5 17.4 8C19 9.5 20.6 9.5 22 8" />
+    <path d="M3 13C4.6 11.5 6.2 11.5 7.8 13C9.4 14.5 11 14.5 12.6 13C14.2 11.5 15.8 11.5 17.4 13C19 14.5 20.6 14.5 22 13" opacity="0.95" />
+    <path d="M3 18C4.6 16.5 6.2 16.5 7.8 18C9.4 19.5 11 19.5 12.6 18C14.2 16.5 15.8 16.5 17.4 18C19 19.5 20.6 19.5 22 18" opacity="0.9" />
+  </g>
+</svg>

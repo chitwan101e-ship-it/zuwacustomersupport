@@ -1,0 +1,6576 @@
+﻿'use client'
+
+import { useCallback, useEffect, useMemo, useRef, useState, memo, startTransition } from 'react'
+import type { ChangeEvent, ComponentType, CSSProperties, ReactNode } from 'react'
+import { useRouter } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
+import { markConversationNotificationsRead } from '@/lib/markConversationNotificationsRead'
+import { downscaleImageFileToJpeg } from '@/lib/downscaleImageFile'
+import RelayLogo from '@/components/RelayLogo'
+import { RelayChatBubbleIcon } from '@/components/RelayChatBubbleIcon'
+import {
+  ArrowLeft,
+  Bell,
+  Camera,
+  Check,
+  ClipboardList,
+  ImagePlus,
+  Inbox,
+  Loader2,
+  LogOut,
+  Megaphone,
+  MessageCircle,
+  MoreHorizontal,
+  RefreshCw,
+  Search,
+  Send,
+  Shield,
+  Tag,
+  BookMarked,
+  Ban,
+  Eye,
+  Pencil,
+  EyeOff,
+  Trash2,
+  ThumbsUp,
+  Share2,
+  UserCheck,
+  User2,
+  Users,
+  UserCog,
+  X,
+} from 'lucide-react'
+import { sharePostLink } from '@/lib/sharePostLink'
+import { ContentModerationMenu } from '@/components/ContentModerationMenu'
+import {
+  ChatMessageImage,
+  MessageReplyQuote,
+  ReplyTargetBar,
+} from '@/components/ChatMessageImage'
+import { ChatJumpToLatestButton } from '@/components/ChatJumpToLatestButton'
+import { useChatScrollToLatest } from '@/lib/useChatScrollToLatest'
+import {
+  THREAD_MESSAGE_SELECT,
+  THREAD_MESSAGE_SELECT_LEGACY,
+  THREAD_MESSAGE_SELECT_BASE,
+  hydrateReplyEmbeds,
+  isReplyToSchemaError,
+  oneMessageEmbed as oneReplyEmbed,
+  replyAuthorLabel,
+  replyPreviewText,
+  type MessageReplyEmbed,
+  type ReplyTargetMessage,
+} from '@/lib/customerMessaging'
+import { FeedPostImage } from '@/components/FeedPostImage'
+import { LinkifiedText } from '@/components/LinkifiedText'
+import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
+import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
+import {
+  listBusinessApprovedCustomerIds,
+  listBusinessMemberProfiles,
+  type CustomerProfileSummary,
+} from '@/lib/resolveCustomerRecipient'
+import {
+  fetchAllBusinessConversations,
+  fetchInboxPreviews,
+  fetchInboxPreviewsLegacy,
+  fetchInboxUnreadCounts,
+  INBOX_LIST_DEFAULT_MAX,
+  INBOX_QUERY_CHUNK,
+} from '@/lib/staffInbox'
+import { isAutoApproveSignupsEnabled } from '@/lib/signupApproval'
+import {
+  convoNeedsInboxTriage,
+  loadInboxAttentionIds,
+  saveInboxAttentionIds,
+} from '@/lib/inboxAttention'
+import { markMessagesReadByIds } from '@/lib/markMessagesReadByIds'
+import { useMarkMessagesReadOnView } from '@/lib/useMarkMessagesReadOnView'
+
+const autoApproveSignups = isAutoApproveSignupsEnabled()
+
+type AppTab = 'home' | 'post' | 'inbox' | 'users' | 'notify' | 'reports' | 'team'
+type RefreshScope = 'full' | 'light' | 'inbox' | 'users'
+type UsersPanelTab = 'pending' | 'active' | 'suspended'
+
+type ProfileRow = {
+  id: string
+  role: 'customer' | 'business'
+  username: string
+  avatar_url?: string | null
+  business_id: string | null
+  business_role: 'admin' | 'support' | null
+}
+
+type InboxLabelRow = {
+  id: string
+  name: string
+  color: string | null
+  is_system: boolean
+}
+
+type CannedReplyRow = {
+  id: string
+  title: string
+  body: string
+  sort_order: number
+}
+
+type ConvoListItem = {
+  id: string
+  customer_id: string
+  customerName: string
+  customerUsername: string
+  customerAvatar?: string | null
+  preview: string
+  updated_at: string
+  unreadCount: number
+  labels: InboxLabelRow[]
+}
+
+type ThreadMessageSenderEmbed = {
+  username: string
+  first_name: string
+  last_name: string
+  business_role: 'admin' | 'support' | null
+}
+
+type ThreadMessage = {
+  id: string
+  sender_id: string
+  body: string
+  created_at: string
+  image_url?: string | null
+  read?: boolean | null
+  read_at?: string | null
+  reply_to_message_id?: string | null
+  reply_to?: MessageReplyEmbed | MessageReplyEmbed[] | null
+  profiles?: ThreadMessageSenderEmbed | ThreadMessageSenderEmbed[] | null
+}
+
+/** PostgREST `.in()` filters are sent on the URL; chunk to stay under proxy length limits. */
+const PROFILE_ID_IN_CHUNK = 200
+const CONVO_ID_IN_CHUNK = 200
+const COMMENT_PROFILE_EMBED =
+  'id, username, first_name, last_name, avatar_url, role, business_role'
+
+/** Computed inbox chip — not stored in conversation_inbox_labels (like Meta Business Suite). */
+const INBOX_UNREAD_VIRTUAL_LABEL: InboxLabelRow = {
+  id: '__virtual_unread__',
+  name: 'Unread',
+  color: '#ff3b5c',
+  is_system: true,
+}
+
+function convoLabelsWithUnread(item: ConvoListItem, attentionIds: ReadonlySet<string>): InboxLabelRow[] {
+  if (!convoNeedsInboxTriage(item, attentionIds)) return item.labels
+  return [INBOX_UNREAD_VIRTUAL_LABEL, ...item.labels]
+}
+
+function patchConvoListAfterOutboundSend(
+  prev: ConvoListItem[],
+  conversationId: string,
+  preview: string
+): ConvoListItem[] {
+  const idx = prev.findIndex((c) => c.id === conversationId)
+  if (idx < 0) return prev
+  const row: ConvoListItem = {
+    ...prev[idx],
+    preview,
+    updated_at: new Date().toISOString(),
+  }
+  return [row, ...prev.filter((c) => c.id !== conversationId)]
+}
+
+function oneEmbed<T>(v: T | T[] | null | undefined): T | null {
+  if (v == null) return null
+  return Array.isArray(v) ? v[0] ?? null : v
+}
+
+function formatTeamSenderLine(embed: ThreadMessageSenderEmbed | null): string | null {
+  if (!embed) return null
+  const name = [embed.first_name, embed.last_name].filter(Boolean).join(' ').trim() || `@${embed.username}`
+  const role =
+    embed.business_role === 'admin' ? 'Admin' : embed.business_role === 'support' ? 'Support' : null
+  const handle = `@${embed.username}`
+  return role ? `${name} · ${handle} · ${role}` : `${name} · ${handle}`
+}
+
+type PendingCustomer = {
+  id: string
+  first_name: string
+  last_name: string
+  username: string
+  phone: string | null
+  referral_username: string | null
+  signup_question: string | null
+  created_at: string
+  account_status: string
+  email: string | null
+  email_verified: boolean
+}
+
+type ActiveMember = {
+  id: string
+  first_name: string
+  last_name: string
+  username: string
+  account_status: string
+  avatar_url?: string | null
+}
+
+type ReportItem = {
+  id: string
+  name: string
+  type: string
+  status: 'new' | 'in_review' | 'resolved'
+  details: string
+}
+
+type OwnAnnouncementRow = {
+  id: string
+  title: string
+  body: string
+  image_url?: string | null
+  created_at: string
+  hidden_at?: string | null
+}
+
+type BasicProfile = {
+  id: string
+  username: string
+  first_name: string | null
+  last_name: string | null
+  avatar_url?: string | null
+  role?: string
+  business_role?: string | null
+}
+
+type CommentWithProfileEmbed = {
+  id: string
+  announcement_id: string
+  user_id: string
+  parent_comment_id: string | null
+  body: string
+  created_at: string
+  hidden_at?: string | null
+  profiles?: BasicProfile | BasicProfile[] | null
+}
+
+function displayNameFromProfile(p: BasicProfile | null | undefined): string {
+  if (!p) return 'Member'
+  const full = `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim()
+  return full || `@${p.username}`
+}
+
+type CommentPreview = {
+  id: string
+  body: string
+  created_at: string
+  userName: string
+  userAvatar: string | null
+}
+
+type EngagementComment = {
+  id: string
+  user_id: string
+  parent_comment_id: string | null
+  body: string
+  created_at: string
+  hidden_at?: string | null
+  userName: string
+  userAvatar: string | null
+  isStaff?: boolean
+}
+
+function formatModerationError(e: unknown, action: string): string {
+  const err = e as { message?: string; code?: string; details?: string }
+  if (err?.code === '42703') {
+    return `${action} failed: moderation columns are missing. Run migration 018 in Supabase SQL.`
+  }
+  if (err?.code === '42501' || err?.message?.toLowerCase().includes('permission')) {
+    return `${action} failed: permission denied (RLS). Run migration 019_fix_moderation_rls_select.sql in Supabase SQL, then refresh and retry.`
+  }
+  if (err?.message) return `${action} failed: ${err.message}`
+  return `${action} failed. Try again.`
+}
+
+function engagementCommentsByParent(list: EngagementComment[]) {
+  const m = new Map<string | null, EngagementComment[]>()
+  for (const c of list) {
+    const k = c.parent_comment_id
+    if (!m.has(k)) m.set(k, [])
+    m.get(k)!.push(c)
+  }
+  for (const [parentId, arr] of m.entries()) {
+    if (parentId === null) {
+      arr.sort((a, b) => {
+        const aStaff = Boolean(a.isStaff)
+        const bStaff = Boolean(b.isStaff)
+        if (aStaff !== bStaff) return aStaff ? -1 : 1
+        return +new Date(a.created_at) - +new Date(b.created_at)
+      })
+    } else {
+      arr.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
+    }
+  }
+  return m
+}
+
+function extFromImageFile(f: File) {
+  if (f.type === 'image/png') return 'png'
+  if (f.type === 'image/webp') return 'webp'
+  if (f.type === 'image/gif') return 'gif'
+  return 'jpg'
+}
+
+type SupabaseBrowserClient = ReturnType<typeof createClient>
+
+/** Prefer DB RPC (migration 010); fall back to PATCH if RPC is not deployed yet. */
+async function markCustomerMessagesReadForStaff(
+  supabase: SupabaseBrowserClient,
+  conversationId: string,
+  customerId: string
+): Promise<{ errorMessage: string | null }> {
+  const { error: rpcErr } = await supabase.rpc('mark_customer_messages_read_for_staff', {
+    p_conversation_id: conversationId,
+  })
+  if (!rpcErr) return { errorMessage: null }
+
+  const msg = rpcErr.message || ''
+  const missingRpc =
+    rpcErr.code === 'PGRST202' ||
+    rpcErr.code === '42883' ||
+    /does not exist|schema cache|Could not find the function/i.test(msg)
+
+  if (!missingRpc) return { errorMessage: msg }
+
+  const now = new Date().toISOString()
+  const base = () =>
+    supabase
+      .from('messages')
+      .update({ read: true, read_at: now })
+      .eq('conversation_id', conversationId)
+      .eq('sender_id', customerId)
+  const { error: e1 } = await base().eq('read', false)
+  if (e1) return { errorMessage: e1.message }
+  const { error: e2 } = await base().is('read', null)
+  if (e2)   return { errorMessage: e2.message }
+  return { errorMessage: null }
+}
+
+function InboxTabIcon({ className }: { className?: string }) {
+  return <RelayChatBubbleIcon className={className} size={16} strokeWidth={2} />
+}
+
+const NAV_DEF: {
+  id: AppTab
+  label: string
+  adminOnly?: boolean
+  icon: ComponentType<{ className?: string }>
+}[] = [
+  { id: 'home', label: 'Home', icon: Shield },
+  { id: 'post', label: 'Post', icon: Megaphone },
+  { id: 'inbox', label: 'Inbox', icon: InboxTabIcon },
+  { id: 'users', label: 'Users', icon: Users },
+  { id: 'notify', label: 'Notify', icon: Send },
+  { id: 'reports', label: 'Reports', icon: ClipboardList },
+  { id: 'team', label: 'Team', adminOnly: true, icon: UserCog },
+]
+
+function timeAgo(iso: string) {
+  const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (sec < 60) return 'just now'
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`
+  if (sec < 604800) return `${Math.floor(sec / 86400)}d ago`
+  return new Date(iso).toLocaleDateString()
+}
+
+function darkenHex(hex: string, amount = 0.3): string {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  const dim = (n: number) => Math.max(0, Math.round(n * (1 - amount)))
+  return `#${[dim(r), dim(g), dim(b)].map((n) => n.toString(16).padStart(2, '0')).join('')}`
+}
+
+function inboxLabelChipStyle(color: string | null): CSSProperties {
+  const raw = color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : '#64748b'
+  const text = darkenHex(raw, 0.28)
+  return {
+    borderColor: `${raw}70`,
+    color: text,
+    backgroundColor: `${raw}22`,
+    fontWeight: 600,
+  }
+}
+
+/** Placeholders: {customer_name}, {username}, {business} */
+function expandCannedReplyBody(
+  template: string,
+  ctx: { customerName: string; customerUsername: string; businessName: string }
+) {
+  return template
+    .replaceAll('{customer_name}', ctx.customerName)
+    .replaceAll('{username}', ctx.customerUsername)
+    .replaceAll('{business}', ctx.businessName)
+}
+
+function mergeCannedIntoDraft(draft: string, chunk: string) {
+  const c = chunk.trim()
+  if (!c) return draft
+  const d = draft.trimEnd()
+  if (!d) return c
+  return `${d}\n\n${c}`
+}
+
+const DASH_CACHE_TTL_MS = 10 * 60_000
+
+type DashSessionCache = {
+  at: number
+  convoList: ConvoListItem[]
+  activeMembers: CustomerProfileSummary[]
+  suspendedMembers: CustomerProfileSummary[]
+  pendingCustomers: PendingCustomer[]
+  pendingSignupCount: number
+}
+
+function dashCacheKey(businessId: string) {
+  return `relay-staff-dash-${businessId}`
+}
+
+function readDashCache(businessId: string): DashSessionCache | null {
+  try {
+    const raw = sessionStorage.getItem(dashCacheKey(businessId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as DashSessionCache
+    if (!parsed?.at || Date.now() - parsed.at > DASH_CACHE_TTL_MS) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeDashCache(businessId: string, data: Omit<DashSessionCache, 'at'>) {
+  try {
+    sessionStorage.setItem(dashCacheKey(businessId), JSON.stringify({ ...data, at: Date.now() }))
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+/** Keep tab panels mounted after first visit; only re-render visible tab content. */
+function StaffTabPanel({
+  tab,
+  activeTab,
+  mountedTabs,
+  className,
+  render,
+}: {
+  tab: AppTab
+  activeTab: AppTab
+  mountedTabs: ReadonlySet<AppTab>
+  className?: string
+  render: () => ReactNode
+}) {
+  const cacheRef = useRef<ReactNode>(null)
+  const hasRenderedRef = useRef(false)
+
+  if (!mountedTabs.has(tab)) return null
+  const visible = activeTab === tab
+
+  if (visible) {
+    const content = render()
+    cacheRef.current = content
+    hasRenderedRef.current = true
+    return (
+      <section className={className} aria-hidden={false}>
+        {content}
+      </section>
+    )
+  }
+
+  if (!hasRenderedRef.current || cacheRef.current == null) return null
+
+  return (
+    <section
+      hidden
+      className="hidden [content-visibility:hidden] [contain:strict] pointer-events-none"
+      aria-hidden
+    >
+      {cacheRef.current}
+    </section>
+  )
+}
+
+/** Keep users sub-panels mounted after first visit (Pending / Active / Suspended). */
+function StaffUsersSubPanel({
+  panel,
+  activePanel,
+  mountedPanels,
+  className,
+  render,
+}: {
+  panel: UsersPanelTab
+  activePanel: UsersPanelTab
+  mountedPanels: ReadonlySet<UsersPanelTab>
+  className?: string
+  render: () => ReactNode
+}) {
+  const cacheRef = useRef<ReactNode>(null)
+  const hasRenderedRef = useRef(false)
+
+  if (!mountedPanels.has(panel)) return null
+  const visible = activePanel === panel
+
+  if (visible) {
+    const content = render()
+    cacheRef.current = content
+    hasRenderedRef.current = true
+    return (
+      <div className={className} aria-hidden={false}>
+        {content}
+      </div>
+    )
+  }
+
+  if (!hasRenderedRef.current || cacheRef.current == null) return null
+
+  return (
+    <div
+      hidden
+      className="hidden [content-visibility:hidden] [contain:strict] pointer-events-none"
+      aria-hidden
+    >
+      {cacheRef.current}
+    </div>
+  )
+}
+
+type DashboardNavButtonProps = {
+  navItems: { id: AppTab; label: string; icon: ComponentType<{ className?: string }>; adminOnly?: boolean }[]
+  activeTab: AppTab
+  inboxTriageThreadCount: number
+  onSelect: (tab: AppTab) => void
+  layout: 'sidebar' | 'mobile'
+  mobileGridClass?: string
+  hideMobile?: boolean
+}
+
+const DashboardNavButtons = memo(function DashboardNavButtons({
+  navItems,
+  activeTab,
+  inboxTriageThreadCount,
+  onSelect,
+  layout,
+  mobileGridClass,
+  hideMobile,
+}: DashboardNavButtonProps) {
+  if (layout === 'sidebar') {
+    return (
+      <nav className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
+        {navItems.map((item) => {
+          const Icon = item.icon
+          const active = item.id === activeTab
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onSelect(item.id)}
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left text-[13px] font-medium ${
+                active
+                  ? 'border-[rgba(141,99,255,0.4)] bg-[rgba(141,99,255,0.1)] text-white shadow-[0_4px_16px_-8px_rgba(124,90,246,0.4)]'
+                  : 'border-transparent text-[#8892b0] hover:bg-white/[0.04] hover:text-[#c4cbe6]'
+              }`}
+            >
+              <Icon className="w-[15px] h-[15px] shrink-0 opacity-90" />
+              <span className="flex-1 min-w-0">{item.label}</span>
+              {item.id === 'inbox' && inboxTriageThreadCount > 0 ? (
+                <span className="shrink-0 min-w-4 h-4 px-1 rounded-full bg-[#8d63ff] text-white text-[9px] font-bold flex items-center justify-center tabular-nums">
+                  {inboxTriageThreadCount > 99 ? '99+' : inboxTriageThreadCount}
+                </span>
+              ) : null}
+            </button>
+          )
+        })}
+      </nav>
+    )
+  }
+
+  return (
+    <nav
+      className={`relay-footer-bar fixed bottom-0 left-0 right-0 lg:hidden border-t border-white/[0.08] bg-[rgba(9,14,32,0.97)] backdrop-blur-md px-1 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] grid ${mobileGridClass ?? 'grid-cols-5'} ${hideMobile ? 'max-lg:hidden' : ''}`}
+    >
+      {navItems.map((item) => {
+        const Icon = item.icon
+        const active = activeTab === item.id
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onSelect(item.id)}
+            className={`flex flex-col items-center gap-0.5 py-1.5 min-w-0 relative ${
+              active ? 'text-[#8d63ff]' : 'text-[#8892b0]'
+            }`}
+          >
+            <span className="relative inline-flex shrink-0">
+              <Icon className="w-[21px] h-[21px] shrink-0" />
+              {item.id === 'inbox' && inboxTriageThreadCount > 0 ? (
+                <span className="absolute -top-1.5 -right-2 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#090e20]">
+                  {inboxTriageThreadCount > 9 ? '9+' : inboxTriageThreadCount}
+                </span>
+              ) : null}
+            </span>
+            <span className="text-[10px] font-semibold leading-tight text-center truncate w-full px-0.5">{item.label}</span>
+          </button>
+        )
+      })}
+    </nav>
+  )
+})
+
+export default function DashboardPage() {
+  const router = useRouter()
+  const supabase = useMemo(() => createClient(), [])
+
+  const [loading, setLoading] = useState(true)
+  const [profile, setProfile] = useState<ProfileRow | null>(null)
+  const [activeTab, setActiveTab] = useState<AppTab>('home')
+  const [mountedTabs, setMountedTabs] = useState<Set<AppTab>>(() => new Set(['home']))
+  const activeTabRef = useRef<AppTab>('home')
+  activeTabRef.current = activeTab
+
+  const [convoList, setConvoList] = useState<ConvoListItem[]>([])
+  const convoListRef = useRef<ConvoListItem[]>([])
+  convoListRef.current = convoList
+  const inboundCustomerFirstNameRef = useRef(new Map<string, string>())
+  const openMessageFromNotifyRef = useRef<(conversationId: string) => void>(() => {})
+  const [selectedConvoId, setSelectedConvoId] = useState<string | null>(null)
+  const selectedConvoIdRef = useRef<string | null>(null)
+  selectedConvoIdRef.current = selectedConvoId
+
+  /** Only mark customer messages read while the admin is on Inbox viewing this thread. */
+  function isActivelyViewingInboxThread(conversationId: string) {
+    return activeTabRef.current === 'inbox' && selectedConvoIdRef.current === conversationId
+  }
+  const [threadMessages, setThreadMessages] = useState<ThreadMessage[]>([])
+  const [threadLoading, setThreadLoading] = useState(false)
+  const [replyDraft, setReplyDraft] = useState('')
+  const [replyBusy, setReplyBusy] = useState(false)
+  const [replyPendingImage, setReplyPendingImage] = useState<{ blob: Blob; previewUrl: string } | null>(null)
+  const [replyTarget, setReplyTarget] = useState<ReplyTargetMessage | null>(null)
+
+  const [pendingCustomers, setPendingCustomers] = useState<PendingCustomer[]>([])
+  const [pendingSignupCount, setPendingSignupCount] = useState(0)
+  const pendingCustomersRef = useRef(pendingCustomers)
+  pendingCustomersRef.current = pendingCustomers
+  const pendingSignupCountRef = useRef(pendingSignupCount)
+  pendingSignupCountRef.current = pendingSignupCount
+  const [reviewBusyId, setReviewBusyId] = useState<string | null>(null)
+
+  const [reports, setReports] = useState<ReportItem[]>([])
+
+  const [announcementType, setAnnouncementType] = useState<'announcement' | 'alert' | 'update'>('announcement')
+  const [audience, setAudience] = useState<'all' | 'selected' | 'one' | 'labels'>('all')
+  const [selectedRecipientIds, setSelectedRecipientIds] = useState<string[]>([])
+  const [notifyAudienceLabelIds, setNotifyAudienceLabelIds] = useState<string[]>([])
+  const [notifyRecipientQuery, setNotifyRecipientQuery] = useState('')
+  const [inboxThreadLabelFilterIds, setInboxThreadLabelFilterIds] = useState<string[]>([])
+  const [inboxUnreadFilterOnly, setInboxUnreadFilterOnly] = useState(false)
+  const [notifyTitle, setNotifyTitle] = useState('')
+  const [notifyBody, setNotifyBody] = useState('')
+  const [oneUserQuery, setOneUserQuery] = useState('')
+  const [notifySearchResults, setNotifySearchResults] = useState<
+    { id: string; username: string; first_name: string | null; last_name: string | null; email: string | null }[]
+  >([])
+  const [notifySearchBusy, setNotifySearchBusy] = useState(false)
+  const [notifyBusy, setNotifyBusy] = useState(false)
+  const [reportBusyId, setReportBusyId] = useState<string | null>(null)
+
+  const [postTitle, setPostTitle] = useState('')
+  const [postBody, setPostBody] = useState('')
+  const [postBusy, setPostBusy] = useState(false)
+  const [postImage, setPostImage] = useState<{ file: File; previewUrl: string } | null>(null)
+  const postFileInputRef = useRef<HTMLInputElement>(null)
+  const replyImageInputRef = useRef<HTMLInputElement>(null)
+  const threadScrollRef = useRef<HTMLDivElement>(null)
+  const threadEndRef = useRef<HTMLDivElement>(null)
+  const staffThreadChannelRef = useRef<ReturnType<(typeof supabase)['channel']> | null>(null)
+  const staffThreadBroadcastReadyRef = useRef(false)
+  const staffTypingSentRef = useRef(false)
+  const staffTypingIdleTimerRef = useRef<number | null>(null)
+  const peerCustomerTypingClearTimerRef = useRef<number | null>(null)
+  const [peerCustomerTyping, setPeerCustomerTyping] = useState(false)
+  const [staffTypingChannelReady, setStaffTypingChannelReady] = useState(0)
+  const [myAnnouncements, setMyAnnouncements] = useState<OwnAnnouncementRow[]>([])
+  const [myAnnouncementsMeta, setMyAnnouncementsMeta] = useState<
+    Record<
+      string,
+      {
+        likes: number
+        comments: number
+        likedBy: { name: string; avatar: string | null }[]
+        commentedBy: string[]
+        commentPreviews: CommentPreview[]
+        commentDetails: EngagementComment[]
+      }
+    >
+  >({})
+  const [myAnnouncementsLoading, setMyAnnouncementsLoading] = useState(false)
+  const [engagementOpen, setEngagementOpen] = useState<{ postId: string; mode: 'likes' | 'comments' } | null>(null)
+  const [staffCommentDrafts, setStaffCommentDrafts] = useState<Record<string, string>>({})
+  const [staffReplyThreadTarget, setStaffReplyThreadTarget] = useState<{ postId: string; parentId: string } | null>(
+    null
+  )
+  const [staffReplyThreadDraft, setStaffReplyThreadDraft] = useState('')
+  const [staffReplyBusyPostId, setStaffReplyBusyPostId] = useState<string | null>(null)
+  const [editingPostId, setEditingPostId] = useState<string | null>(null)
+  const [editPostTitle, setEditPostTitle] = useState('')
+  const [editPostBody, setEditPostBody] = useState('')
+  const [editPostBusy, setEditPostBusy] = useState(false)
+  const [postModerationBusyId, setPostModerationBusyId] = useState<string | null>(null)
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
+  const [editCommentBody, setEditCommentBody] = useState('')
+  const [commentModerationBusyId, setCommentModerationBusyId] = useState<string | null>(null)
+
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [businessInfo, setBusinessInfo] = useState<{ name: string; slug: string } | null>(null)
+  const [activeMembers, setActiveMembers] = useState<ActiveMember[]>([])
+  const [suspendedMembers, setSuspendedMembers] = useState<ActiveMember[]>([])
+  const activeMembersRef = useRef(activeMembers)
+  activeMembersRef.current = activeMembers
+  const suspendedMembersRef = useRef(suspendedMembers)
+  suspendedMembersRef.current = suspendedMembers
+  const [usersPanelTab, setUsersPanelTab] = useState<UsersPanelTab>(autoApproveSignups ? 'active' : 'pending')
+  const [mountedUsersPanels, setMountedUsersPanels] = useState<Set<UsersPanelTab>>(() =>
+    new Set([autoApproveSignups ? 'active' : 'pending'])
+  )
+  const [modBusyId, setModBusyId] = useState<string | null>(null)
+  const [memberMessageDrafts, setMemberMessageDrafts] = useState<Record<string, string>>({})
+  const [memberSendBusyId, setMemberSendBusyId] = useState<string | null>(null)
+  const [memberStartBusyId, setMemberStartBusyId] = useState<string | null>(null)
+  const [memberComposeOpenId, setMemberComposeOpenId] = useState<string | null>(null)
+  const [activeMemberQuery, setActiveMemberQuery] = useState('')
+  const [activeMemberLookup, setActiveMemberLookup] = useState<{
+    id: string
+    username: string
+    first_name: string | null
+    last_name: string | null
+    account_status: string
+    email: string | null
+  } | null>(null)
+  const [activeMemberLookupBusy, setActiveMemberLookupBusy] = useState(false)
+  const [dashRefreshing, setDashRefreshing] = useState(false)
+  const [inboxLoading, setInboxLoading] = useState(false)
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [usersRefreshing, setUsersRefreshing] = useState(false)
+  const [inboxContactOpen, setInboxContactOpen] = useState(false)
+  const [staffNotifyUnread, setStaffNotifyUnread] = useState(0)
+  const [inboxRefreshing, setInboxRefreshing] = useState(false)
+  const [welcomeBackfillBusy, setWelcomeBackfillBusy] = useState(false)
+  const [inboxLabelCatalog, setInboxLabelCatalog] = useState<InboxLabelRow[]>([])
+  const [inboxLabelsPopoverOpen, setInboxLabelsPopoverOpen] = useState(false)
+  const inboxLabelsPopoverRef = useRef<HTMLDivElement>(null)
+  const [inboxLabelRowBusy, setInboxLabelRowBusy] = useState<string | null>(null)
+  const [newInboxLabelName, setNewInboxLabelName] = useState('')
+  const [inboxLabelCreateBusy, setInboxLabelCreateBusy] = useState(false)
+  const [inboxSearchQuery, setInboxSearchQuery] = useState('')
+  const [inboxSearchExtraConvos, setInboxSearchExtraConvos] = useState<ConvoListItem[]>([])
+  const [inboxSearchExtraBusy, setInboxSearchExtraBusy] = useState(false)
+  const [inboxLabelFilterExtraConvos, setInboxLabelFilterExtraConvos] = useState<ConvoListItem[]>([])
+  const [inboxLabelFilterBusy, setInboxLabelFilterBusy] = useState(false)
+  const [cannedReplies, setCannedReplies] = useState<CannedReplyRow[]>([])
+  const [cannedPopoverOpen, setCannedPopoverOpen] = useState(false)
+  const cannedPopoverRef = useRef<HTMLDivElement>(null)
+  const [cannedPickerQuery, setCannedPickerQuery] = useState('')
+  const [cannedEditId, setCannedEditId] = useState<string | null>(null)
+  const [cannedFormTitle, setCannedFormTitle] = useState('')
+  const [cannedFormBody, setCannedFormBody] = useState('')
+  const [cannedSaveBusy, setCannedSaveBusy] = useState(false)
+  const [cannedDeleteBusyId, setCannedDeleteBusyId] = useState<string | null>(null)
+  const [staffAvatarBusy, setStaffAvatarBusy] = useState(false)
+  const staffAvatarInputRef = useRef<HTMLInputElement>(null)
+
+  const [teamRows, setTeamRows] = useState<
+    { id: string; username: string; first_name: string; last_name: string; business_role: 'admin' | 'support'; deleted_at: string | null }[]
+  >([])
+  const [teamLoadBusy, setTeamLoadBusy] = useState(false)
+  const [newStaffFirst, setNewStaffFirst] = useState('')
+  const [newStaffEmail, setNewStaffEmail] = useState('')
+  const [newStaffUsername, setNewStaffUsername] = useState('')
+  const [newStaffPassword, setNewStaffPassword] = useState('')
+  const [newStaffPasswordConfirm, setNewStaffPasswordConfirm] = useState('')
+  const [showNewStaffPassword, setShowNewStaffPassword] = useState(false)
+  const [createStaffBusy, setCreateStaffBusy] = useState(false)
+  const [removeStaffBusyId, setRemoveStaffBusyId] = useState<string | null>(null)
+
+  const profileRef = useRef<ProfileRow | null>(null)
+  profileRef.current = profile
+  const businessInfoBidRef = useRef<string | null>(null)
+  const [inboxAttentionIds, setInboxAttentionIds] = useState<Set<string>>(() => new Set())
+  const inboxAttentionIdsRef = useRef(inboxAttentionIds)
+  inboxAttentionIdsRef.current = inboxAttentionIds
+
+  const addInboxAttention = useCallback((conversationId: string) => {
+    setInboxAttentionIds((prev) => {
+      if (prev.has(conversationId)) return prev
+      const next = new Set(prev)
+      next.add(conversationId)
+      const bid = profileRef.current?.business_id
+      if (bid) saveInboxAttentionIds(bid, next)
+      return next
+    })
+  }, [])
+
+  const clearInboxAttention = useCallback((conversationId: string) => {
+    setInboxAttentionIds((prev) => {
+      if (!prev.has(conversationId)) return prev
+      const next = new Set(prev)
+      next.delete(conversationId)
+      const bid = profileRef.current?.business_id
+      if (bid) saveInboxAttentionIds(bid, next)
+      return next
+    })
+  }, [])
+
+  const syncInboxAttentionWithUnread = useCallback((list: ConvoListItem[], businessId: string) => {
+    setInboxAttentionIds((prev) => {
+      let changed = false
+      const next = new Set(prev)
+      for (const c of list) {
+        if (c.unreadCount > 0 && !next.has(c.id)) {
+          next.add(c.id)
+          changed = true
+        }
+      }
+      if (!changed) return prev
+      saveInboxAttentionIds(businessId, next)
+      return next
+    })
+  }, [])
+  const scopeLoadedAtRef = useRef<Partial<Record<RefreshScope, number>>>({})
+  const scopeInflightRef = useRef<Partial<Record<RefreshScope, boolean>>>({})
+  const refreshDashboardRef = useRef<
+    (p: ProfileRow, opts?: { pendingDetail?: boolean; scope?: RefreshScope; force?: boolean }) => Promise<void>
+  >(async () => {})
+
+  const scrollThreadToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const el = threadScrollRef.current
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior })
+      return
+    }
+    const end = threadEndRef.current
+    if (end) end.scrollIntoView({ block: 'end', behavior })
+  }, [])
+
+  const threadChatScroll = useChatScrollToLatest(threadScrollRef, selectedConvoId)
+
+  const navItems = useMemo(() => {
+    if (!profile || profile.business_role !== 'admin') {
+      return NAV_DEF.filter((n) => !n.adminOnly)
+    }
+    return NAV_DEF
+  }, [profile])
+
+  const loadTeam = useCallback(async () => {
+    const bid = profileRef.current?.business_id
+    if (!bid || profileRef.current?.business_role !== 'admin') return
+    setTeamLoadBusy(true)
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, username, first_name, last_name, business_role, deleted_at')
+        .eq('business_id', bid)
+        .eq('role', 'business')
+        .order('business_role', { ascending: true })
+        .order('username', { ascending: true })
+      if (error) throw error
+      setTeamRows(
+        (data || []) as {
+          id: string
+          username: string
+          first_name: string
+          last_name: string
+          business_role: 'admin' | 'support'
+          deleted_at: string | null
+        }[]
+      )
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setTeamLoadBusy(false)
+    }
+  }, [supabase])
+
+  const refreshDashboard = useCallback(
+    async (
+      p: ProfileRow,
+      opts?: { pendingDetail?: boolean; scope?: RefreshScope; force?: boolean }
+    ) => {
+      const scope = opts?.scope ?? 'full'
+      if (scopeInflightRef.current[scope] && !opts?.force) return
+
+      if (!p.business_id) {
+        setLoadError('Staff profile is missing business_id. Fix it in Supabase public.profiles for your admin user.')
+        setBusinessInfo(null)
+        setConvoList([])
+        setInboxLabelCatalog([])
+        setCannedReplies([])
+        setPendingCustomers([])
+        setPendingSignupCount(0)
+        setActiveMembers([])
+        setSuspendedMembers([])
+        setReports([])
+        return
+      }
+
+      scopeInflightRef.current[scope] = true
+      const wantInbox = scope === 'full' || scope === 'inbox'
+      const wantMembers = scope === 'full' || scope === 'users'
+      const wantCanned = scope === 'full' || scope === 'inbox'
+      const wantReports = scope === 'full' || scope === 'light'
+      const wantBell = scope === 'full' || scope === 'light'
+      const bid = p.business_id
+      const wantPendingDetail =
+        opts?.pendingDetail ?? (scope === 'users' || activeTabRef.current === 'users')
+
+      if (wantInbox && convoListRef.current.length === 0) setInboxLoading(true)
+      const hasUsersCache =
+        activeMembersRef.current.length > 0 ||
+        suspendedMembersRef.current.length > 0 ||
+        pendingCustomersRef.current.length > 0 ||
+        pendingSignupCountRef.current > 0
+      if (wantMembers && !hasUsersCache) setUsersLoading(true)
+      if (opts?.force) setLoadError(null)
+
+      let nextConvoList: ConvoListItem[] | null = null
+      let nextActiveMembers: CustomerProfileSummary[] | null = null
+      let nextSuspendedMembers: CustomerProfileSummary[] | null = null
+      let nextPendingCustomers: PendingCustomer[] | null = null
+      let nextPendingCount: number | null = null
+
+      try {
+        if (businessInfoBidRef.current !== bid) {
+          const { data: bizRow } = await supabase.from('businesses').select('name, slug').eq('id', bid).maybeSingle()
+          businessInfoBidRef.current = bid
+          setBusinessInfo(bizRow ? { name: bizRow.name, slug: bizRow.slug } : null)
+        }
+
+      const pendingFetch: Promise<{ pending?: PendingCustomer[]; count?: number; error?: string }> = fetch(
+        wantPendingDetail ? '/api/staff/pending-signups' : '/api/staff/pending-signups?countOnly=1',
+        { method: 'GET', cache: 'no-store' }
+      )
+        .then(async (r) => {
+          const j = (await r.json().catch(() => ({}))) as {
+            pending?: PendingCustomer[]
+            count?: number
+            error?: string
+          }
+          if (!r.ok) return { error: j.error || `HTTP ${r.status}` }
+          if (wantPendingDetail) return { pending: j.pending ?? [] }
+          return { count: j.count ?? 0 }
+        })
+        .catch((e: unknown) => {
+          const raw = e instanceof Error ? e.message : 'Network error'
+          const isOffline =
+            e instanceof TypeError &&
+            (raw === 'Failed to fetch' || raw === 'Load failed' || raw === 'NetworkError when attempting to fetch resource.')
+          return {
+            error: isOffline
+              ? 'Could not reach the app server for pending signups (often: dev server stopped, tab offline, or request blocked). Try Refresh after confirming npm run dev is running.'
+              : raw,
+          }
+        })
+
+      let convoRows: { id: string; customer_id: string; updated_at: string }[] = []
+
+      const convoPromise = wantInbox
+        ? fetchAllBusinessConversations(supabase, bid, { maxRows: INBOX_LIST_DEFAULT_MAX })
+            .then((rows) => ({ rows }))
+            .catch((convErr) => {
+              const msg = convErr instanceof Error ? convErr.message : 'Failed to load conversations'
+              return { error: msg, rows: [] as typeof convoRows }
+            })
+        : Promise.resolve({ rows: [] as typeof convoRows })
+
+      const [convoRes, pendingRes, reportRes, memberProfilesRes, cannedRes] = await Promise.all([
+        convoPromise,
+        pendingFetch,
+        wantReports
+          ? supabase
+              .from('admin_reports')
+              .select('id, reporter_name, category, status, details, created_at')
+              .eq('business_id', bid)
+              .order('created_at', { ascending: false })
+              .limit(20)
+          : Promise.resolve({ data: [] as Record<string, unknown>[], error: null }),
+        wantMembers
+          ? listBusinessMemberProfiles(supabase, bid)
+              .then((rows) => ({ rows }))
+              .catch((e: unknown) => ({
+                error: e instanceof Error ? e.message : 'Failed to load member list',
+              }))
+          : Promise.resolve({ rows: [] as CustomerProfileSummary[] }),
+        wantCanned
+          ? supabase
+              .from('inbox_canned_replies')
+              .select('id, title, body, sort_order')
+              .eq('business_id', bid)
+              .order('sort_order', { ascending: true })
+              .order('title', { ascending: true })
+          : Promise.resolve({ data: null, error: null }),
+      ])
+
+      const errs: string[] = []
+      if ('error' in convoRes && convoRes.error) errs.push(`conversations: ${convoRes.error}`)
+      else if (wantInbox) convoRows = convoRes.rows
+
+      if (pendingRes.error) errs.push(`pending: ${pendingRes.error}`)
+      if (reportRes.error) errs.push(`reports: ${reportRes.error.message}`)
+      if ('error' in memberProfilesRes && memberProfilesRes.error) errs.push(`members: ${memberProfilesRes.error}`)
+      if (wantCanned && cannedRes.error) errs.push(`canned replies: ${cannedRes.error.message}`)
+      if (errs.length) setLoadError(errs.join(' · '))
+
+      if (wantCanned && !cannedRes.error) {
+        setCannedReplies(
+          (cannedRes.data || []).map((r: Record<string, unknown>) => ({
+            id: r.id as string,
+            title: r.title as string,
+            body: r.body as string,
+            sort_order: Number(r.sort_order ?? 0),
+          }))
+        )
+      }
+
+      if (wantPendingDetail) {
+        const list = (pendingRes.pending || []) as PendingCustomer[]
+        nextPendingCustomers = list
+        setPendingCustomers(list)
+        nextPendingCount = list.filter((c) => c.account_status === 'pending').length
+        setPendingSignupCount(nextPendingCount)
+      } else if (typeof pendingRes.count === 'number') {
+        nextPendingCount = pendingRes.count
+        setPendingSignupCount(pendingRes.count)
+      }
+
+      if (wantReports) {
+        if (Array.isArray(reportRes.data) && reportRes.data.length > 0) {
+          setReports(
+            reportRes.data.map((r: Record<string, unknown>) => ({
+              id: r.id as string,
+              name: r.reporter_name as string,
+              type: r.category as string,
+              status: r.status as ReportItem['status'],
+              details: r.details as string,
+            }))
+          )
+        } else {
+          setReports([])
+        }
+      }
+
+      if (wantInbox) {
+        const convIds = convoRows.map((c: { id: string }) => c.id)
+        const customerIds = [...new Set(convoRows.map((c: { customer_id: string }) => c.customer_id))]
+
+        const loadConvoProfiles = async () => {
+          const profileById: Record<
+            string,
+            { first_name: string; last_name: string; username: string; avatar_url?: string | null }
+          > = {}
+          if (customerIds.length === 0) return profileById
+          for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
+            const slice = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+            const { data: profs, error: pe } = await supabase
+              .from('profiles')
+              .select('id, first_name, last_name, username, avatar_url')
+              .in('id', slice)
+            if (pe) {
+              setLoadError((prev) => (prev ? `${prev} · ` : '') + `profiles: ${pe.message}`)
+              break
+            }
+            for (const row of profs || []) {
+              const r = row as {
+                id: string
+                first_name: string
+                last_name: string
+                username: string
+                avatar_url?: string | null
+              }
+              profileById[r.id] = r
+            }
+          }
+          return profileById
+        }
+
+        const [profileById, previewByConvo, unreadByConvo, defResult] = await Promise.all([
+          loadConvoProfiles(),
+          convIds.length > 0
+            ? fetchInboxPreviews(supabase, convIds).catch((previewErr) => {
+                const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
+                setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${msg}`)
+                return {} as Record<string, { body: string; created_at: string }>
+              })
+            : Promise.resolve({} as Record<string, { body: string; created_at: string }>),
+          convIds.length > 0
+            ? fetchInboxUnreadCounts(supabase, convoRows).catch((ue) => {
+                const ueMsg = ue instanceof Error ? ue.message : 'unread count failed'
+                setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages(unread): ${ueMsg}`)
+                const fallback: Record<string, number> = {}
+                for (const row of convoRows) {
+                  const existing = convoListRef.current.find((c) => c.id === row.id)
+                  fallback[row.id] = existing?.unreadCount ?? 0
+                }
+                return fallback
+              })
+            : Promise.resolve({} as Record<string, number>),
+          supabase
+            .from('inbox_label_definitions')
+            .select('id, name, color, is_system')
+            .eq('business_id', bid)
+            .order('is_system', { ascending: false })
+            .order('name'),
+        ])
+
+        const { data: defRows, error: defErr } = defResult
+        if (defErr)
+          setLoadError((prev) => (prev ? `${prev} · ` : '') + `inbox_label_definitions: ${defErr.message}`)
+        const labelCatalog: InboxLabelRow[] = (defRows || []).map((r: Record<string, unknown>) => ({
+          id: r.id as string,
+          name: r.name as string,
+          color: (r.color as string | null) ?? null,
+          is_system: Boolean(r.is_system),
+        }))
+        setInboxLabelCatalog(labelCatalog)
+        const defById = Object.fromEntries(labelCatalog.map((d) => [d.id, d])) as Record<string, InboxLabelRow>
+        const labelsByConvo: Record<string, InboxLabelRow[]> = {}
+        if (convIds.length > 0 && !defErr) {
+          for (let i = 0; i < convIds.length; i += INBOX_QUERY_CHUNK) {
+            const slice = convIds.slice(i, i + INBOX_QUERY_CHUNK)
+            const { data: assignRows, error: assignErr } = await supabase
+              .from('conversation_inbox_labels')
+              .select('conversation_id, label_id')
+              .in('conversation_id', slice)
+            if (assignErr) {
+              setLoadError((prev) => (prev ? `${prev} · ` : '') + `conversation_inbox_labels: ${assignErr.message}`)
+              break
+            }
+            for (const row of assignRows || []) {
+              const r = row as { conversation_id: string; label_id: string }
+              const d = defById[r.label_id]
+              if (!d) continue
+              if (!labelsByConvo[r.conversation_id]) labelsByConvo[r.conversation_id] = []
+              labelsByConvo[r.conversation_id].push(d)
+            }
+          }
+          for (const cid of Object.keys(labelsByConvo)) {
+            labelsByConvo[cid].sort((a, b) => {
+              if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+              return a.name.localeCompare(b.name)
+            })
+          }
+        }
+
+        const list: ConvoListItem[] = convoRows.map(
+          (row: { id: string; customer_id: string; updated_at: string }) => {
+            const pr = profileById[row.customer_id]
+            const name = pr
+              ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
+              : 'Customer'
+            const pv = previewByConvo[row.id]
+            return {
+              id: row.id,
+              customer_id: row.customer_id,
+              customerName: name,
+              customerUsername: pr?.username ?? '…',
+              customerAvatar: pr?.avatar_url ?? null,
+              preview: pv?.body || 'No messages yet',
+              updated_at: row.updated_at,
+              unreadCount: unreadByConvo[row.id] || 0,
+              labels: labelsByConvo[row.id] || [],
+            }
+          }
+        )
+        nextConvoList = list
+        setConvoList(list)
+        syncInboxAttentionWithUnread(list, bid)
+      }
+
+      if (wantBell) {
+        const { count: bellCount, error: bellErr } = await supabase
+          .from('notifications')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', p.id)
+          .eq('read', false)
+        if (!bellErr) setStaffNotifyUnread(bellCount ?? 0)
+      }
+
+      if (wantMembers) {
+        const memberProfiles = 'rows' in memberProfilesRes ? memberProfilesRes.rows : []
+        const approved = memberProfiles.filter((r) => r.account_status === 'approved')
+        const suspended = memberProfiles.filter((r) => r.account_status === 'suspended')
+        approved.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+        suspended.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+        nextActiveMembers = approved
+        nextSuspendedMembers = suspended
+        setActiveMembers(approved)
+        setSuspendedMembers(suspended)
+      }
+
+      if (
+        nextConvoList ||
+        nextActiveMembers ||
+        nextSuspendedMembers ||
+        nextPendingCustomers ||
+        nextPendingCount !== null
+      ) {
+        writeDashCache(bid, {
+          convoList: nextConvoList ?? convoListRef.current,
+          activeMembers: nextActiveMembers ?? activeMembersRef.current,
+          suspendedMembers: nextSuspendedMembers ?? suspendedMembersRef.current,
+          pendingCustomers: nextPendingCustomers ?? pendingCustomersRef.current,
+          pendingSignupCount: nextPendingCount ?? pendingSignupCountRef.current,
+        })
+      }
+
+      scopeLoadedAtRef.current[scope] = Date.now()
+      } catch (e) {
+        console.error('[refreshDashboard]', e)
+        setLoadError((prev) => {
+          const msg = e instanceof Error ? e.message : 'Dashboard refresh failed'
+          return prev ? `${prev} · ${msg}` : msg
+        })
+      } finally {
+        if (wantInbox) setInboxLoading(false)
+        if (wantMembers) setUsersLoading(false)
+        scopeInflightRef.current[scope] = false
+      }
+    },
+    [supabase, syncInboxAttentionWithUnread]
+  )
+
+  refreshDashboardRef.current = refreshDashboard
+
+  useEffect(() => {
+    const bid = profile?.business_id
+    if (!bid) return
+    setInboxAttentionIds(loadInboxAttentionIds(bid))
+  }, [profile?.business_id])
+
+  const switchTab = useCallback((tab: AppTab) => {
+    setActiveTab(tab)
+    setMountedTabs((prev) => {
+      if (prev.has(tab)) return prev
+      const next = new Set(prev)
+      next.add(tab)
+      return next
+    })
+
+    window.requestAnimationFrame(() => {
+      const p = profileRef.current
+      if (!p?.business_id) return
+      const staleMs = 60_000
+      const now = Date.now()
+      if (tab === 'inbox' && now - (scopeLoadedAtRef.current.inbox ?? 0) > staleMs) {
+        void refreshDashboardRef.current(p, { scope: 'inbox' })
+      } else if (tab === 'users' && now - (scopeLoadedAtRef.current.users ?? 0) > staleMs) {
+        void refreshDashboardRef.current(p, { scope: 'users', pendingDetail: true })
+      }
+    })
+  }, [])
+
+  const switchUsersPanelTab = useCallback((panel: UsersPanelTab) => {
+    setUsersPanelTab(panel)
+    if (panel !== 'active') setActiveMemberQuery('')
+    setMountedUsersPanels((prev) => {
+      if (prev.has(panel)) return prev
+      const next = new Set(prev)
+      next.add(panel)
+      return next
+    })
+  }, [])
+
+  const loadMyAnnouncements = useCallback(
+    async (businessId: string) => {
+      setMyAnnouncementsLoading(true)
+      try {
+        const { data: ann, error } = await supabase
+          .from('announcements')
+          .select('id, title, body, image_url, created_at, hidden_at')
+          .eq('business_id', businessId)
+          .is('deleted_at', null)
+          .order('created_at', { ascending: false })
+          .limit(50)
+
+        if (error) throw error
+        const list = (ann || []) as OwnAnnouncementRow[]
+        setMyAnnouncements(list)
+        const ids = list.map((a) => a.id)
+        if (ids.length === 0) {
+          setMyAnnouncementsMeta({})
+          return
+        }
+
+        const [{ data: likes }, { data: coms }] = await Promise.all([
+          supabase.from('reactions').select('announcement_id, user_id').in('announcement_id', ids).eq('reaction', 'like'),
+          supabase
+            .from('comments')
+            .select(
+              `
+              id,
+              announcement_id,
+              user_id,
+              parent_comment_id,
+              body,
+              created_at,
+              hidden_at,
+              profiles ( ${COMMENT_PROFILE_EMBED} )
+            `
+            )
+            .in('announcement_id', ids)
+            .is('deleted_at', null),
+        ])
+
+        const profileMap = new Map<string, BasicProfile>()
+        for (const c of coms || []) {
+          const row = c as CommentWithProfileEmbed
+          const emb = oneEmbed(row.profiles)
+          if (emb) profileMap.set(row.user_id, emb)
+        }
+
+        const likeUserIds = new Set<string>()
+        for (const r of likes || []) likeUserIds.add((r as { user_id: string }).user_id)
+        if (likeUserIds.size > 0) {
+          const likeIds = [...likeUserIds]
+          for (let i = 0; i < likeIds.length; i += PROFILE_ID_IN_CHUNK) {
+            const slice = likeIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+            const { data: rows, error: pe } = await supabase
+              .from('profiles')
+              .select('id, username, first_name, last_name, avatar_url, role, business_role')
+              .in('id', slice)
+            if (pe) console.error('[loadMyAnnouncements] like profiles', pe)
+            for (const row of rows || []) {
+              profileMap.set(row.id, row as BasicProfile)
+            }
+          }
+        }
+
+        const displayNameFor = (userId: string) => displayNameFromProfile(profileMap.get(userId))
+
+        const meta: Record<
+          string,
+          {
+            likes: number
+            comments: number
+            likedBy: { name: string; avatar: string | null }[]
+            commentedBy: string[]
+            commentPreviews: CommentPreview[]
+            commentDetails: EngagementComment[]
+          }
+        > = {}
+        for (const id of ids) meta[id] = { likes: 0, comments: 0, likedBy: [], commentedBy: [], commentPreviews: [], commentDetails: [] }
+        for (const r of likes || []) {
+          const row = r as { announcement_id: string; user_id: string }
+          const aid = row.announcement_id
+          if (meta[aid]) {
+            meta[aid].likes += 1
+            const name = displayNameFor(row.user_id)
+            const avatar = profileMap.get(row.user_id)?.avatar_url ?? null
+            if (!meta[aid].likedBy.some((x) => x.name === name)) meta[aid].likedBy.push({ name, avatar })
+          }
+        }
+        for (const c of coms || []) {
+          const row = c as CommentWithProfileEmbed
+          const aid = row.announcement_id
+          const prof = oneEmbed(row.profiles) ?? profileMap.get(row.user_id) ?? null
+          if (prof && !profileMap.has(row.user_id)) profileMap.set(row.user_id, prof)
+          if (meta[aid]) {
+            meta[aid].comments += 1
+            const name = displayNameFromProfile(prof)
+            if (!meta[aid].commentedBy.includes(name)) meta[aid].commentedBy.push(name)
+            meta[aid].commentPreviews.push({
+              id: row.id,
+              body: row.body,
+              created_at: row.created_at,
+              userName: name,
+              userAvatar: prof?.avatar_url ?? null,
+            })
+            meta[aid].commentDetails.push({
+              id: row.id,
+              user_id: row.user_id,
+              parent_comment_id: row.parent_comment_id ?? null,
+              body: row.body,
+              created_at: row.created_at,
+              hidden_at: row.hidden_at ?? null,
+              userName: name,
+              userAvatar: prof?.avatar_url ?? null,
+              isStaff: prof?.role === 'business',
+            })
+          }
+        }
+        for (const id of ids) {
+          meta[id].commentPreviews.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at))
+          meta[id].commentPreviews = meta[id].commentPreviews.slice(0, 3)
+          meta[id].commentDetails.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
+        }
+        setMyAnnouncementsMeta(meta)
+      } catch (e) {
+        console.error(e)
+        setMyAnnouncements([])
+        setMyAnnouncementsMeta({})
+      } finally {
+        setMyAnnouncementsLoading(false)
+      }
+    },
+    [supabase]
+  )
+
+  function beginEditPost(a: OwnAnnouncementRow) {
+    setEditingPostId(a.id)
+    setEditPostTitle(a.title)
+    setEditPostBody(a.body)
+  }
+
+  async function saveEditPost() {
+    const p = profileRef.current
+    if (!p?.business_id || !editingPostId) return
+    const title = editPostTitle.trim()
+    const body = editPostBody.trim()
+    if (!title || !body) return
+    setEditPostBusy(true)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .update({ title, body })
+        .eq('id', editingPostId)
+        .eq('business_id', p.business_id)
+      if (error) throw error
+      setEditingPostId(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Save post'))
+    } finally {
+      setEditPostBusy(false)
+    }
+  }
+
+  async function togglePostHidden(postId: string, currentlyHidden: boolean) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setPostModerationBusyId(postId)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .update({ hidden_at: currentlyHidden ? null : new Date().toISOString() })
+        .eq('id', postId)
+        .eq('business_id', p.business_id)
+      if (error) throw error
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Update post visibility'))
+    } finally {
+      setPostModerationBusyId(null)
+    }
+  }
+
+  async function deletePost(postId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    if (!window.confirm('Delete this post? Customers will no longer see it.')) return
+    setPostModerationBusyId(postId)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', postId)
+        .eq('business_id', p.business_id)
+      if (error) throw error
+      if (editingPostId === postId) setEditingPostId(null)
+      if (engagementOpen?.postId === postId) setEngagementOpen(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Delete post'))
+    } finally {
+      setPostModerationBusyId(null)
+    }
+  }
+
+  function beginEditComment(c: EngagementComment) {
+    setEditingCommentId(c.id)
+    setEditCommentBody(c.body)
+  }
+
+  async function saveEditComment() {
+    const p = profileRef.current
+    if (!p?.business_id || !editingCommentId) return
+    const body = editCommentBody.trim()
+    if (!body) return
+    setCommentModerationBusyId(editingCommentId)
+    try {
+      const { error } = await supabase.from('comments').update({ body }).eq('id', editingCommentId)
+      if (error) throw error
+      setEditingCommentId(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Save comment'))
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function toggleCommentHidden(commentId: string, currentlyHidden: boolean) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setCommentModerationBusyId(commentId)
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .update({ hidden_at: currentlyHidden ? null : new Date().toISOString() })
+        .eq('id', commentId)
+      if (error) throw error
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Update comment visibility'))
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function deleteComment(commentId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    if (!window.confirm('Delete this comment?')) return
+    setCommentModerationBusyId(commentId)
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', commentId)
+      if (error) throw error
+      if (editingCommentId === commentId) setEditingCommentId(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(formatModerationError(e, 'Delete comment'))
+    } finally {
+      setCommentModerationBusyId(null)
+    }
+  }
+
+  async function submitStaffComment(postId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    const text = (staffCommentDrafts[postId] || '').trim()
+    if (!text) return
+    setStaffReplyBusyPostId(postId)
+    try {
+      const { error } = await supabase.from('comments').insert({
+        announcement_id: postId,
+        user_id: p.id,
+        body: text,
+      })
+      if (error) throw error
+      setStaffCommentDrafts((d) => ({ ...d, [postId]: '' }))
+      setEngagementOpen({ postId, mode: 'comments' })
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not post comment.')
+    } finally {
+      setStaffReplyBusyPostId(null)
+    }
+  }
+
+  async function submitStaffCommentReply(postId: string, parentCommentId: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    const text = staffReplyThreadDraft.trim()
+    if (!text) return
+    setStaffReplyBusyPostId(postId)
+    try {
+      const { error } = await supabase.from('comments').insert({
+        announcement_id: postId,
+        user_id: p.id,
+        body: text,
+        parent_comment_id: parentCommentId,
+      })
+      if (error) throw error
+      setStaffReplyThreadDraft('')
+      setStaffReplyThreadTarget(null)
+      await loadMyAnnouncements(p.business_id)
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not post reply. Run migration 008_comments_threading.sql if replies fail.')
+    } finally {
+      setStaffReplyBusyPostId(null)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'post' || !profile?.business_id) return
+    void loadMyAnnouncements(profile.business_id)
+  }, [activeTab, profile?.business_id, loadMyAnnouncements])
+
+  useEffect(() => {
+    let cancelled = false
+    async function init() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        router.replace('/login')
+        return
+      }
+
+      const { data: prof, error } = await supabase
+        .from('profiles')
+        .select('id, role, username, avatar_url, business_id, business_role, deleted_at, account_status')
+        .eq('id', user.id)
+        .single()
+
+      if (error || !prof) {
+        router.replace('/login')
+        return
+      }
+
+      const p = prof as ProfileRow & { deleted_at?: string | null; account_status?: string }
+      if (p.deleted_at) {
+        await supabase.auth.signOut()
+        router.replace('/login')
+        return
+      }
+      if (p.account_status && p.account_status !== 'approved') {
+        await supabase.auth.signOut()
+        router.replace('/login')
+        return
+      }
+
+      const pRow: ProfileRow = {
+        id: p.id,
+        role: p.role,
+        username: p.username,
+        avatar_url: p.avatar_url,
+        business_id: p.business_id,
+        business_role: p.business_role,
+      }
+      if (pRow.role !== 'business') {
+        router.replace('/feed')
+        return
+      }
+      if (cancelled) return
+      const cached = readDashCache(pRow.business_id!)
+      if (cached) {
+        setConvoList(cached.convoList)
+        setActiveMembers(cached.activeMembers)
+        setSuspendedMembers(cached.suspendedMembers)
+        setPendingCustomers(cached.pendingCustomers ?? [])
+        setPendingSignupCount(cached.pendingSignupCount)
+        scopeLoadedAtRef.current.inbox = cached.at
+        scopeLoadedAtRef.current.users = cached.at
+        scopeLoadedAtRef.current.light = cached.at
+      }
+      setProfile(pRow)
+      setLoading(false)
+      void refreshDashboardRef.current(pRow, { scope: 'light' })
+      void refreshDashboardRef.current(pRow, { scope: 'inbox' })
+      void refreshDashboardRef.current(pRow, { scope: 'users', pendingDetail: true })
+      window.setTimeout(() => {
+        setMountedTabs((prev) => {
+          const next = new Set(prev)
+          next.add('inbox')
+          next.add('users')
+          return prev.has('inbox') && prev.has('users') ? prev : next
+        })
+        setMountedUsersPanels((prev) => {
+          const next = new Set(prev)
+          next.add('active')
+          next.add('pending')
+          next.add('suspended')
+          return next
+        })
+      }, 50)
+    }
+    void init()
+    return () => {
+      cancelled = true
+    }
+  }, [router, supabase])
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const p = profileRef.current
+      if (!p?.business_id) return
+      const tab = activeTabRef.current
+      if (tab === 'inbox') void refreshDashboard(p, { scope: 'inbox' })
+      else if (tab === 'users') void refreshDashboard(p, { pendingDetail: true, scope: 'users' })
+      else void refreshDashboard(p, { scope: 'light' })
+    }, 60_000)
+    return () => window.clearInterval(id)
+  }, [refreshDashboard])
+
+  useEffect(() => {
+    setInboxContactOpen(false)
+  }, [selectedConvoId])
+
+  useEffect(() => {
+    if (!inboxLabelsPopoverOpen) return
+    function onDoc(e: MouseEvent) {
+      const el = inboxLabelsPopoverRef.current
+      if (el && !el.contains(e.target as Node)) setInboxLabelsPopoverOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [inboxLabelsPopoverOpen])
+
+  useEffect(() => {
+    if (!cannedPopoverOpen) return
+    function onDoc(e: MouseEvent) {
+      const el = cannedPopoverRef.current
+      if (el && !el.contains(e.target as Node)) setCannedPopoverOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [cannedPopoverOpen])
+
+  useEffect(() => {
+    if (!selectedConvoId || threadLoading) return
+    let cancelled = false
+    const scroll = () => {
+      if (cancelled) return
+      scrollThreadToLatest('auto')
+      threadChatScroll.markAtLatest()
+    }
+    const id = window.requestAnimationFrame(() => window.requestAnimationFrame(scroll))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(id)
+    }
+  }, [selectedConvoId, threadLoading, scrollThreadToLatest, threadChatScroll.markAtLatest])
+
+  useEffect(() => {
+    if (!selectedConvoId || threadLoading) return
+    if (!threadChatScroll.isNearBottomRef.current) return
+    let cancelled = false
+    const scroll = () => {
+      if (cancelled) return
+      scrollThreadToLatest('auto')
+    }
+    const id = window.requestAnimationFrame(() => window.requestAnimationFrame(scroll))
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(id)
+    }
+  }, [selectedConvoId, threadLoading, threadMessages.length, scrollThreadToLatest, threadChatScroll.isNearBottomRef])
+
+  useEffect(() => {
+    if (activeTab === 'inbox') return
+    if (!selectedConvoIdRef.current) return
+    const frame = window.requestAnimationFrame(() => {
+      startTransition(() => {
+        setSelectedConvoId(null)
+        setThreadMessages([])
+        setReplyTarget(null)
+        clearReplyPendingImage()
+      })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeTab])
+
+  useEffect(() => {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    const businessId = p.business_id
+
+    let timer: number | null = null
+    const queueRefresh = () => {
+      if (timer) window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const current = profileRef.current
+        if (current?.business_id) void refreshDashboard(current, { scope: 'inbox' })
+      }, 400)
+    }
+
+    const patchInboxOnMessageRead = (payload: { new: Record<string, unknown>; old: Record<string, unknown> }) => {
+      const msg = payload.new as {
+        conversation_id?: string
+        sender_id?: string
+        read?: boolean
+      }
+      const prev = payload.old as { read?: boolean | null }
+      if (!msg.conversation_id || msg.read !== true || prev?.read === true) return
+      const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
+      if (!conv || msg.sender_id !== conv.customer_id) return
+      setConvoList((list) =>
+        list.map((c) =>
+          c.id === msg.conversation_id ? { ...c, unreadCount: Math.max(0, c.unreadCount - 1) } : c
+        )
+      )
+    }
+
+    const bumpInboxOnCustomerMessage = (payload: { new: Record<string, unknown> }): boolean => {
+      const msg = payload.new as {
+        conversation_id?: string
+        sender_id?: string
+        body?: string
+        created_at?: string
+      }
+      if (!msg.conversation_id || !msg.sender_id) return false
+      const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
+      if (!conv || msg.sender_id !== conv.customer_id) return false
+      if (isActivelyViewingInboxThread(msg.conversation_id)) return true
+
+      addInboxAttention(msg.conversation_id)
+      const preview = (msg.body ?? '').trim() || conv.preview
+      const updated_at = msg.created_at || new Date().toISOString()
+      setConvoList((prev) => {
+        const idx = prev.findIndex((c) => c.id === msg.conversation_id)
+        if (idx < 0) return prev
+        const row = {
+          ...prev[idx],
+          unreadCount: prev[idx].unreadCount + 1,
+          preview,
+          updated_at,
+        }
+        return [row, ...prev.filter((c) => c.id !== msg.conversation_id)]
+      })
+      return true
+    }
+
+    /** Welcome DMs and other outbound team messages — bump preview without unread badge. */
+    const bumpInboxOnTeamMessage = (payload: { new: Record<string, unknown> }): boolean => {
+      const msg = payload.new as {
+        conversation_id?: string
+        sender_id?: string
+        body?: string
+        created_at?: string
+      }
+      if (!msg.conversation_id || !msg.sender_id) return false
+      const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
+      if (!conv || msg.sender_id === conv.customer_id) return false
+
+      const preview = (msg.body ?? '').trim() || conv.preview
+      const updated_at = msg.created_at || new Date().toISOString()
+      setConvoList((prev) => {
+        const idx = prev.findIndex((c) => c.id === msg.conversation_id)
+        if (idx < 0) return prev
+        const row = {
+          ...prev[idx],
+          preview,
+          updated_at,
+        }
+        return [row, ...prev.filter((c) => c.id !== msg.conversation_id)]
+      })
+      return true
+    }
+
+    const resolveInboundCustomerMessage = (payload: { new: Record<string, unknown> }) => {
+      void (async () => {
+        const msg = payload.new as {
+          conversation_id?: string
+          sender_id?: string
+          body?: string
+          created_at?: string
+        }
+        if (!msg.conversation_id || !msg.sender_id) return
+        if (isActivelyViewingInboxThread(msg.conversation_id)) return
+        const bid = profileRef.current?.business_id
+        if (!bid) return
+
+        const cached = convoListRef.current.find((c) => c.id === msg.conversation_id)
+        if (cached) {
+          if (msg.sender_id !== cached.customer_id) return
+          bumpInboxOnCustomerMessage(payload)
+          return
+        }
+
+        const { data: convo } = await supabase
+          .from('conversations')
+          .select('id, customer_id, updated_at, business_id')
+          .eq('id', msg.conversation_id)
+          .maybeSingle()
+        if (!convo || convo.business_id !== bid || convo.customer_id !== msg.sender_id) return
+
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('id, first_name, last_name, username, avatar_url')
+          .eq('id', convo.customer_id as string)
+          .maybeSingle()
+
+        const pr = prof as {
+          first_name: string
+          last_name: string
+          username: string
+          avatar_url?: string | null
+        } | null
+        const customerName = pr
+          ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
+          : 'Customer'
+        const preview = (msg.body ?? '').trim() || 'No messages yet'
+        const updated_at = msg.created_at || (convo.updated_at as string) || new Date().toISOString()
+
+        addInboxAttention(convo.id as string)
+        setConvoList((prev) => {
+          if (prev.some((c) => c.id === convo.id)) return prev
+          return [
+            {
+              id: convo.id as string,
+              customer_id: convo.customer_id as string,
+              customerName,
+              customerUsername: pr?.username ?? '…',
+              customerAvatar: pr?.avatar_url ?? null,
+              preview,
+              updated_at,
+              unreadCount: 1,
+              labels: [],
+            },
+            ...prev,
+          ]
+        })
+      })()
+    }
+
+    const resolveOutboundTeamMessage = (payload: { new: Record<string, unknown> }) => {
+      void (async () => {
+        const msg = payload.new as {
+          conversation_id?: string
+          sender_id?: string
+          body?: string
+          created_at?: string
+        }
+        if (!msg.conversation_id || !msg.sender_id) return
+        const bid = profileRef.current?.business_id
+        if (!bid) return
+
+        const cached = convoListRef.current.find((c) => c.id === msg.conversation_id)
+        if (cached) {
+          if (msg.sender_id === cached.customer_id) return
+          bumpInboxOnTeamMessage(payload)
+          return
+        }
+
+        const { data: convo } = await supabase
+          .from('conversations')
+          .select('id, customer_id, updated_at, business_id')
+          .eq('id', msg.conversation_id)
+          .maybeSingle()
+        if (!convo || convo.business_id !== bid) return
+        if (msg.sender_id === convo.customer_id) return
+
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('id, first_name, last_name, username, avatar_url')
+          .eq('id', convo.customer_id as string)
+          .maybeSingle()
+
+        const pr = prof as {
+          first_name: string
+          last_name: string
+          username: string
+          avatar_url?: string | null
+        } | null
+        const customerName = pr
+          ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
+          : 'Customer'
+        const preview = (msg.body ?? '').trim() || 'No messages yet'
+        const updated_at = msg.created_at || (convo.updated_at as string) || new Date().toISOString()
+
+        setConvoList((prev) => {
+          if (prev.some((c) => c.id === convo.id)) return prev
+          return [
+            {
+              id: convo.id as string,
+              customer_id: convo.customer_id as string,
+              customerName,
+              customerUsername: pr?.username ?? '…',
+              customerAvatar: pr?.avatar_url ?? null,
+              preview,
+              updated_at,
+              unreadCount: 0,
+              labels: [],
+            },
+            ...prev,
+          ]
+        })
+      })()
+    }
+
+    const channel = supabase
+      .channel(`staff-dashboard-${businessId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations', filter: `business_id=eq.${businessId}` }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_reports', filter: `business_id=eq.${businessId}` }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'follows', filter: `business_id=eq.${businessId}` }, queueRefresh)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        (payload) => {
+          const bumped = bumpInboxOnCustomerMessage(payload)
+          if (bumped) return
+          if (bumpInboxOnTeamMessage(payload)) return
+          resolveInboundCustomerMessage(payload)
+          resolveOutboundTeamMessage(payload)
+        }
+      )
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, patchInboxOnMessageRead)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_inbox_labels' }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_label_definitions' }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inbox_canned_replies' }, queueRefresh)
+      .subscribe((status, err) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          console.error('[staff-dashboard] Realtime subscription failed:', status, err)
+        }
+      })
+
+    return () => {
+      if (timer) window.clearTimeout(timer)
+      void supabase.removeChannel(channel)
+    }
+  }, [supabase, refreshDashboard, profile?.business_id, profile?.id, addInboxAttention])
+
+  useEffect(() => {
+    if (!selectedConvoId || !profile?.id) return
+    const cid = selectedConvoId
+    const myId = profile.id
+    let stopped = false
+    staffThreadBroadcastReadyRef.current = false
+    staffThreadChannelRef.current = null
+
+    const channel = supabase
+      .channel(`staff-thread-${cid}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` },
+        () => {
+          void reloadThreadMessages(cid, { markRead: false })
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` },
+        (payload) => {
+          const row = payload.new as {
+            id?: string
+            read?: boolean
+            read_at?: string | null
+          }
+          if (!row?.id) return
+          setThreadMessages((prev) =>
+            prev.map((m) =>
+              m.id === row.id ? { ...m, read: row.read ?? m.read, read_at: row.read_at ?? m.read_at } : m
+            )
+          )
+        }
+      )
+      .on('broadcast', { event: 'typing' }, ({ payload }) => {
+        const p = payload as { userId?: string; typing?: boolean }
+        if (!p?.userId || p.userId === myId) return
+        if (peerCustomerTypingClearTimerRef.current) {
+          window.clearTimeout(peerCustomerTypingClearTimerRef.current)
+          peerCustomerTypingClearTimerRef.current = null
+        }
+        if (p.typing) {
+          setPeerCustomerTyping(true)
+          peerCustomerTypingClearTimerRef.current = window.setTimeout(() => {
+            setPeerCustomerTyping(false)
+            peerCustomerTypingClearTimerRef.current = null
+          }, 3500)
+        } else {
+          setPeerCustomerTyping(false)
+        }
+      })
+      .subscribe((status) => {
+        if (stopped) return
+        staffThreadBroadcastReadyRef.current = status === 'SUBSCRIBED'
+        if (status === 'SUBSCRIBED') setStaffTypingChannelReady((n) => n + 1)
+      })
+
+    staffThreadChannelRef.current = channel
+
+    return () => {
+      stopped = true
+      staffThreadBroadcastReadyRef.current = false
+      staffThreadChannelRef.current = null
+      if (staffTypingIdleTimerRef.current) {
+        window.clearTimeout(staffTypingIdleTimerRef.current)
+        staffTypingIdleTimerRef.current = null
+      }
+      if (staffTypingSentRef.current) {
+        void channel.send({
+          type: 'broadcast',
+          event: 'typing',
+          payload: { userId: myId, typing: false },
+        })
+        staffTypingSentRef.current = false
+      }
+      if (peerCustomerTypingClearTimerRef.current) {
+        window.clearTimeout(peerCustomerTypingClearTimerRef.current)
+        peerCustomerTypingClearTimerRef.current = null
+      }
+      setPeerCustomerTyping(false)
+      void supabase.removeChannel(channel)
+    }
+  }, [supabase, selectedConvoId, profile?.id])
+
+  useEffect(() => {
+    if (!selectedConvoId || !profile?.id) return
+    const hasComposerContent = Boolean(replyDraft.trim()) || Boolean(replyPendingImage)
+    const ch = staffThreadChannelRef.current
+    const myId = profile.id
+
+    const sendStop = () => {
+      if (staffTypingIdleTimerRef.current) {
+        window.clearTimeout(staffTypingIdleTimerRef.current)
+        staffTypingIdleTimerRef.current = null
+      }
+      if (!staffTypingSentRef.current) return
+      if (staffThreadBroadcastReadyRef.current && ch) {
+        void ch.send({ type: 'broadcast', event: 'typing', payload: { userId: myId, typing: false } })
+      }
+      staffTypingSentRef.current = false
+    }
+
+    if (!hasComposerContent) {
+      sendStop()
+      return
+    }
+
+    if (staffThreadBroadcastReadyRef.current && ch) {
+      if (!staffTypingSentRef.current) {
+        void ch.send({ type: 'broadcast', event: 'typing', payload: { userId: myId, typing: true } })
+        staffTypingSentRef.current = true
+      }
+    }
+
+    if (staffTypingIdleTimerRef.current) window.clearTimeout(staffTypingIdleTimerRef.current)
+    staffTypingIdleTimerRef.current = window.setTimeout(() => {
+      staffTypingIdleTimerRef.current = null
+      sendStop()
+    }, 2000)
+
+    return () => {
+      if (staffTypingIdleTimerRef.current) {
+        window.clearTimeout(staffTypingIdleTimerRef.current)
+        staffTypingIdleTimerRef.current = null
+      }
+    }
+  }, [replyDraft, replyPendingImage, selectedConvoId, profile?.id, staffTypingChannelReady])
+
+  useEffect(() => {
+    const uid = profile?.id
+    if (!uid) return
+
+    async function bumpBell() {
+      const { count } = await supabase
+        .from('notifications')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', uid)
+        .eq('read', false)
+      setStaffNotifyUnread(count ?? 0)
+    }
+
+    const channel = supabase
+      .channel(`staff-notifications-${uid}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+        (payload) => {
+          const row = payload.new as { type?: string; read?: boolean }
+          if (row?.read) return
+          if (row?.type === 'support_message' || row?.type === 'staff_alert') {
+            setStaffNotifyUnread((n) => n + 1)
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+        () => void bumpBell()
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [supabase, profile?.id])
+
+  useDesktopMessageNotifications({
+    supabase,
+    userId: profile?.id,
+    types: ['support_message', 'staff_alert'],
+    onOpenMessage: (row) => {
+      if (row.conversation_id) openMessageFromNotifyRef.current(row.conversation_id)
+      else router.push(row.link || '/notifications')
+    },
+    onOpenConversation: (conversationId) => openMessageFromNotifyRef.current(conversationId),
+    getCustomerLabelForConversation: (conversationId) => {
+      if (!conversationId) return null
+      const cached = inboundCustomerFirstNameRef.current.get(conversationId)
+      if (cached) return cached
+      const conv = convoListRef.current.find((c) => c.id === conversationId)
+      if (!conv?.customerName?.trim()) return null
+      return conv.customerName.trim().split(/\s+/)[0] || conv.customerName.trim()
+    },
+    watchMessages:
+      profile?.id && profile.business_id
+        ? {
+            myUserId: profile.id,
+            businessId: profile.business_id,
+            popupTitle: 'New message',
+            isActivelyViewingThread: isActivelyViewingInboxThread,
+            getConvoFromList: (id) => {
+              const c = convoListRef.current.find((row) => row.id === id)
+              if (!c) return undefined
+              return { customer_id: c.customer_id, customerName: c.customerName }
+            },
+            getSenderLabel: (msg) => inboundCustomerFirstNameRef.current.get(msg.conversation_id) ?? null,
+          }
+        : undefined,
+  })
+
+  useEffect(() => {
+    if (activeTab !== 'team' || profileRef.current?.business_role !== 'admin') return
+    void loadTeam()
+  }, [activeTab, loadTeam])
+
+  /** Support must not stay on Team (nav hidden); avoids blank or stale state if URL/bookmark forced the tab. */
+  useEffect(() => {
+    if (!profile) return
+    if (profile.business_role !== 'admin' && activeTab === 'team') {
+      setActiveTab('home')
+    }
+  }, [profile, activeTab])
+
+  useEffect(() => {
+    if (activeTab !== 'notify' || audience !== 'selected') {
+      setNotifySearchResults([])
+      return
+    }
+    const q = notifyRecipientQuery.trim()
+    if (!q) {
+      setNotifySearchResults([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setNotifySearchBusy(true)
+        try {
+          const res = await fetch(`/api/staff/search-customers?q=${encodeURIComponent(q)}`)
+          const j = (await res.json().catch(() => ({}))) as {
+            results?: { id: string; username: string; first_name: string | null; last_name: string | null; email: string | null }[]
+          }
+          if (res.ok) setNotifySearchResults(j.results ?? [])
+          else setNotifySearchResults([])
+        } catch {
+          setNotifySearchResults([])
+        } finally {
+          setNotifySearchBusy(false)
+        }
+      })()
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [activeTab, audience, notifyRecipientQuery])
+
+  useEffect(() => {
+    if (usersPanelTab !== 'active') {
+      setActiveMemberLookup(null)
+      return
+    }
+    const q = activeMemberQuery.trim()
+    if (q.length < 2) {
+      setActiveMemberLookup(null)
+      return
+    }
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setActiveMemberLookupBusy(true)
+        try {
+          const res = await fetch('/api/staff/search-customers', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier: q }),
+          })
+          const j = (await res.json().catch(() => ({}))) as {
+            customer?: {
+              id: string
+              username: string
+              first_name: string | null
+              last_name: string | null
+              account_status: string
+              email: string | null
+            }
+          }
+          setActiveMemberLookup(res.ok && j.customer ? j.customer : null)
+        } catch {
+          setActiveMemberLookup(null)
+        } finally {
+          setActiveMemberLookupBusy(false)
+        }
+      })()
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [usersPanelTab, activeMemberQuery])
+
+  /** Load older threads for inbox search that fall outside the recent-thread limit. */
+  useEffect(() => {
+    if (activeTab !== 'inbox') {
+      setInboxSearchExtraConvos([])
+      return
+    }
+    const q = inboxSearchQuery.trim().toLowerCase().replace(/^@+/, '')
+    const bid = profile?.business_id
+    if (q.length < 2 || !bid) {
+      setInboxSearchExtraConvos([])
+      return
+    }
+
+    const matchesMember = (m: {
+      first_name?: string | null
+      last_name?: string | null
+      username?: string | null
+    }) => {
+      const first = (m.first_name ?? '').toLowerCase()
+      const last = (m.last_name ?? '').toLowerCase()
+      const label = `${first} ${last}`.trim()
+      const username = (m.username ?? '').toLowerCase().replace(/^@+/, '')
+      return label.includes(q) || first.includes(q) || last.includes(q) || username.includes(q)
+    }
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setInboxSearchExtraBusy(true)
+        try {
+          const loadedConvoIds = new Set(convoList.map((c) => c.id))
+          const customerIdsToTry = new Set<string>()
+
+          for (const m of activeMembers) {
+            if (matchesMember(m)) customerIdsToTry.add(m.id)
+          }
+          for (const m of suspendedMembers) {
+            if (matchesMember(m)) customerIdsToTry.add(m.id)
+          }
+
+          try {
+            const res = await fetch('/api/staff/search-customers', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ identifier: inboxSearchQuery.trim() }),
+            })
+            const j = (await res.json().catch(() => ({}))) as { customer?: { id: string } }
+            if (res.ok && j.customer?.id) customerIdsToTry.add(j.customer.id)
+          } catch {
+            /* optional */
+          }
+
+          const extras: ConvoListItem[] = []
+          for (const customerId of customerIdsToTry) {
+            const { data: convo, error: convoErr } = await supabase
+              .from('conversations')
+              .select('id, customer_id, updated_at')
+              .eq('business_id', bid)
+              .eq('customer_id', customerId)
+              .maybeSingle()
+            if (convoErr || !convo?.id || loadedConvoIds.has(convo.id as string)) continue
+
+            const { data: prof } = await supabase
+              .from('profiles')
+              .select('id, first_name, last_name, username, avatar_url')
+              .eq('id', customerId)
+              .maybeSingle()
+
+            const { data: lastMsg } = await supabase
+              .from('messages')
+              .select('body, created_at')
+              .eq('conversation_id', convo.id as string)
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle()
+
+            const pr = prof as {
+              first_name?: string | null
+              last_name?: string | null
+              username?: string | null
+              avatar_url?: string | null
+            } | null
+            const name = pr
+              ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || (pr.username ?? 'Customer')
+              : 'Customer'
+            const msg = lastMsg as { body?: string; created_at?: string } | null
+
+            extras.push({
+              id: convo.id as string,
+              customer_id: customerId,
+              customerName: name,
+              customerUsername: pr?.username ?? '…',
+              customerAvatar: pr?.avatar_url ?? null,
+              preview: (msg?.body ?? '').trim() || 'No messages yet',
+              updated_at: (convo.updated_at as string) || msg?.created_at || new Date().toISOString(),
+              unreadCount: 0,
+              labels: [],
+            })
+            loadedConvoIds.add(convo.id as string)
+          }
+
+          setInboxSearchExtraConvos(extras)
+        } catch {
+          setInboxSearchExtraConvos([])
+        } finally {
+          setInboxSearchExtraBusy(false)
+        }
+      })()
+    }, 350)
+
+    return () => window.clearTimeout(timer)
+  }, [activeTab, inboxSearchQuery, profile?.business_id, convoList, activeMembers, suspendedMembers, supabase])
+
+  /** Load every thread with the selected inbox label (not only the recent-thread cap). */
+  useEffect(() => {
+    if (activeTab !== 'inbox') {
+      setInboxLabelFilterExtraConvos([])
+      return
+    }
+    const labelId = inboxThreadLabelFilterIds.length === 1 ? inboxThreadLabelFilterIds[0] : null
+    const bid = profile?.business_id
+    if (!labelId || !bid) {
+      setInboxLabelFilterExtraConvos([])
+      return
+    }
+
+    let cancelled = false
+    setInboxLabelFilterBusy(true)
+
+    void (async () => {
+      try {
+        const { data: assignRows, error: assignErr } = await supabase
+          .from('conversation_inbox_labels')
+          .select('conversation_id')
+          .eq('label_id', labelId)
+        if (cancelled) return
+        if (assignErr) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const labeledConvoIds = [...new Set((assignRows ?? []).map((r) => r.conversation_id as string))]
+        if (labeledConvoIds.length === 0) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const loadedConvoIds = new Set(convoList.map((c) => c.id))
+        const missingIds = labeledConvoIds.filter((id) => !loadedConvoIds.has(id))
+        if (missingIds.length === 0) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const convoRows: { id: string; customer_id: string; updated_at: string }[] = []
+        for (let i = 0; i < missingIds.length; i += CONVO_ID_IN_CHUNK) {
+          const slice = missingIds.slice(i, i + CONVO_ID_IN_CHUNK)
+          const { data, error } = await supabase
+            .from('conversations')
+            .select('id, customer_id, updated_at')
+            .eq('business_id', bid)
+            .in('id', slice)
+          if (cancelled) return
+          if (error) throw error
+          for (const row of data ?? []) {
+            convoRows.push(row as { id: string; customer_id: string; updated_at: string })
+          }
+        }
+
+        if (convoRows.length === 0) {
+          setInboxLabelFilterExtraConvos([])
+          return
+        }
+
+        const convIds = convoRows.map((c) => c.id)
+        const customerIds = [...new Set(convoRows.map((c) => c.customer_id))]
+        const defById = Object.fromEntries(inboxLabelCatalog.map((d) => [d.id, d])) as Record<
+          string,
+          InboxLabelRow
+        >
+
+        const profileById: Record<
+          string,
+          { first_name: string; last_name: string; username: string; avatar_url?: string | null }
+        > = {}
+        for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
+          const slice = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+          const { data: profs } = await supabase
+            .from('profiles')
+            .select('id, first_name, last_name, username, avatar_url')
+            .in('id', slice)
+          if (cancelled) return
+          for (const row of profs ?? []) {
+            const r = row as {
+              id: string
+              first_name: string
+              last_name: string
+              username: string
+              avatar_url?: string | null
+            }
+            profileById[r.id] = r
+          }
+        }
+
+        const previewByConvo: Record<string, { body: string; created_at: string }> = {}
+        try {
+          Object.assign(previewByConvo, await fetchInboxPreviews(supabase, convIds))
+        } catch {
+          Object.assign(previewByConvo, await fetchInboxPreviewsLegacy(supabase, convIds))
+        }
+        if (cancelled) return
+
+        const unreadByConvo = await fetchInboxUnreadCounts(supabase, convoRows)
+        if (cancelled) return
+
+        const labelsByConvo: Record<string, InboxLabelRow[]> = {}
+        for (let i = 0; i < convIds.length; i += CONVO_ID_IN_CHUNK) {
+          const slice = convIds.slice(i, i + CONVO_ID_IN_CHUNK)
+          const { data: labelAssigns } = await supabase
+            .from('conversation_inbox_labels')
+            .select('conversation_id, label_id')
+            .in('conversation_id', slice)
+          if (cancelled) return
+          for (const row of labelAssigns ?? []) {
+            const r = row as { conversation_id: string; label_id: string }
+            const d = defById[r.label_id]
+            if (!d) continue
+            if (!labelsByConvo[r.conversation_id]) labelsByConvo[r.conversation_id] = []
+            labelsByConvo[r.conversation_id].push(d)
+          }
+        }
+        for (const cid of Object.keys(labelsByConvo)) {
+          labelsByConvo[cid].sort((a, b) => {
+            if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+            return a.name.localeCompare(b.name)
+          })
+        }
+
+        const extras: ConvoListItem[] = convoRows.map((row) => {
+          const pr = profileById[row.customer_id]
+          const name = pr
+            ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username
+            : 'Customer'
+          const pv = previewByConvo[row.id]
+          return {
+            id: row.id,
+            customer_id: row.customer_id,
+            customerName: name,
+            customerUsername: pr?.username ?? '…',
+            customerAvatar: pr?.avatar_url ?? null,
+            preview: pv?.body || 'No messages yet',
+            updated_at: row.updated_at,
+            unreadCount: unreadByConvo[row.id] || 0,
+            labels: labelsByConvo[row.id] || [],
+          }
+        })
+
+        if (!cancelled) setInboxLabelFilterExtraConvos(extras)
+      } catch {
+        if (!cancelled) setInboxLabelFilterExtraConvos([])
+      } finally {
+        if (!cancelled) setInboxLabelFilterBusy(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeTab,
+    inboxThreadLabelFilterIds,
+    profile?.business_id,
+    convoList,
+    inboxLabelCatalog,
+    supabase,
+  ])
+
+  async function manualRefresh() {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setDashRefreshing(true)
+    try {
+      await refreshDashboard(p, { scope: 'full', force: true })
+      if (p.business_role === 'admin' && activeTabRef.current === 'team') await loadTeam()
+    } finally {
+      setDashRefreshing(false)
+    }
+  }
+
+  async function createSupportStaff() {
+    if (profileRef.current?.business_role !== 'admin') return
+    const firstName = newStaffFirst.trim()
+    const staffEmail = newStaffEmail.trim().toLowerCase()
+    const staffUsername = newStaffUsername.trim().replace(/^@+/, '')
+    const pw = newStaffPassword
+    const pw2 = newStaffPasswordConfirm
+    if (!firstName || !staffEmail || !staffUsername || !pw || !pw2) {
+      alert('Fill in first name, work email, username, password, and confirm password.')
+      return
+    }
+    if (pw !== pw2) {
+      alert('Password and confirm password must match.')
+      return
+    }
+    if (pw.length < 8) {
+      alert('Password must be at least 8 characters.')
+      return
+    }
+    setCreateStaffBusy(true)
+    let createdOk = false
+    let errMsg: string | null = null
+    try {
+      const r = await fetch('/api/staff/create-support', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          firstName,
+          email: staffEmail,
+          username: staffUsername,
+          password: pw,
+          confirmPassword: pw2,
+        }),
+        signal: AbortSignal.timeout(150_000),
+      })
+      const j = (await r.json().catch(() => ({}))) as { error?: string }
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
+      setNewStaffFirst('')
+      setNewStaffEmail('')
+      setNewStaffUsername('')
+      setNewStaffPassword('')
+      setNewStaffPasswordConfirm('')
+      setShowNewStaffPassword(false)
+      void loadTeam()
+      createdOk = true
+    } catch (e) {
+      const aborted =
+        e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')
+      errMsg = aborted
+        ? 'Request timed out. Check your connection and try again.'
+        : e instanceof Error
+          ? e.message
+          : 'Could not create staff.'
+    } finally {
+      // Must run before alert(): alert blocks the main thread, so clearing busy in a finally after
+      // alert() kept the button spinning until the dialog was dismissed (easy to miss if pop-ups are blocked).
+      setCreateStaffBusy(false)
+    }
+    if (errMsg) alert(errMsg)
+    else if (createdOk) {
+      alert(
+        'Support staff added. They sign in at the same page as you: work email + password. Customers see their name and @username in chat.'
+      )
+    }
+  }
+
+  async function removeSupportMember(targetUserId: string, display: string) {
+    if (profileRef.current?.business_role !== 'admin') return
+    if (!window.confirm(`Remove ${display} from your team? They will no longer be able to sign in.`)) return
+    setRemoveStaffBusyId(targetUserId)
+    try {
+      const r = await fetch('/api/staff/remove-support', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId }),
+      })
+      const j = (await r.json().catch(() => ({}))) as { error?: string }
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
+      void loadTeam()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not remove staff.')
+    } finally {
+      setRemoveStaffBusyId(null)
+    }
+  }
+
+  async function moderateSuspension(
+    userId: string,
+    action: 'suspend' | 'unsuspend',
+    displayName: string
+  ) {
+    const role = profileRef.current?.business_role
+    if (role !== 'admin' && role !== 'support') return
+    const msg =
+      action === 'suspend'
+        ? `Suspend ${displayName}? They will not be able to use the app until a staff member unsuspends them.`
+        : `Unsuspend ${displayName} and restore full access?`
+    if (!window.confirm(msg)) return
+    let reason: string | undefined
+    if (action === 'suspend') {
+      const note = window.prompt('Optional note for the moderation log (internal):', '')
+      if (note === null) return
+      reason = note.trim() || undefined
+    }
+    setModBusyId(userId)
+    try {
+      const open = convoList.find((c) => c.id === selectedConvoId)
+      if (action === 'suspend' && open?.customer_id === userId) {
+        setSelectedConvoId(null)
+        setThreadMessages([])
+      }
+      const res = await fetch('/api/staff/moderate-suspension', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: userId, action, reason }),
+      })
+      const j = (await res.json()) as { error?: string }
+      if (!res.ok) throw new Error(j.error || 'Request failed')
+      const p = profileRef.current
+      if (p) await refreshDashboard(p, { scope: 'users', pendingDetail: true })
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Request failed')
+    } finally {
+      setModBusyId(null)
+    }
+  }
+
+  function clearReplyPendingImage() {
+    setReplyPendingImage((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl)
+      return null
+    })
+  }
+
+  async function applyInboxLabelOnThread(labelId: string, assign: boolean, defOverride?: InboxLabelRow) {
+    const convId = selectedConvoIdRef.current
+    if (!convId) return
+    const def = defOverride ?? inboxLabelCatalog.find((d) => d.id === labelId)
+    if (assign && !def) return
+    setInboxLabelRowBusy(labelId)
+    try {
+      if (assign) {
+        const { error } = await supabase.from('conversation_inbox_labels').insert({
+          conversation_id: convId,
+          label_id: labelId,
+        })
+        if (error) throw error
+        setConvoList((prev) =>
+          prev.map((c) => {
+            if (c.id !== convId || !def) return c
+            if (c.labels.some((l) => l.id === labelId)) return c
+            const next = [...c.labels, def].sort((a, b) => {
+              if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+              return a.name.localeCompare(b.name)
+            })
+            return { ...c, labels: next }
+          })
+        )
+      } else {
+        const { error } = await supabase
+          .from('conversation_inbox_labels')
+          .delete()
+          .eq('conversation_id', convId)
+          .eq('label_id', labelId)
+        if (error) throw error
+        setConvoList((prev) =>
+          prev.map((c) => (c.id !== convId ? c : { ...c, labels: c.labels.filter((l) => l.id !== labelId) }))
+        )
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not update label')
+      const cur = profileRef.current
+      if (cur?.business_id) void refreshDashboard(cur, { scope: 'inbox' })
+    } finally {
+      setInboxLabelRowBusy(null)
+    }
+  }
+
+  async function createInboxLabelFromDraft() {
+    const p = profileRef.current
+    const name = newInboxLabelName.trim()
+    if (!p?.business_id || !name) return
+    setInboxLabelCreateBusy(true)
+    try {
+      const { data, error } = await supabase
+        .from('inbox_label_definitions')
+        .insert({
+          business_id: p.business_id,
+          name,
+          color: '#94a3b8',
+          is_system: false,
+        })
+        .select('id, name, color, is_system')
+        .single()
+      if (error) throw error
+      const row = data as { id: string; name: string; color: string | null; is_system: boolean }
+      const added: InboxLabelRow = {
+        id: row.id,
+        name: row.name,
+        color: row.color,
+        is_system: row.is_system,
+      }
+      setInboxLabelCatalog((prev) =>
+        [...prev, added].sort((a, b) => {
+          if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+          return a.name.localeCompare(b.name)
+        })
+      )
+      setNewInboxLabelName('')
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not create label')
+    } finally {
+      setInboxLabelCreateBusy(false)
+    }
+  }
+
+  async function deleteInboxLabelDefinition(labelId: string) {
+    const def = inboxLabelCatalog.find((d) => d.id === labelId)
+    if (!def || def.is_system) return
+    if (!window.confirm(`Remove label "${def.name}" from your team? It will be removed from all threads.`)) return
+    setInboxLabelRowBusy(labelId)
+    try {
+      const { error } = await supabase.from('inbox_label_definitions').delete().eq('id', labelId)
+      if (error) throw error
+      setInboxLabelCatalog((prev) => prev.filter((d) => d.id !== labelId))
+      setConvoList((prev) => prev.map((c) => ({ ...c, labels: c.labels.filter((l) => l.id !== labelId) })))
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not delete label')
+    } finally {
+      setInboxLabelRowBusy(null)
+    }
+  }
+
+  function insertCannedReplyIntoDraft(row: CannedReplyRow) {
+    const convId = selectedConvoIdRef.current
+    if (!convId) {
+      alert('Select a conversation first.')
+      return
+    }
+    const conv = convoListRef.current.find((c) => c.id === convId)
+    if (!conv) {
+      alert('Select a conversation first.')
+      return
+    }
+    const bizName = businessInfo?.name?.trim() || 'our team'
+    const expanded = expandCannedReplyBody(row.body, {
+      customerName: conv.customerName,
+      customerUsername: conv.customerUsername,
+      businessName: bizName,
+    })
+    setReplyDraft((d) => mergeCannedIntoDraft(d, expanded))
+    setCannedPopoverOpen(false)
+    setCannedPickerQuery('')
+  }
+
+  function beginEditCanned(row: CannedReplyRow) {
+    setCannedEditId(row.id)
+    setCannedFormTitle(row.title)
+    setCannedFormBody(row.body)
+  }
+
+  function cancelCannedForm() {
+    setCannedEditId(null)
+    setCannedFormTitle('')
+    setCannedFormBody('')
+  }
+
+  async function saveCannedReplyForm() {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    const title = cannedFormTitle.trim()
+    const body = cannedFormBody.trim()
+    if (!title || !body) {
+      alert('Title and message body are required.')
+      return
+    }
+    setCannedSaveBusy(true)
+    try {
+      if (cannedEditId) {
+        const { error } = await supabase
+          .from('inbox_canned_replies')
+          .update({ title, body })
+          .eq('id', cannedEditId)
+          .eq('business_id', p.business_id)
+        if (error) throw error
+        setCannedReplies((prev) =>
+          prev
+            .map((r) => (r.id === cannedEditId ? { ...r, title, body } : r))
+            .sort((a, b) => {
+              if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+              return a.title.localeCompare(b.title)
+            })
+        )
+      } else {
+        const { data, error } = await supabase
+          .from('inbox_canned_replies')
+          .insert({
+            business_id: p.business_id,
+            title,
+            body,
+            sort_order: cannedReplies.length,
+          })
+          .select('id, title, body, sort_order')
+          .single()
+        if (error) throw error
+        const row = data as { id: string; title: string; body: string; sort_order: number }
+        setCannedReplies((prev) =>
+          [...prev, { id: row.id, title: row.title, body: row.body, sort_order: row.sort_order }].sort((a, b) =>
+            a.title.localeCompare(b.title)
+          )
+        )
+      }
+      cancelCannedForm()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not save quick reply')
+    } finally {
+      setCannedSaveBusy(false)
+    }
+  }
+
+  async function deleteCannedReply(id: string) {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    if (!window.confirm('Delete this quick reply?')) return
+    setCannedDeleteBusyId(id)
+    try {
+      const { error } = await supabase.from('inbox_canned_replies').delete().eq('id', id).eq('business_id', p.business_id)
+      if (error) throw error
+      setCannedReplies((prev) => prev.filter((r) => r.id !== id))
+      if (cannedEditId === id) cancelCannedForm()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not delete quick reply')
+    } finally {
+      setCannedDeleteBusyId(null)
+    }
+  }
+
+  async function markActiveThreadRead(conversationId: string, customerId: string) {
+    const p = profileRef.current
+    const { errorMessage: readErr } = await markCustomerMessagesReadForStaff(
+      supabase,
+      conversationId,
+      customerId
+    )
+    if (readErr) console.error(readErr)
+    const now = new Date().toISOString()
+    clearInboxAttention(conversationId)
+    setConvoList((prev) => prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c)))
+    setThreadMessages((prev) =>
+      prev.map((m) =>
+        m.sender_id === customerId && m.read !== true ? { ...m, read: true, read_at: now } : m
+      )
+    )
+    if (p?.id) {
+      const { errorMessage: nErr } = await markConversationNotificationsRead(supabase, p.id, conversationId)
+      if (nErr) console.error(nErr)
+      const { count } = await supabase
+        .from('notifications')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', p.id)
+        .eq('read', false)
+      setStaffNotifyUnread(count ?? 0)
+    }
+  }
+
+  async function reloadThreadMessages(
+    conversationId: string,
+    options?: { markRead?: boolean; showLoading?: boolean }
+  ) {
+    const showLoading = options?.showLoading ?? false
+    if (showLoading) setThreadLoading(true)
+    try {
+      const { data: convoMeta, error: convoErr } = await supabase
+        .from('conversations')
+        .select('customer_id')
+        .eq('id', conversationId)
+        .maybeSingle()
+      if (convoErr) throw convoErr
+      const customerId = convoMeta?.customer_id as string | undefined
+
+      async function fetchMessages(select: string) {
+        const { data, error } = await supabase
+          .from('messages')
+          .select(select)
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: true })
+        return { data: (data || []) as unknown as ThreadMessage[], error }
+      }
+
+      async function fetchWithReplyFallback() {
+        let result = await fetchMessages(THREAD_MESSAGE_SELECT)
+        if (result.error && isReplyToSchemaError(result.error.message)) {
+          result = await fetchMessages(THREAD_MESSAGE_SELECT_LEGACY)
+        }
+        if (result.error && isReplyToSchemaError(result.error.message)) {
+          result = await fetchMessages(THREAD_MESSAGE_SELECT_BASE)
+        }
+        if (!result.error) {
+          result = { ...result, data: hydrateReplyEmbeds(result.data) }
+        }
+        return result
+      }
+
+      const { data, error } = await fetchWithReplyFallback()
+      if (error) throw error
+      setThreadMessages(data)
+
+      if (options?.markRead && customerId) {
+        await markActiveThreadRead(conversationId, customerId)
+      }
+    } catch (e) {
+      console.error(e)
+      setThreadMessages([])
+    } finally {
+      if (showLoading) setThreadLoading(false)
+    }
+  }
+
+  async function openThread(conversationId: string) {
+    setInboxLabelsPopoverOpen(false)
+    setCannedPopoverOpen(false)
+    setSelectedConvoId(conversationId)
+    setThreadLoading(true)
+    setReplyDraft('')
+    setReplyTarget(null)
+    clearReplyPendingImage()
+    const conv = convoListRef.current.find((c) => c.id === conversationId)
+    if (conv && conv.unreadCount > 0) addInboxAttention(conversationId)
+    await reloadThreadMessages(conversationId, { markRead: false, showLoading: true })
+  }
+
+  function closeInboxThread() {
+    setInboxLabelsPopoverOpen(false)
+    setInboxContactOpen(false)
+    setCannedPopoverOpen(false)
+    setSelectedConvoId(null)
+    setReplyTarget(null)
+    clearReplyPendingImage()
+    setThreadMessages([])
+  }
+
+  openMessageFromNotifyRef.current = (conversationId: string) => {
+    switchTab('inbox')
+    void openThread(conversationId)
+  }
+
+  async function onReplyImagePick(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    if (!f.type.startsWith('image/') || f.type.startsWith('video/')) {
+      alert('Only image files are allowed (no video).')
+      return
+    }
+    if (f.size > 20 * 1024 * 1024) {
+      alert('Please choose an image under 20 MB.')
+      return
+    }
+    try {
+      const blob = await downscaleImageFileToJpeg(f, { maxDim: 1280, quality: 0.85 })
+      const previewUrl = URL.createObjectURL(blob)
+      setReplyPendingImage((prev) => {
+        if (prev) URL.revokeObjectURL(prev.previewUrl)
+        return { blob, previewUrl }
+      })
+    } catch (err) {
+      console.error(err)
+      alert(err instanceof Error ? err.message : 'Could not process the image.')
+    }
+  }
+
+  async function insertStaffMessageToConversation(
+    conversationId: string,
+    rawText: string,
+    pendingImage: { blob: Blob; previewUrl: string } | null,
+    opts?: { replyToId?: string | null; replyTarget?: ReplyTargetMessage | null }
+  ): Promise<ThreadMessage | null> {
+    const p = profileRef.current
+    if (!p) return null
+    const text = rawText.trim()
+    const hasImage = !!pendingImage
+    if (!text && !hasImage) return null
+
+    let imageUrl: string | null = null
+    if (hasImage && pendingImage) {
+      const path = `${p.id}/${conversationId}/${crypto.randomUUID()}.jpg`
+      const { error: upErr } = await supabase.storage
+        .from('message-images')
+        .upload(path, pendingImage.blob, {
+          contentType: 'image/jpeg',
+          upsert: false,
+        })
+      if (upErr) throw upErr
+      const { data: pub } = supabase.storage.from('message-images').getPublicUrl(path)
+      imageUrl = pub.publicUrl
+    }
+
+    const body = text || (imageUrl ? '📷' : ' ')
+
+    const replyToId = opts?.replyToId ?? null
+    const capturedReplyTarget = opts?.replyTarget ?? null
+
+    const insertPayload: {
+      conversation_id: string
+      sender_id: string
+      body: string
+      image_url: string | null
+      reply_to_message_id?: string | null
+    } = {
+      conversation_id: conversationId,
+      sender_id: p.id,
+      body,
+      image_url: imageUrl,
+    }
+    if (replyToId) insertPayload.reply_to_message_id = replyToId
+
+    let { data, error } = await supabase
+      .from('messages')
+      .insert(insertPayload)
+      .select(THREAD_MESSAGE_SELECT)
+      .single()
+
+    if (error && isReplyToSchemaError(error.message)) {
+      const legacy = await supabase
+        .from('messages')
+        .insert(insertPayload)
+        .select(THREAD_MESSAGE_SELECT_LEGACY)
+        .single()
+      data = legacy.data as typeof data
+      error = legacy.error
+    }
+
+    if (error && isReplyToSchemaError(error.message)) {
+      const { reply_to_message_id: _drop, ...basePayload } = insertPayload
+      const base = await supabase
+        .from('messages')
+        .insert(basePayload)
+        .select(THREAD_MESSAGE_SELECT_BASE)
+        .single()
+      data = base.data as typeof data
+      error = base.error
+    }
+
+    if (error) throw error
+
+    let msg = data as ThreadMessage
+    if (capturedReplyTarget && replyToId) {
+      msg = {
+        ...msg,
+        reply_to_message_id: replyToId,
+        reply_to: {
+          id: capturedReplyTarget.id,
+          sender_id: capturedReplyTarget.sender_id,
+          body: capturedReplyTarget.body,
+          image_url: capturedReplyTarget.image_url ?? null,
+          profiles: capturedReplyTarget.profiles ?? null,
+        },
+      }
+    }
+    msg = hydrateReplyEmbeds([msg])[0]
+    if (selectedConvoIdRef.current === conversationId) {
+      setThreadMessages((prev) => [...prev, msg])
+    }
+
+    await supabase.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversationId)
+
+    const row = data as { body: string }
+    let preview = (row.body ?? '').trim().slice(0, 160)
+    if (!preview) preview = '📷 Reply'
+    void fetch('/api/staff/notify-customer-reply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId, preview }),
+    }).then(async (res) => {
+      if (res.ok) return
+      const j = (await res.json().catch(() => ({}))) as { error?: string }
+      console.error('notify-customer-reply failed:', res.status, j.error ?? j)
+      if (!p.business_id) return
+      const { data: convo, error: convoErr } = await supabase
+        .from('conversations')
+        .select('customer_id')
+        .eq('id', conversationId)
+        .single()
+      if (convoErr || !(convo as { customer_id?: string } | null)?.customer_id) return
+      const customerId = (convo as { customer_id: string }).customer_id
+      const { error: nErr } = await supabase.from('notifications').insert({
+        user_id: customerId,
+        business_id: p.business_id,
+        type: 'support_reply',
+        title: 'New reply from the team',
+        body: preview,
+        link: '/feed',
+        conversation_id: conversationId,
+      })
+      if (nErr) console.error('fallback customer notification insert:', nErr)
+    })
+
+    return msg
+  }
+
+  async function sendReply() {
+    if (!profile || !selectedConvoId) return
+    const text = replyDraft.trim()
+    const hasImage = !!replyPendingImage
+    if (!text && !hasImage) return
+
+    const chTyping = staffThreadChannelRef.current
+    if (chTyping && staffThreadBroadcastReadyRef.current && staffTypingSentRef.current) {
+      void chTyping.send({
+        type: 'broadcast',
+        event: 'typing',
+        payload: { userId: profile.id, typing: false },
+      })
+      staffTypingSentRef.current = false
+    }
+    if (staffTypingIdleTimerRef.current) {
+      window.clearTimeout(staffTypingIdleTimerRef.current)
+      staffTypingIdleTimerRef.current = null
+    }
+
+    setReplyBusy(true)
+    try {
+      const msg = await insertStaffMessageToConversation(selectedConvoId, replyDraft, replyPendingImage, {
+        replyToId: replyTarget?.id ?? null,
+        replyTarget,
+      })
+      if (!msg) return
+      const preview = (msg.body ?? '').trim() || (msg.image_url ? '📷' : 'Reply')
+      setReplyDraft('')
+      setReplyTarget(null)
+      clearReplyPendingImage()
+      clearInboxAttention(selectedConvoId)
+      setConvoList((prev) => patchConvoListAfterOutboundSend(prev, selectedConvoId, preview))
+      void refreshDashboard(profileRef.current!, { scope: 'inbox' })
+    } catch (e) {
+      console.error(e)
+      alert(
+        'Could not send. Check you are signed in and RLS allows staff replies. For photos, run migration 002_message_images_storage.sql if needed.'
+      )
+    } finally {
+      setReplyBusy(false)
+    }
+  }
+
+  async function openInboxThreadForMember(customerId: string) {
+    setMemberStartBusyId(customerId)
+    try {
+      let conversationId = convoIdByCustomerId.get(customerId)
+      if (!conversationId) {
+        const res = await fetch('/api/staff/ensure-conversation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customerId }),
+        })
+        const j = (await res.json()) as { conversationId?: string; error?: string }
+        if (!res.ok) throw new Error(j.error || 'Could not start conversation')
+        conversationId = j.conversationId
+      }
+      if (!conversationId) throw new Error('Could not start conversation')
+      setInboxSearchQuery('')
+      await refreshDashboard(profileRef.current!, { scope: 'inbox' })
+      await openThread(conversationId)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not open conversation')
+    } finally {
+      setMemberStartBusyId(null)
+    }
+  }
+
+  async function sendMessageToActiveMember(customerId: string) {
+    const draft = (memberMessageDrafts[customerId] ?? '').trim()
+    if (!draft) return
+
+    setMemberSendBusyId(customerId)
+    try {
+      let conversationId = convoIdByCustomerId.get(customerId)
+      if (!conversationId) {
+        const res = await fetch('/api/staff/ensure-conversation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customerId }),
+        })
+        const j = (await res.json()) as { conversationId?: string; error?: string }
+        if (!res.ok) throw new Error(j.error || 'Could not start conversation')
+        conversationId = j.conversationId
+      }
+      if (!conversationId) throw new Error('Could not start conversation')
+
+      const msg = await insertStaffMessageToConversation(conversationId, draft, null)
+      if (!msg) return
+      const preview = (msg.body ?? '').trim() || 'Reply'
+      setMemberMessageDrafts((prev) => {
+        const next = { ...prev }
+        delete next[customerId]
+        return next
+      })
+      setMemberComposeOpenId(null)
+      clearInboxAttention(conversationId)
+      setConvoList((prev) => patchConvoListAfterOutboundSend(prev, conversationId, preview))
+      void refreshDashboard(profileRef.current!, { scope: 'inbox' })
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not send message. Check you are signed in and try again.')
+    } finally {
+      setMemberSendBusyId(null)
+    }
+  }
+
+  async function refreshInbox() {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setInboxRefreshing(true)
+    try {
+      await refreshDashboard(p, { scope: 'inbox' })
+      const cid = selectedConvoIdRef.current
+      if (cid) await reloadThreadMessages(cid, { markRead: false })
+    } finally {
+      setInboxRefreshing(false)
+    }
+  }
+
+  async function refreshUsers() {
+    const p = profileRef.current
+    if (!p?.business_id) return
+    setUsersRefreshing(true)
+    try {
+      await refreshDashboard(p, { scope: 'users', pendingDetail: true, force: true })
+    } finally {
+      setUsersRefreshing(false)
+    }
+  }
+
+  async function backfillWelcomeDms() {
+    if (profileRef.current?.business_role !== 'admin') return
+    setWelcomeBackfillBusy(true)
+    try {
+      const res = await fetch('/api/staff/backfill-welcome-dms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sinceHours: 72, limit: 200 }),
+      })
+      const j = (await res.json().catch(() => ({}))) as {
+        error?: string
+        sent?: number
+        skipped?: number
+        failed?: number
+        scanned?: number
+      }
+      if (!res.ok) throw new Error(j.error || 'Request failed')
+      await refreshInbox()
+      alert(
+        `Welcome DMs: ${j.sent ?? 0} sent, ${j.skipped ?? 0} already had one, ${j.failed ?? 0} failed (${j.scanned ?? 0} recent signups checked).`
+      )
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Could not send welcome DMs')
+    } finally {
+      setWelcomeBackfillBusy(false)
+    }
+  }
+
+  async function reviewCustomer(userId: string, decision: 'approve' | 'reject' | 'block') {
+    setReviewBusyId(userId)
+    try {
+      const res = await fetch('/api/staff/review-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: userId, decision }),
+      })
+      const j = (await res.json()) as { error?: string }
+      if (!res.ok) throw new Error(j.error || 'Request failed')
+      await refreshDashboard(profileRef.current!, { scope: 'users', pendingDetail: true })
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed to update account')
+    } finally {
+      setReviewBusyId(null)
+    }
+  }
+
+  function onPostImagePick(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    if (!f.type.startsWith('image/')) return
+    if (f.size > 5 * 1024 * 1024) {
+      alert('Please choose an image under 5 MB.')
+      return
+    }
+    setPostImage((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl)
+      return { file: f, previewUrl: URL.createObjectURL(f) }
+    })
+  }
+
+  function clearPostImage() {
+    setPostImage((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl)
+      return null
+    })
+  }
+
+  async function sendBulkNotificationEmails(payload: {
+    userIds?: string[]
+    labelPresetKeys?: string[]
+    subject: string
+    title: string
+    body: string
+    linkPath: string
+    ctaLabel?: string
+  }): Promise<{ sent: number; skipped: number; failed: number; recipientCount?: number } | null> {
+    if (!payload.labelPresetKeys?.length && !payload.userIds?.length) return null
+    try {
+      const brandName = businessInfo?.name || 'Juwa Bros'
+      const res = await fetch('/api/staff/send-bulk-notification-emails', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, brandName }),
+      })
+      const j = (await res.json().catch(() => ({}))) as {
+        sent?: number
+        skipped?: number
+        failed?: number
+        recipientCount?: number
+        error?: string
+      }
+      if (!res.ok) {
+        console.error('[send-bulk-notification-emails]', j.error || res.status)
+        return null
+      }
+      return { sent: j.sent ?? 0, skipped: j.skipped ?? 0, failed: j.failed ?? 0, recipientCount: j.recipientCount }
+    } catch (e) {
+      console.error(e)
+      return null
+    }
+  }
+
+  async function publishAnnouncement() {
+    if (!profile?.business_id) return
+    const rawTitle = postTitle.trim()
+    const rawBody = postBody.trim()
+    if (!rawTitle && !rawBody && !postImage) return
+    const title = rawTitle || (rawBody ? rawBody.slice(0, 60) : 'Photo update')
+    const body = rawBody || (rawTitle ? '' : 'Shared a photo.')
+    setPostBusy(true)
+    let notified = 0
+    try {
+      let imageUrl: string | null = null
+      if (postImage) {
+        const ext = extFromImageFile(postImage.file)
+        const path = `${profile.id}/announcements/${crypto.randomUUID()}.${ext}`
+        const { error: upErr } = await supabase.storage
+          .from('message-images')
+          .upload(path, postImage.file, {
+            contentType: postImage.file.type || 'image/jpeg',
+            upsert: false,
+          })
+        if (upErr) throw upErr
+        const { data: pub } = supabase.storage.from('message-images').getPublicUrl(path)
+        imageUrl = pub.publicUrl
+      }
+
+      const { data: inserted, error: insErr } = await supabase
+        .from('announcements')
+        .insert({
+          business_id: profile.business_id,
+          author_id: profile.id,
+          title,
+          body,
+          image_url: imageUrl,
+          pinned: false,
+        })
+        .select('id')
+        .single()
+
+      if (insErr) throw insErr
+      const announcementId = (inserted as { id: string }).id
+
+      const approvedIds = profile.business_id
+        ? await listBusinessApprovedCustomerIds(supabase, profile.business_id)
+        : []
+      let notificationsOk = true
+      notified = approvedIds.length
+      const preview = body.length > 120 ? `${body.slice(0, 117)}…` : body
+      const rows = approvedIds.map((user_id) => ({
+        user_id,
+        business_id: profile.business_id,
+        type: 'announcement',
+        title: `New post: ${title}`,
+        body: preview,
+        link: `/feed?post=${announcementId}`,
+      }))
+      const chunk = 150
+      for (let i = 0; i < rows.length; i += chunk) {
+        const { error: nErr } = await supabase.from('notifications').insert(rows.slice(i, i + chunk))
+        if (nErr) {
+          console.error(nErr)
+          notificationsOk = false
+          break
+        }
+      }
+
+      setPostTitle('')
+      setPostBody('')
+      clearPostImage()
+      await loadMyAnnouncements(profile.business_id)
+
+      if (!notificationsOk) {
+        alert(
+          'Announcement published on the feed. In-app notifications could not all be sent — check the console or Supabase notifications policies.'
+        )
+      } else if (notified > 0) {
+        alert(
+          `Announcement posted. ${notified} approved customer(s) got an in-app notification. Use Notify to send emails manually.`
+        )
+      } else {
+        alert('Announcement posted. No approved customers to notify yet.')
+      }
+    } catch (e) {
+      console.error(e)
+      alert(
+        e instanceof Error
+          ? e.message
+          : 'Could not publish. If this persists, run migration 017_announcements_staff_write.sql (or ensure announcements RLS allows business members). For photos, apply storage migration 002_message_images_storage.sql if uploads fail.'
+      )
+    } finally {
+      setPostBusy(false)
+    }
+  }
+
+  async function shareStaffAnnouncement(a: { id: string; title: string }) {
+    try {
+      const result = await sharePostLink({ announcementId: a.id, title: a.title })
+      alert(result === 'shared' ? 'Post shared.' : 'Post link copied. Approved customers can open it after signing in.')
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not share this post.')
+    }
+  }
+
+  async function sendMemberNotifications() {
+    if (!profile?.business_id) return
+    const title = notifyTitle.trim()
+    const body = notifyBody.trim()
+    if (!title || !body) return
+
+    setNotifyBusy(true)
+    try {
+      const recipientIds = new Set<string>()
+
+      if (audience === 'all') {
+        if (!profile.business_id) {
+          alert('Missing business context.')
+          setNotifyBusy(false)
+          return
+        }
+        for (const id of await listBusinessApprovedCustomerIds(supabase, profile.business_id)) recipientIds.add(id)
+      } else if (audience === 'one') {
+        const raw = oneUserQuery.trim()
+        if (!raw) {
+          alert('Enter a username, email, or user UUID for One user.')
+          setNotifyBusy(false)
+          return
+        }
+        const res = await fetch('/api/staff/search-customers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: raw }),
+        })
+        const j = (await res.json().catch(() => ({}))) as {
+          customer?: { id: string; username: string; account_status: string }
+          error?: string
+        }
+        if (!res.ok || !j.customer) {
+          alert(j.error || 'No customer found with that username or email.')
+          setNotifyBusy(false)
+          return
+        }
+        if (j.customer.account_status !== 'approved') {
+          alert(
+            `@${j.customer.username} is "${j.customer.account_status}". Only approved customers can receive notifications.`
+          )
+          setNotifyBusy(false)
+          return
+        }
+        recipientIds.add(j.customer.id)
+      } else if (audience === 'labels') {
+        if (notifyAudienceLabelIds.length === 0) {
+          alert('Choose at least one inbox label. Recipients are customers with a labeled thread for your business.')
+          setNotifyBusy(false)
+          return
+        }
+        const { data: assignRows, error: aErr } = await supabase
+          .from('conversation_inbox_labels')
+          .select('conversation_id')
+          .in('label_id', notifyAudienceLabelIds)
+        if (aErr) throw aErr
+        const convIds = [...new Set((assignRows || []).map((r: { conversation_id: string }) => r.conversation_id))]
+        if (convIds.length === 0) {
+          alert('No conversations use those labels yet.')
+          setNotifyBusy(false)
+          return
+        }
+        const convChunk = 200
+        for (let i = 0; i < convIds.length; i += convChunk) {
+          const slice = convIds.slice(i, i + convChunk)
+          const { data: convoRows, error: cErr } = await supabase
+            .from('conversations')
+            .select('customer_id')
+            .eq('business_id', profile.business_id)
+            .in('id', slice)
+          if (cErr) throw cErr
+          for (const row of convoRows || []) {
+            recipientIds.add((row as { customer_id: string }).customer_id)
+          }
+        }
+      } else {
+        for (const id of selectedRecipientIds) recipientIds.add(id)
+      }
+
+      if (recipientIds.size === 0) {
+        alert('No recipients match this audience yet.')
+        setNotifyBusy(false)
+        return
+      }
+
+      const candidateIds = [...recipientIds]
+      const approvedSet = new Set<string>()
+      const idChunk = 200
+      for (let i = 0; i < candidateIds.length; i += idChunk) {
+        const slice = candidateIds.slice(i, i + idChunk)
+        const { data: approvedRows, error: apErr } = await supabase
+          .from('profiles')
+          .select('id')
+          .in('id', slice)
+          .eq('role', 'customer')
+          .eq('account_status', 'approved')
+          .is('deleted_at', null)
+        if (apErr) throw apErr
+        for (const r of approvedRows || []) approvedSet.add((r as { id: string }).id)
+      }
+      const approvedIds = [...approvedSet]
+      if (approvedIds.length === 0) {
+        alert('No approved customers to notify (pending or suspended accounts are skipped).')
+        setNotifyBusy(false)
+        return
+      }
+
+      const rows = approvedIds.map((user_id) => ({
+        user_id,
+        business_id: profile.business_id,
+        type: announcementType,
+        title,
+        body,
+        link: '/notifications',
+      }))
+
+      const chunk = 150
+      for (let i = 0; i < rows.length; i += chunk) {
+        const { error } = await supabase.from('notifications').insert(rows.slice(i, i + chunk))
+        if (error) throw error
+      }
+
+      const notifySubjectPrefix =
+        announcementType === 'alert' ? 'Alert' : announcementType === 'update' ? 'Update' : 'Announcement'
+      const emailResult = await sendBulkNotificationEmails({
+        userIds: approvedIds,
+        subject: `${notifySubjectPrefix}: ${title}`,
+        title,
+        body,
+        linkPath: '/notifications',
+        ctaLabel: 'View notification',
+      })
+      if (emailResult && emailResult.failed > 0) {
+        console.warn('[sendMemberNotifications] some notification emails failed', emailResult)
+      }
+
+      setNotifyTitle('')
+      setNotifyBody('')
+      setOneUserQuery('')
+      setSelectedRecipientIds([])
+      setNotifyAudienceLabelIds([])
+      setNotifyRecipientQuery('')
+      const emailNote = emailResult
+        ? ` ${emailResult.sent} email(s) sent${emailResult.skipped ? ` (${emailResult.skipped} skipped — no address)` : ''}.`
+        : ''
+      alert(
+        `Sent ${rows.length} in-app notification(s). Customers also receive email where an address is on file.${emailNote}`
+      )
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not send notifications.')
+    } finally {
+      setNotifyBusy(false)
+    }
+  }
+
+  async function uploadStaffAvatar(file: File) {
+    if (!profile) return
+    if (!file.type.startsWith('image/')) {
+      alert('Please choose an image file.')
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Please choose an image under 5 MB.')
+      return
+    }
+    setStaffAvatarBusy(true)
+    try {
+      const ext = extFromImageFile(file)
+      const path = `${profile.id}/avatar.${ext}`
+      const { error: upErr } = await supabase.storage.from('profile-images').upload(path, file, {
+        contentType: file.type || 'image/jpeg',
+        upsert: true,
+      })
+      if (upErr) throw upErr
+      const { data: pub } = supabase.storage.from('profile-images').getPublicUrl(path)
+      const nextUrl = `${pub.publicUrl}?v=${Date.now()}`
+      const { error: saveErr } = await supabase.from('profiles').update({ avatar_url: nextUrl }).eq('id', profile.id)
+      if (saveErr) throw saveErr
+      if (profile.business_id && profile.business_role === 'admin') {
+        const { error: logoErr } = await supabase
+          .from('businesses')
+          .update({ logo_url: nextUrl })
+          .eq('id', profile.business_id)
+        if (logoErr) {
+          console.error('[staff-avatar] business logo sync:', logoErr.message)
+          alert(
+            'Profile photo saved, but it could not sync to the customer chat logo. Run migration 029_businesses_admin_update.sql in Supabase, then upload again.'
+          )
+        }
+      }
+      setProfile((prev) => (prev ? { ...prev, avatar_url: nextUrl } : prev))
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not upload profile photo.')
+    } finally {
+      setStaffAvatarBusy(false)
+    }
+  }
+
+  async function onStaffAvatarPick(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    await uploadStaffAvatar(f)
+  }
+
+  async function signOut() {
+    if (!window.confirm('Are you sure you want to sign out?')) return
+    await supabase.auth.signOut()
+    router.replace('/login')
+  }
+
+  const metrics = useMemo(() => {
+    const pending = pendingSignupCount
+    const openThreads = convoList.length
+    const reportCount = reports.length
+    const members = activeMembers.length
+    return { pending, unread: openThreads, reportCount, members }
+  }, [pendingSignupCount, convoList, reports, activeMembers])
+
+  const inboxTriageThreadCount = useMemo(() => {
+    const ids = new Set<string>()
+    for (const c of convoList) {
+      if (convoNeedsInboxTriage(c, inboxAttentionIds)) ids.add(c.id)
+    }
+    return ids.size
+  }, [convoList, inboxAttentionIds])
+
+  const hasUsersData = useMemo(
+    () =>
+      pendingCustomers.length > 0 ||
+      activeMembers.length > 0 ||
+      suspendedMembers.length > 0 ||
+      pendingSignupCount > 0,
+    [pendingCustomers, activeMembers, suspendedMembers, pendingSignupCount]
+  )
+
+  const needsInboxLists = activeTab === 'inbox'
+  const needsUsersLists = activeTab === 'users'
+  const needsNotifyLists = activeTab === 'notify'
+
+  const convoListMerged = useMemo(() => {
+    if (!needsInboxLists) return convoList
+    const byId = new Map<string, ConvoListItem>()
+    for (const c of convoList) byId.set(c.id, c)
+    for (const c of inboxSearchExtraConvos) {
+      if (!byId.has(c.id)) byId.set(c.id, c)
+    }
+    for (const c of inboxLabelFilterExtraConvos) {
+      if (!byId.has(c.id)) byId.set(c.id, c)
+    }
+    return [...byId.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+  }, [needsInboxLists, convoList, inboxSearchExtraConvos, inboxLabelFilterExtraConvos])
+
+  /** Merge active-member profile data when inbox thread rows lack names (RLS gaps). */
+  const convoListForInbox = useMemo(() => {
+    if (!needsInboxLists) return convoList
+    const memberById = new Map<string, ActiveMember>()
+    for (const m of activeMembers) memberById.set(m.id, m)
+    for (const m of suspendedMembers) memberById.set(m.id, m)
+
+    return convoListMerged.map((c) => {
+      const m = memberById.get(c.customer_id)
+      if (!m) return c
+      const enrichedName = `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim() || m.username
+      const needsEnrich =
+        c.customerName === 'Customer' || c.customerUsername === '…' || !c.customerName.trim()
+      if (!needsEnrich) return c
+      return {
+        ...c,
+        customerName: enrichedName || c.customerName,
+        customerUsername: m.username || c.customerUsername,
+        customerAvatar: c.customerAvatar ?? m.avatar_url ?? null,
+      }
+    })
+  }, [needsInboxLists, convoListMerged, activeMembers, suspendedMembers])
+
+  const filteredConvoList = useMemo(() => {
+    if (!needsInboxLists) return convoList
+    const q = inboxSearchQuery.trim().toLowerCase().replace(/^@+/, '')
+    if (!q) return convoListForInbox
+    return convoListForInbox.filter((c) => {
+      const labelsText = c.labels.map((l) => l.name).join(' ').toLowerCase()
+      const username = c.customerUsername.toLowerCase().replace(/^@+/, '')
+      return (
+        c.customerName.toLowerCase().includes(q) ||
+        username.includes(q) ||
+        c.preview.toLowerCase().includes(q) ||
+        labelsText.includes(q)
+      )
+    })
+  }, [needsInboxLists, convoListForInbox, inboxSearchQuery])
+
+  const inboxDisplayList = useMemo(() => {
+    if (!needsInboxLists) return convoList
+    let list = filteredConvoList
+    if (inboxUnreadFilterOnly) list = list.filter((c) => convoNeedsInboxTriage(c, inboxAttentionIds))
+    if (inboxThreadLabelFilterIds.length === 0) return list
+    return list.filter((c) =>
+      inboxThreadLabelFilterIds.some((lid) => c.labels.some((l) => l.id === lid))
+    )
+  }, [needsInboxLists, filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxAttentionIds])
+
+  /** Drop open thread when it falls outside the active inbox filter. */
+  useEffect(() => {
+    if ((inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly) || !selectedConvoId) return
+    const stillVisible = inboxDisplayList.some((c) => c.id === selectedConvoId)
+    if (!stillVisible) setSelectedConvoId(null)
+  }, [inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxDisplayList, selectedConvoId, inboxAttentionIds])
+
+  /** Active members matching inbox search who have no thread in results (often: follow only, no messages yet). */
+  const inboxSearchMemberMatches = useMemo(() => {
+    if (!needsInboxLists) return []
+    const q = inboxSearchQuery.trim().toLowerCase().replace(/^@+/, '')
+    if (q.length < 2) return []
+
+    const matchesMember = (m: {
+      id: string
+      first_name?: string | null
+      last_name?: string | null
+      username?: string | null
+    }) => {
+      const first = (m.first_name ?? '').toLowerCase()
+      const last = (m.last_name ?? '').toLowerCase()
+      const label = `${first} ${last}`.trim()
+      const username = (m.username ?? '').toLowerCase().replace(/^@+/, '')
+      return label.includes(q) || first.includes(q) || last.includes(q) || username.includes(q)
+    }
+
+    const seen = new Set<string>()
+    const out: ActiveMember[] = []
+    const threadIdsInResults = new Set(inboxDisplayList.map((c) => c.customer_id))
+
+    for (const m of activeMembers) {
+      if (!matchesMember(m) || seen.has(m.id)) continue
+      if (threadIdsInResults.has(m.id)) continue
+      seen.add(m.id)
+      out.push(m)
+    }
+
+    if (
+      activeMemberLookup &&
+      matchesMember(activeMemberLookup) &&
+      !seen.has(activeMemberLookup.id) &&
+      !threadIdsInResults.has(activeMemberLookup.id)
+    ) {
+      out.push({
+        id: activeMemberLookup.id,
+        username: activeMemberLookup.username,
+        first_name: activeMemberLookup.first_name ?? '',
+        last_name: activeMemberLookup.last_name ?? '',
+        account_status: activeMemberLookup.account_status,
+        avatar_url: null,
+      })
+    }
+
+    return out.sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+  }, [needsInboxLists, inboxSearchQuery, activeMembers, activeMemberLookup, inboxDisplayList])
+
+  const filteredCannedPickerList = useMemo(() => {
+    if (!needsInboxLists) return cannedReplies
+    const q = cannedPickerQuery.trim().toLowerCase()
+    if (!q) return cannedReplies
+    return cannedReplies.filter((r) => r.title.toLowerCase().includes(q) || r.body.toLowerCase().includes(q))
+  }, [cannedReplies, cannedPickerQuery])
+
+  const threadFirstUnreadIndex = useMemo(() => {
+    if (!needsInboxLists || !selectedConvoId) return -1
+    const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
+    if (!customerId) return -1
+    for (let i = 0; i < threadMessages.length; i++) {
+      const m = threadMessages[i]
+      if (m.sender_id === customerId && m.read !== true) return i
+    }
+    return -1
+  }, [needsInboxLists, threadMessages, selectedConvoId, convoList])
+
+  const threadSeenIndexes = useMemo(() => {
+    if (!needsInboxLists || !selectedConvoId) return { lastStaff: -1, lastOther: -1 }
+    const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
+    if (!customerId || threadMessages.length === 0) return { lastStaff: -1, lastOther: -1 }
+    let lastStaff = -1
+    let lastOther = -1
+    for (let i = threadMessages.length - 1; i >= 0; i--) {
+      if (lastStaff < 0 && threadMessages[i].sender_id !== customerId) lastStaff = i
+      if (lastOther < 0 && threadMessages[i].sender_id === customerId) lastOther = i
+    }
+    return { lastStaff, lastOther }
+  }, [needsInboxLists, threadMessages, selectedConvoId, convoList])
+
+  const staffThreadUnreadInboundIds = useMemo(() => {
+    if (!needsInboxLists || !selectedConvoId) return [] as string[]
+    const customerId = convoList.find((c) => c.id === selectedConvoId)?.customer_id
+    if (!customerId) return []
+    return threadMessages
+      .filter((m) => m.sender_id === customerId && m.read !== true)
+      .map((m) => m.id)
+  }, [needsInboxLists, threadMessages, selectedConvoId, convoList])
+
+  const markCustomerMessagesReadOnView = useCallback(
+    async (messageIds: string[]) => {
+      const conversationId = selectedConvoIdRef.current
+      if (!conversationId || messageIds.length === 0) return
+      const customerId = convoListRef.current.find((c) => c.id === conversationId)?.customer_id
+      if (!customerId) return
+
+      const { errorMessage } = await markMessagesReadByIds(supabase, messageIds)
+      if (errorMessage) {
+        console.error(errorMessage)
+        return
+      }
+
+      const now = new Date().toISOString()
+      setThreadMessages((prev) => {
+        const next = prev.map((m) =>
+          messageIds.includes(m.id) && m.sender_id === customerId
+            ? { ...m, read: true, read_at: m.read_at ?? now }
+            : m
+        )
+        const remaining = next.filter((m) => m.sender_id === customerId && m.read !== true).length
+        setConvoList((list) =>
+          list.map((c) => (c.id === conversationId ? { ...c, unreadCount: remaining } : c))
+        )
+        return next
+      })
+    },
+    [supabase]
+  )
+
+  useMarkMessagesReadOnView({
+    enabled: activeTab === 'inbox' && Boolean(selectedConvoId) && !threadLoading,
+    rootRef: threadScrollRef,
+    unreadMessageIds: staffThreadUnreadInboundIds,
+    markRead: markCustomerMessagesReadOnView,
+  })
+
+  const convoIdByCustomerId = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const c of convoList) map.set(c.customer_id, c.id)
+    return map
+  }, [convoList])
+
+  const filteredActiveMembers = useMemo(() => {
+    if (!needsUsersLists) return activeMembers
+    const q = activeMemberQuery.trim().toLowerCase().replace(/^@+/, '')
+    if (!q) return activeMembers
+    return activeMembers.filter((m) => {
+      const first = (m.first_name ?? '').toLowerCase()
+      const last = (m.last_name ?? '').toLowerCase()
+      const label = `${first} ${last}`.trim()
+      const username = (m.username ?? '').toLowerCase().replace(/^@+/, '')
+      return label.includes(q) || first.includes(q) || last.includes(q) || username.includes(q)
+    })
+  }, [needsUsersLists, activeMembers, activeMemberQuery])
+
+  const selectableRecipients = useMemo(() => {
+    if (!needsNotifyLists) return []
+    const map = new Map<string, ActiveMember>()
+    for (const member of activeMembers) map.set(member.id, member)
+    return [...map.values()].sort((a, b) => (a.username || '').localeCompare(b.username || ''))
+  }, [needsNotifyLists, activeMembers])
+
+  const filteredSelectableRecipients = useMemo(() => {
+    if (!needsNotifyLists) return []
+    const q = notifyRecipientQuery.trim().toLowerCase()
+    if (q) {
+      return notifySearchResults.map((r) => ({
+        id: r.id,
+        first_name: r.first_name ?? '',
+        last_name: r.last_name ?? '',
+        username: r.username,
+        account_status: 'approved' as const,
+        email: r.email,
+      }))
+    }
+    return selectableRecipients.map((m) => ({ ...m, email: null as string | null }))
+  }, [needsNotifyLists, selectableRecipients, notifyRecipientQuery, notifySearchResults])
+
+  function toggleSelectedRecipient(userId: string) {
+    setSelectedRecipientIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    )
+  }
+
+  function toggleNotifyAudienceLabel(labelId: string) {
+    setNotifyAudienceLabelIds((prev) =>
+      prev.includes(labelId) ? prev.filter((id) => id !== labelId) : [...prev, labelId]
+    )
+  }
+
+  function selectInboxThreadLabelFilter(labelId: string) {
+    setInboxUnreadFilterOnly(false)
+    setInboxThreadLabelFilterIds((prev) =>
+      prev.length === 1 && prev[0] === labelId ? [] : [labelId]
+    )
+  }
+
+  function toggleInboxUnreadFilter() {
+    setInboxThreadLabelFilterIds([])
+    setInboxUnreadFilterOnly((v) => !v)
+  }
+
+  function clearInboxThreadFilters() {
+    setInboxThreadLabelFilterIds([])
+    setInboxUnreadFilterOnly(false)
+  }
+
+  function selectAllNotifyRecipients() {
+    setSelectedRecipientIds(selectableRecipients.map((m) => m.id))
+  }
+
+  function clearNotifyRecipients() {
+    setSelectedRecipientIds([])
+  }
+
+  /** Adds everyone currently matching the search filter to the selection (does not remove others). */
+  function addFilteredRecipientsToSelection() {
+    setSelectedRecipientIds((prev) => {
+      const s = new Set(prev)
+      for (const m of filteredSelectableRecipients) s.add(m.id)
+      return [...s]
+    })
+  }
+
+  async function updateReportStatus(reportId: string, status: ReportItem['status']) {
+    if (!profile?.business_id) return
+    setReportBusyId(reportId)
+    try {
+      const { error } = await supabase
+        .from('admin_reports')
+        .update({ status })
+        .eq('id', reportId)
+        .eq('business_id', profile.business_id)
+      if (error) throw error
+      setReports((prev) => prev.map((r) => (r.id === reportId ? { ...r, status } : r)))
+    } catch (e) {
+      console.error(e)
+      alert(e instanceof Error ? e.message : 'Could not update report status.')
+    } finally {
+      setReportBusyId(null)
+    }
+  }
+
+  if (loading || !profile) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#050814]">
+        <Loader2 className="w-8 h-8 animate-spin text-[#8d63ff]" />
+      </div>
+    )
+  }
+
+  const isAdmin = profile.business_role === 'admin'
+  const mobileGridClass =
+    navItems.length > 6 ? 'grid-cols-7' : navItems.length > 5 ? 'grid-cols-6' : 'grid-cols-5'
+  const selectedConvo = convoListForInbox.find((c) => c.id === selectedConvoId) || null
+  const inboxMobileThreadOpen = Boolean(selectedConvoId)
+  const activeNav = navItems.find((n) => n.id === activeTab)
+  const headerTitle = activeNav?.label ?? 'Dashboard'
+  const staffRoleLabel = profile.business_role === 'admin' ? 'Admin' : 'Support Staff'
+  const headerSubParts = ['Relay Staff', businessInfo?.name, staffRoleLabel].filter(Boolean) as string[]
+  const headerSub = headerSubParts.join(' · ')
+
+  return (
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden text-[14px] leading-snug antialiased bg-[#0a0f1e] lg:grid lg:grid-cols-[220px_1fr]">
+      <aside className="hidden lg:flex lg:h-full lg:min-h-0 flex-col border-r border-white/[0.08] bg-[rgba(8,13,28,0.95)] py-3 px-2.5 gap-0.5 overflow-hidden text-white">
+        <div className="admin-sidebar-top px-2 pb-3">
+          <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[#4e5a7a] mb-2">Staff Portal</p>
+          <div className="flex items-center gap-2.5 mb-2.5">
+            <RelayLogo size="sm" theme="dark" className="gap-2 [&>div]:!h-[30px] [&>div]:!w-[30px] [&>div]:!rounded-lg [&_svg]:!h-3.5 [&_svg]:!w-3.5 [&_span]:!text-base [&_span]:!font-extrabold [&_span]:!tracking-[-0.025em]" />
+          </div>
+          <div className="flex items-center gap-2.5">
+            <div className="relative shrink-0">
+              <input
+                ref={staffAvatarInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => void onStaffAvatarPick(e)}
+              />
+              <div className="w-9 h-9 rounded-full overflow-hidden border border-white/[0.08] bg-[#1a2550] flex items-center justify-center text-xs font-bold text-white">
+                {profile.avatar_url ? (
+                  <img src={profile.avatar_url} alt={`${profile.username} avatar`} className="w-full h-full object-cover" />
+                ) : (
+                  profile.username.slice(0, 2).toUpperCase()
+                )}
+              </div>
+              {staffAvatarBusy ? (
+                <div
+                  className="absolute inset-0 flex items-center justify-center rounded-full bg-black/55 ring-1 ring-black/20"
+                  aria-live="polite"
+                >
+                  <Loader2 className="w-4 h-4 animate-spin text-white" aria-hidden />
+                </div>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => staffAvatarInputRef.current?.click()}
+                disabled={staffAvatarBusy}
+                className="absolute left-[95.18%] top-[95.18%] z-[1] flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/20 bg-black/35 text-white shadow-sm backdrop-blur-sm hover:bg-black/50 hover:border-white/30 active:scale-95 disabled:pointer-events-none disabled:opacity-40 transition-colors"
+                aria-label="Change profile photo"
+                title="Change profile photo"
+              >
+                <Camera className="h-2.5 w-2.5" strokeWidth={2.5} aria-hidden />
+              </button>
+            </div>
+            <div className="min-w-0">
+              <p className="text-[13px] font-semibold text-white truncate">{profile.username}</p>
+              <p className="text-[11px] text-[#8892b0] truncate">
+                @{profile.username} · {staffRoleLabel}
+              </p>
+            </div>
+          </div>
+        </div>
+        <DashboardNavButtons
+          navItems={navItems}
+          activeTab={activeTab}
+          inboxTriageThreadCount={inboxTriageThreadCount}
+          onSelect={switchTab}
+          layout="sidebar"
+        />
+        <div className="shrink-0 mt-auto pt-3 border-t border-white/[0.06] px-1 space-y-2">
+          <DesktopNotificationPrompt variant="staff" layout="sidebar" />
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="flex w-full items-center gap-2 text-left text-[12px] text-[#4e5a7a] hover:text-[#c4cbe6] px-2.5 py-2 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5 shrink-0" />
+            Sign out
+          </button>
+        </div>
+      </aside>
+
+      <main
+        className={`flex flex-col min-h-0 w-full min-h-screen lg:min-h-0 lg:h-full overflow-hidden lg:pb-0 ${
+          activeTab === 'inbox' ? 'max-lg:h-dvh max-lg:max-h-dvh' : ''
+        } ${
+          activeTab === 'inbox' && inboxMobileThreadOpen
+            ? 'max-lg:pb-0'
+            : 'pb-[max(4.25rem,env(safe-area-inset-bottom))]'
+        }`}
+      >
+        <header
+          className={`shrink-0 flex flex-wrap items-center gap-2.5 border-b border-white/[0.08] bg-[rgba(11,18,40,0.9)] backdrop-blur-md px-3 py-2.5 sm:px-4 text-white ${
+            activeTab === 'inbox' && inboxMobileThreadOpen ? 'max-lg:hidden' : ''
+          }`}
+        >
+          <div className="flex-1 min-w-0">
+            <h2 className="text-[17px] font-bold tracking-[-0.02em] text-white leading-tight">{headerTitle}</h2>
+            <p className="text-[12px] text-[#8892b0] mt-0.5 leading-snug">{headerSub}</p>
+            {!businessInfo && profile.business_id ? (
+              <p className="text-amber-200/90 text-xs mt-1">Could not load business record — check businesses table for this business_id.</p>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => router.push('/notifications')}
+              className="relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.06] text-[#c4cbe6] hover:bg-white/[0.10]"
+              aria-label="Alerts"
+            >
+              <Bell className="w-4 h-4" />
+              {staffNotifyUnread > 0 ? (
+                <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-[#ff3b5c] text-white text-[9px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-[#0b1228]">
+                  {staffNotifyUnread > 99 ? '99+' : staffNotifyUnread}
+                </span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              onClick={() => void manualRefresh()}
+              disabled={dashRefreshing || !profile.business_id}
+              className="inline-flex items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-3 py-2 text-[13px] font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-50 shadow-sm disabled:opacity-40"
+            >
+              <RefreshCw className={`w-4 h-4 ${dashRefreshing ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="lg:hidden inline-flex h-[34px] w-[34px] items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.06] text-[#c4cbe6] hover:bg-white/[0.10] hover:text-white"
+              aria-label="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </header>
+
+        <div
+          className={`relay-staff-workspace flex-1 min-h-0 ${
+            activeTab === 'inbox'
+              ? 'max-lg:overflow-hidden max-lg:flex max-lg:flex-col lg:overflow-hidden lg:flex lg:flex-col'
+              : 'overflow-y-auto'
+          }`}
+        >
+          <div
+            className={`mx-auto w-full max-w-7xl px-3 py-3 sm:px-4 sm:py-4 space-y-3 ${
+              activeTab === 'inbox'
+                ? 'max-lg:flex-1 max-lg:min-h-0 max-lg:flex max-lg:flex-col max-lg:overflow-hidden lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden'
+                : ''
+            } ${activeTab === 'inbox' && inboxMobileThreadOpen ? 'max-lg:px-0 max-lg:py-0 max-lg:space-y-0' : ''}`}
+          >
+          {loadError ? (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">
+              <strong className="font-semibold">Data load issue:</strong> {loadError}
+              {/\b(column|relation|does not exist|42703|42P01|suspended|moderation_suspension)\b/i.test(loadError) ? (
+                <p className="text-red-600 text-xs mt-1">
+                  <code className="text-red-700">suspended</code> status or moderation log errors, run{' '}
+                  <code className="text-red-700">005_account_suspend_moderation.sql</code> in the Supabase SQL editor. Other column errors may
+                  need earlier migrations.
+                </p>
+              ) : /pending:/i.test(loadError) ? (
+                <p className="text-red-600 text-xs mt-1">
+                  The pending list comes from your Next server at <code className="text-red-700">/api/staff/pending-signups</code>. A fetch error
+                  here is usually connectivity or the dev server — not a database migration.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+        <StaffTabPanel tab="home" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3" render={() => (
+          <>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+              <StatCard icon={<User2 className="w-4 h-4" />} label="Pending" value={metrics.pending} accent="yellow" />
+              <StatCard icon={<Inbox className="w-4 h-4" />} label="Threads" value={metrics.unread} accent="purple" />
+              <StatCard icon={<ClipboardList className="w-4 h-4" />} label="Reports" value={metrics.reportCount} accent="red" />
+              <StatCard icon={<Users className="w-4 h-4" />} label="Active members" value={metrics.members} accent="green" />
+            </div>
+            <div className={`grid gap-2 ${isAdmin ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'}`}>
+              <QuickButton icon={<User2 className="w-4 h-4" />} label="Review Queue" onClick={() => switchTab('users')} />
+              <QuickButton
+                icon={<Inbox className="w-4 h-4" />}
+                label="Open Inbox"
+                badgeCount={inboxTriageThreadCount}
+                onClick={() => switchTab('inbox')}
+              />
+              <QuickButton icon={<Megaphone className="w-4 h-4" />} label="Post" onClick={() => switchTab('post')} />
+              {isAdmin ? (
+                <QuickButton icon={<UserCog className="w-4 h-4" />} label="Team" onClick={() => switchTab('team')} />
+              ) : (
+                <QuickButton icon={<Send className="w-4 h-4" />} label="Send Notify" onClick={() => switchTab('notify')} />
+              )}
+            </div>
+            <div className="relay-staff-card overflow-hidden">
+              <div className="px-3 py-2 border-b border-slate-200">
+                <h3 className="relay-staff-section-title">Recent Conversations</h3>
+              </div>
+              <div className="divide-y divide-slate-100 py-0.5">
+                {inboxLoading && convoList.length === 0 ? (
+                  <div className="flex items-center justify-center gap-2 px-3 py-8 text-[13px] text-[#8892b0]">
+                    <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                    Loading conversations…
+                  </div>
+                ) : convoList.length === 0 ? (
+                  <p className="px-3 py-5 text-[13px] text-[#8892b0]">No customer threads yet.</p>
+                ) : (
+                  convoList.slice(0, 4).map((item) => (
+                    <button
+                      type="button"
+                      key={item.id}
+                      onClick={() => {
+                        switchTab('inbox')
+                        void openThread(item.id)
+                      }}
+                      className="w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="relative shrink-0">
+                        <div className="w-9 h-9 rounded-[10px] bg-slate-100 flex items-center justify-center overflow-hidden border border-slate-200 text-xs font-bold text-slate-600">
+                          {item.customerAvatar ? (
+                            <img
+                              src={item.customerAvatar}
+                              alt={`${item.customerName} avatar`}
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            item.customerName.slice(0, 2).toUpperCase()
+                          )}
+                        </div>
+                        {item.unreadCount > 0 ? (
+                          <span className="absolute -top-1 -right-1 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-white">
+                            {item.unreadCount > 9 ? '9+' : item.unreadCount}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p
+                          className={`text-[13px] truncate ${
+                            item.unreadCount > 0 ? 'font-bold text-slate-900' : 'font-semibold text-slate-900'
+                          }`}
+                        >
+                          {item.customerName}
+                        </p>
+                        <p className="text-[11px] text-[#8892b0] truncate max-w-[min(100%,240px)]">{item.preview}</p>
+                        <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                          {item.unreadCount > 0 ? (
+                            <span
+                              className="inline-flex rounded px-1 py-px text-[9px] font-semibold border"
+                              style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                            >
+                              Unread
+                            </span>
+                          ) : null}
+                          <p className="text-[10px] text-[#4e5a7a]">{timeAgo(item.updated_at)}</p>
+                        </div>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          
+          </>)} />
+
+        <StaffTabPanel tab="post" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3 max-w-4xl" render={() => (
+          <>
+            <p className="text-[12px] text-[#8892b0] leading-relaxed">
+              Goes to the public feed for all approved customers. They can like and comment. Everyone approved gets an in-app notification when you publish. Email goes only to customers labeled{' '}
+              <strong className="text-[#c4cbe6]">Active player</strong> or <strong className="text-[#c4cbe6]">Account created</strong> on their support thread.
+            </p>
+
+            <div className="relay-staff-card p-3 space-y-3">
+              <input type="file" ref={postFileInputRef} accept="image/*" className="hidden" onChange={onPostImagePick} />
+              <div className="flex items-start gap-3">
+                <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#8d63ff] to-[#5a7ff6] flex items-center justify-center shrink-0 mt-0.5">
+                  <User2 className="w-5 h-5 text-white" />
+                </div>
+                <div className="flex-1 min-w-0 space-y-1">
+                  <textarea
+                    rows={2}
+                    className="w-full relay-staff-input rounded-2xl px-3 py-2.5 resize-none min-h-[52px] max-h-32"
+                    placeholder="What's on your mind?"
+                    value={postTitle}
+                    onChange={(e) => setPostTitle(e.target.value)}
+                  />
+                  <p className="text-[11px] text-[#7d86a8] px-1">Main line — shows first on the feed (bold).</p>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <textarea
+                  rows={3}
+                  className="w-full relay-staff-input rounded-2xl px-3 py-2.5 min-h-20 max-h-40 resize-y"
+                  placeholder="Add more details (optional)"
+                  value={postBody}
+                  onChange={(e) => setPostBody(e.target.value)}
+                />
+                <p className="text-[11px] text-[#7d86a8] px-1">Optional — shows below the main line if you add text here.</p>
+              </div>
+              {postImage ? (
+                <div className="relative flex items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-black/20 max-h-56">
+                  <img src={postImage.previewUrl} alt="" className="mx-auto block h-auto w-auto max-w-full max-h-56 object-contain" />
+                  <button
+                    type="button"
+                    onClick={clearPostImage}
+                    className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 text-white hover:bg-black/80"
+                    aria-label="Remove image"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : null}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <button
+                  type="button"
+                  onClick={() => postFileInputRef.current?.click()}
+                  className="w-full flex items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-semibold text-[#aeb7d6] hover:text-white hover:bg-white/5 transition-colors"
+                >
+                  <ImagePlus className="w-4 h-4 text-[#8d63ff]" />
+                  Photo
+                </button>
+              </div>
+              <button
+                type="button"
+                disabled={postBusy || (!postTitle.trim() && !postBody.trim() && !postImage)}
+                onClick={() => void publishAnnouncement()}
+                className="w-full rounded-xl py-2.5 font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
+              >
+                {postBusy ? 'Publishing…' : 'Publish to feed & notify customers'}
+              </button>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <h4 className="text-lg font-semibold text-slate-900">Your posts</h4>
+                {myAnnouncementsLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                ) : (
+                  <span className="text-xs text-[#7d86a8]">{myAnnouncements.length} shown</span>
+                )}
+              </div>
+              {myAnnouncements.length === 0 && !myAnnouncementsLoading ? (
+                <p className="text-sm text-slate-600 relay-staff-card px-4 py-6 text-center">
+                  No announcements yet. Publish above — they will stack here like a timeline.
+                </p>
+              ) : (
+                <ul className="space-y-3">
+                  {myAnnouncements.map((a) => {
+                    const meta = myAnnouncementsMeta[a.id] || {
+                      likes: 0,
+                      comments: 0,
+                      likedBy: [],
+                      commentedBy: [],
+                      commentPreviews: [],
+                      commentDetails: [],
+                    }
+                    return (
+                      <li
+                        key={a.id}
+                        className="relay-staff-card overflow-hidden shadow-[0_16px_40px_-28px_rgba(30,49,112,0.95)]"
+                      >
+                        <div className="p-3">
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="flex flex-wrap items-center gap-2 text-xs text-[#7d86a8] min-w-0">
+                              <span>{timeAgo(a.created_at)}</span>
+                              {a.hidden_at ? (
+                                <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                                  Hidden
+                                </span>
+                              ) : null}
+                            </div>
+                            <ContentModerationMenu
+                              isHidden={Boolean(a.hidden_at)}
+                              busy={postModerationBusyId === a.id}
+                              onEdit={() => beginEditPost(a)}
+                              onHide={() => void togglePostHidden(a.id, Boolean(a.hidden_at))}
+                              onDelete={() => void deletePost(a.id)}
+                            />
+                          </div>
+                          {editingPostId === a.id ? (
+                            <div className="space-y-2">
+                              <input
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#6f54ff]"
+                                value={editPostTitle}
+                                onChange={(e) => setEditPostTitle(e.target.value)}
+                                placeholder="Title"
+                              />
+                              <textarea
+                                className="w-full min-h-20 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#6f54ff]"
+                                value={editPostBody}
+                                onChange={(e) => setEditPostBody(e.target.value)}
+                                placeholder="Body"
+                              />
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={editPostBusy || !editPostTitle.trim() || !editPostBody.trim()}
+                                  onClick={() => void saveEditPost()}
+                                  className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-3 py-2 text-xs font-semibold disabled:opacity-40"
+                                >
+                                  {editPostBusy ? 'Saving…' : 'Save'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingPostId(null)}
+                                  className="rounded-lg border border-white/10 px-3 py-2 text-xs font-medium text-[#c4cbe6] hover:bg-white/[0.06]"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              {a.title.trim() ? (
+                                <p className="font-semibold text-white whitespace-pre-wrap">{a.title}</p>
+                              ) : null}
+                              {a.body.trim() ? (
+                                <p className={`text-sm text-[#c4cbe6] whitespace-pre-wrap line-clamp-6 ${a.title.trim() ? 'mt-1' : ''}`}>
+                                  {a.body}
+                                </p>
+                              ) : null}
+                            </>
+                          )}
+                        </div>
+                        {a.image_url ? (
+                          <div className="px-4 pb-3">
+                            <FeedPostImage imageUrl={a.image_url} alt="" rounded="xl" />
+                          </div>
+                        ) : null}
+                        <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-sm">
+                          <button
+                            type="button"
+                            disabled={meta.likes === 0}
+                            onClick={() =>
+                              setEngagementOpen((prev) =>
+                                prev?.postId === a.id && prev.mode === 'likes' ? null : { postId: a.id, mode: 'likes' }
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                          >
+                            <ThumbsUp className="w-4 h-4 text-[#8d63ff]" />
+                            {meta.likes} likes
+                          </button>
+                          <button
+                            type="button"
+                            aria-expanded={engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'}
+                            onClick={() => {
+                              const opening = !(engagementOpen?.postId === a.id && engagementOpen.mode === 'comments')
+                              setEngagementOpen(
+                                opening ? { postId: a.id, mode: 'comments' } : null
+                              )
+                              if (!opening) {
+                                setStaffReplyThreadTarget((prev) => (prev?.postId === a.id ? null : prev))
+                              }
+                              if (opening) {
+                                requestAnimationFrame(() => {
+                                  document.getElementById(`staff-comment-${a.id}`)?.focus()
+                                })
+                              }
+                            }}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 cursor-pointer transition-colors ${
+                              engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
+                                ? 'text-white bg-[#8d63ff]/15'
+                                : 'text-[#c4cbe6] hover:text-white hover:bg-white/[0.06]'
+                            }`}
+                          >
+                            <RelayChatBubbleIcon className="text-[#8d63ff]" size={16} strokeWidth={2} />
+                            {meta.comments} comments
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void shareStaffAnnouncement(a)}
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors ml-auto"
+                          >
+                            <Share2 className="w-4 h-4 text-[#8d63ff]" />
+                            Share link
+                          </button>
+                        </div>
+                        {engagementOpen?.postId === a.id ? (
+                          <div className="px-4 pb-4 border-t border-white/10">
+                            <div className="pt-3">
+                              {engagementOpen.mode === 'likes' ? (
+                                <>
+                                  <p className="text-sm font-semibold text-white mb-2">People who liked this post</p>
+                                  {meta.likedBy.length === 0 ? (
+                                    <p className="text-sm text-[#7d86a8]">No likes yet.</p>
+                                  ) : (
+                                    <ul className="space-y-2">
+                                      {meta.likedBy.map((u, idx) => (
+                                        <li key={`${u.name}-${idx}`} className="flex items-center gap-3 rounded-xl border border-white/10 bg-[#131d3d] px-3 py-2.5">
+                                          {u.avatar ? (
+                                            <img src={u.avatar} alt={`${u.name} avatar`} className="w-9 h-9 rounded-full object-cover border border-white/10" />
+                                          ) : (
+                                            <div className="w-9 h-9 rounded-full bg-[#202b51] text-[11px] font-bold text-[#d8def3] border border-white/10 flex items-center justify-center">
+                                              {u.name.slice(0, 2).toUpperCase()}
+                                            </div>
+                                          )}
+                                          <p className="text-sm text-white font-medium">{u.name}</p>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </>
+                              ) : (
+                                <div className="bg-[#091028] border border-white/10 rounded-2xl px-3 py-3 space-y-3">
+                                  {meta.commentDetails.length === 0 ? (
+                                    <p className="text-sm text-[#7d86a8] text-center py-2">No comments yet.</p>
+                                  ) : (
+                                    (() => {
+                                      const cBy = engagementCommentsByParent(meta.commentDetails)
+                                      function renderEngagementComment(c: EngagementComment): ReactNode {
+                                        const kids = cBy.get(c.id) || []
+                                        const isReplying =
+                                          staffReplyThreadTarget?.postId === a.id &&
+                                          staffReplyThreadTarget?.parentId === c.id
+                                        return (
+                                          <li key={c.id} className="flex gap-2 text-sm">
+                                            {c.userAvatar ? (
+                                              <img
+                                                src={c.userAvatar}
+                                                alt={`${c.userName} avatar`}
+                                                className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                              />
+                                            ) : (
+                                              <div className="w-8 h-8 rounded-full bg-[#606770] text-xs font-bold text-white border border-white/10 flex items-center justify-center shrink-0">
+                                                {c.userName.slice(0, 2).toUpperCase()}
+                                              </div>
+                                            )}
+                                            <div className="min-w-0 flex-1">
+                                              <div
+                                                className={`max-w-full rounded-2xl px-3 py-2 border bg-[#131d3d] border-white/10 ${
+                                                  c.hidden_at ? 'opacity-70' : ''
+                                                }`}
+                                              >
+                                                <div className="flex items-start justify-between gap-2">
+                                                  <div className="min-w-0">
+                                                    <span className="font-semibold text-white">{c.userName}</span>
+                                                    {c.hidden_at ? (
+                                                      <span className="ml-2 text-[10px] font-semibold uppercase text-amber-200">
+                                                        Hidden
+                                                      </span>
+                                                    ) : null}
+                                                  </div>
+                                                  <ContentModerationMenu
+                                                    isHidden={Boolean(c.hidden_at)}
+                                                    busy={commentModerationBusyId === c.id}
+                                                    onEdit={() => beginEditComment(c)}
+                                                    onHide={() => void toggleCommentHidden(c.id, Boolean(c.hidden_at))}
+                                                    onDelete={() => void deleteComment(c.id)}
+                                                    className="shrink-0"
+                                                  />
+                                                </div>
+                                                {editingCommentId === c.id ? (
+                                                  <div className="mt-2 space-y-2">
+                                                    <textarea
+                                                      className="w-full min-h-16 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-800 outline-none focus:border-[#6f54ff]"
+                                                      value={editCommentBody}
+                                                      onChange={(e) => setEditCommentBody(e.target.value)}
+                                                    />
+                                                    <div className="flex flex-wrap gap-2">
+                                                      <button
+                                                        type="button"
+                                                        disabled={commentModerationBusyId === c.id || !editCommentBody.trim()}
+                                                        onClick={() => void saveEditComment()}
+                                                        className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
+                                                      >
+                                                        Save
+                                                      </button>
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => setEditingCommentId(null)}
+                                                        className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-[#c4cbe6]"
+                                                      >
+                                                        Cancel
+                                                      </button>
+                                                    </div>
+                                                  </div>
+                                                ) : (
+                                                  <p className="mt-0.5 text-[#d4dbf0] break-words whitespace-pre-wrap">{c.body}</p>
+                                                )}
+                                              </div>
+                                              <div className="mt-1 ml-1 flex flex-wrap items-center gap-2">
+                                                <p className="text-[11px] text-[#7d86a8]">{timeAgo(c.created_at)}</p>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    setStaffReplyThreadTarget((prev) =>
+                                                      prev?.postId === a.id && prev.parentId === c.id
+                                                        ? null
+                                                        : { postId: a.id, parentId: c.id }
+                                                    )
+                                                    setStaffReplyThreadDraft('')
+                                                  }}
+                                                  className="text-[11px] font-semibold text-[#8d63ff]"
+                                                >
+                                                  Reply
+                                                </button>
+                                              </div>
+                                              {isReplying ? (
+                                                <div className="mt-2 flex gap-2 items-end">
+                                                  {profile?.avatar_url ? (
+                                                    <img
+                                                      src={profile.avatar_url}
+                                                      alt="Your avatar"
+                                                      className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                                    />
+                                                  ) : (
+                                                    <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
+                                                      {(profile?.username || 'JB').slice(0, 2).toUpperCase()}
+                                                    </div>
+                                                  )}
+                                                  <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
+                                                    <textarea
+                                                      rows={1}
+                                                      autoFocus
+                                                      className="flex-1 min-w-0 bg-transparent text-sm py-2 text-white placeholder:text-[#8e99bd] focus:outline-none resize-none min-h-[40px] max-h-28"
+                                                      placeholder={`Reply to ${c.userName}…`}
+                                                      value={staffReplyThreadDraft}
+                                                      onChange={(e) => setStaffReplyThreadDraft(e.target.value)}
+                                                      onKeyDown={(e) => {
+                                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                                          e.preventDefault()
+                                                          void submitStaffCommentReply(a.id, c.id)
+                                                        }
+                                                      }}
+                                                    />
+                                                    <button
+                                                      type="button"
+                                                      disabled={
+                                                        staffReplyBusyPostId === a.id || !staffReplyThreadDraft.trim()
+                                                      }
+                                                      onClick={() => void submitStaffCommentReply(a.id, c.id)}
+                                                      className="p-2 rounded-full text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
+                                                      aria-label="Send reply"
+                                                    >
+                                                      {staffReplyBusyPostId === a.id ? (
+                                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                                      ) : (
+                                                        <Send className="w-4 h-4" />
+                                                      )}
+                                                    </button>
+                                                  </div>
+                                                </div>
+                                              ) : null}
+                                              {kids.length > 0 ? (
+                                                <ul className="mt-2 space-y-2 border-l border-white/10 pl-2 ml-1">
+                                                  {kids.map((k) => renderEngagementComment(k))}
+                                                </ul>
+                                              ) : null}
+                                            </div>
+                                          </li>
+                                        )
+                                      }
+                                      return (
+                                        <ul className="space-y-3">
+                                          {(cBy.get(null) || []).map((c) => renderEngagementComment(c))}
+                                        </ul>
+                                      )
+                                    })()
+                                  )}
+                                  <div className="flex gap-2 items-end">
+                                    {profile?.avatar_url ? (
+                                      <img
+                                        src={profile.avatar_url}
+                                        alt="Your avatar"
+                                        className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                      />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
+                                        {(profile?.username || 'JB').slice(0, 2).toUpperCase()}
+                                      </div>
+                                    )}
+                                    <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
+                                      <textarea
+                                        id={`staff-comment-${a.id}`}
+                                        rows={1}
+                                        className="flex-1 min-w-0 bg-transparent text-sm py-2 text-white placeholder:text-[#8e99bd] focus:outline-none resize-none min-h-[40px] max-h-28"
+                                        placeholder="Write a comment…"
+                                        value={staffCommentDrafts[a.id] || ''}
+                                        onChange={(e) =>
+                                          setStaffCommentDrafts((d) => ({ ...d, [a.id]: e.target.value }))
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault()
+                                            void submitStaffComment(a.id)
+                                          }
+                                        }}
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          staffReplyBusyPostId === a.id || !(staffCommentDrafts[a.id] || '').trim()
+                                        }
+                                        onClick={() => void submitStaffComment(a.id)}
+                                        className="p-2 rounded-full text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
+                                        aria-label="Send comment"
+                                      >
+                                        {staffReplyBusyPostId === a.id ? (
+                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                        ) : (
+                                          <Send className="w-4 h-4" />
+                                        )}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+          
+          </>)} />
+
+        <StaffTabPanel
+          tab="inbox"
+          activeTab={activeTab}
+          mountedTabs={mountedTabs}
+          className="space-y-3 max-lg:flex max-lg:flex-col max-lg:flex-1 max-lg:min-h-0 max-lg:overflow-hidden lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden"
+         render={() => (
+          <>
+            <div
+              className={`flex items-center justify-between gap-2 flex-wrap shrink-0 ${
+                inboxMobileThreadOpen ? 'max-lg:hidden' : ''
+              }`}
+            >
+              <div className="flex items-center gap-2 min-h-[34px]">
+                {inboxTriageThreadCount > 0 ? (
+                  <span className="text-[10px] font-bold text-[#8d63ff] bg-[rgba(141,99,255,0.2)] border border-[rgba(141,99,255,0.35)] rounded-md px-1.5 py-px tabular-nums">
+                    {inboxTriageThreadCount} waiting
+                  </span>
+                ) : null}
+                <span className="text-[11px] text-[#8892b0] tabular-nums">
+                  {inboxThreadLabelFilterIds.length > 0 && !inboxSearchQuery.trim()
+                    ? inboxLabelFilterBusy
+                      ? 'Loading labeled threads…'
+                      : `${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label`
+                    : inboxSearchQuery.trim() || inboxUnreadFilterOnly
+                      ? `${inboxDisplayList.length} of ${convoListMerged.length} threads`
+                      : `${convoListMerged.length} threads`}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {isAdmin ? (
+                  <button
+                    type="button"
+                    onClick={() => void backfillWelcomeDms()}
+                    disabled={welcomeBackfillBusy || !profile.business_id}
+                    className="inline-flex items-center gap-2 rounded-[10px] border border-[#6f54ff]/35 bg-[#6f54ff]/10 px-3 py-2 text-[13px] font-semibold text-[#c4b5ff] hover:bg-[#6f54ff]/15 disabled:opacity-40 max-sm:px-2.5"
+                    title="Send missing welcome messages to customers approved in the last 72 hours"
+                  >
+                    {welcomeBackfillBusy ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <MessageCircle className="w-4 h-4" />
+                    )}
+                    <span className="max-sm:sr-only">Send missing welcomes</span>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => void refreshInbox()}
+                  disabled={inboxRefreshing || !profile.business_id}
+                  className="inline-flex items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-3 py-2 text-[13px] font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-50 shadow-sm disabled:opacity-40 max-sm:px-2.5"
+                  aria-label="Refresh inbox"
+                >
+                  <RefreshCw className={`w-4 h-4 ${inboxRefreshing ? 'animate-spin' : ''}`} />
+                  <span className="max-sm:sr-only">Refresh inbox</span>
+                </button>
+              </div>
+            </div>
+
+            {inboxLoading && convoList.length === 0 ? (
+              <div className="flex items-center justify-center gap-2 relay-staff-card px-4 py-12 text-[13px] text-[#8892b0]">
+                <Loader2 className="w-5 h-5 animate-spin text-[#8d63ff]" />
+                Loading inbox threads…
+              </div>
+            ) : convoList.length === 0 && !inboxLoading ? (
+              loadError ? (
+                <p className="text-sm text-red-300/90 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2">
+                  Threads could not load — see the error banner above. Staff must have{' '}
+                  <code className="text-red-200">profiles.business_id</code> matching conversations for this business.
+                </p>
+              ) : (
+                <div className="text-sm text-[#7d86a8] space-y-2">
+                  <p>
+                    When approved customers message your business from the feed, threads show up here. Customers can also
+                    open <strong className="text-[#c4cbe6]">Support</strong> from the feed to start a conversation with{' '}
+                    <strong className="text-[#c4cbe6]">{businessInfo?.name ?? 'your business'}</strong>.
+                  </p>
+                </div>
+              )
+            ) : (
+              <div
+                className={`relay-staff-card overflow-hidden max-lg:flex max-lg:flex-col max-lg:flex-1 max-lg:min-h-0 lg:grid lg:grid-cols-[minmax(220px,1fr)_minmax(0,1.75fr)] lg:grid-rows-[minmax(0,1fr)] lg:flex-1 lg:min-h-0 ${
+                  inboxMobileThreadOpen ? 'max-lg:rounded-none max-lg:border-0 max-lg:bg-transparent' : ''
+                }`}
+              >
+                <aside
+                  className={`border-r border-slate-200 min-h-0 lg:flex lg:flex-col lg:max-h-none lg:h-full ${
+                    inboxMobileThreadOpen ? 'hidden' : 'flex flex-col flex-1 min-h-0'
+                  }`}
+                >
+                  <div className="p-2.5 border-b border-slate-200 shrink-0">
+                    <div className="relative rounded-xl border border-slate-200 bg-slate-50">
+                      <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden />
+                      <input
+                        type="search"
+                        className="w-full rounded-xl bg-transparent py-2 pl-8 pr-2 text-[13px] text-slate-800 placeholder:text-slate-500 outline-none focus:ring-1 focus:ring-[#6f54ff]/40"
+                        placeholder="Name, @user, preview, label… (finds older threads too)"
+                        value={inboxSearchQuery}
+                        onChange={(e) => setInboxSearchQuery(e.target.value)}
+                        aria-label="Search threads"
+                      />
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Filter</span>
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                      <button
+                        type="button"
+                        onClick={clearInboxThreadFilters}
+                        className={`inline-flex shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                          inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly
+                            ? 'border-violet-300 bg-violet-50 text-violet-700 ring-1 ring-violet-300'
+                            : 'border-slate-200 bg-white text-slate-700 opacity-90 hover:opacity-100 hover:text-slate-900'
+                        }`}
+                      >
+                        All threads
+                      </button>
+                      <button
+                        type="button"
+                        onClick={toggleInboxUnreadFilter}
+                        className={`inline-flex shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                          inboxUnreadFilterOnly ? 'ring-1 ring-[#ff3b5c]/50' : 'opacity-90 hover:opacity-100'
+                        }`}
+                        style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                      >
+                        Unread{inboxTriageThreadCount > 0 ? ` (${inboxTriageThreadCount > 99 ? '99+' : inboxTriageThreadCount})` : ''}
+                      </button>
+                      {inboxLabelCatalog.map((lbl) => {
+                        const on = inboxThreadLabelFilterIds.includes(lbl.id)
+                        return (
+                          <button
+                            key={lbl.id}
+                            type="button"
+                            onClick={() => selectInboxThreadLabelFilter(lbl.id)}
+                            className={`inline-flex shrink-0 max-w-full truncate rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition ${
+                              on ? 'ring-1 ring-[#8d63ff]/50' : 'opacity-80 hover:opacity-100'
+                            }`}
+                            style={inboxLabelChipStyle(lbl.color)}
+                          >
+                            {lbl.name}
+                          </button>
+                        )
+                      })}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100 lg:max-h-none pt-1 pb-0.5">
+                    {inboxUnreadFilterOnly ? (
+                      <p className="px-3 py-2 text-[11px] text-slate-600 border-b border-slate-100">
+                        {inboxDisplayList.length === 0
+                          ? 'No unread threads.'
+                          : `${inboxDisplayList.length} unread thread${inboxDisplayList.length === 1 ? '' : 's'}.`}{' '}
+                        Search by name to find older unread conversations, or{' '}
+                        <button
+                          type="button"
+                          onClick={clearInboxThreadFilters}
+                          className="font-semibold text-[#8d63ff] hover:underline"
+                        >
+                          view all threads
+                        </button>
+                        .
+                      </p>
+                    ) : inboxThreadLabelFilterIds.length > 0 ? (
+                      <p className="px-3 py-2 text-[11px] text-slate-600 border-b border-slate-100">
+                        {inboxLabelFilterBusy
+                          ? 'Loading all threads with this label…'
+                          : inboxDisplayList.length === 0
+                            ? 'No threads have this label.'
+                            : `Showing all ${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label.`}{' '}
+                        {!inboxLabelFilterBusy ? (
+                          <>
+                            Search by name to narrow the list, or{' '}
+                            <button
+                              type="button"
+                              onClick={clearInboxThreadFilters}
+                              className="font-semibold text-[#8d63ff] hover:underline"
+                            >
+                              view all threads
+                            </button>
+                            .
+                          </>
+                        ) : null}
+                      </p>
+                    ) : null}
+                    {inboxSearchExtraBusy && inboxSearchQuery.trim().length >= 2 ? (
+                      <p className="px-3 py-2 text-[11px] text-[#8892b0]">Searching older threads…</p>
+                    ) : null}
+                    {inboxDisplayList.length === 0 ? (
+                      <div className="px-3 py-4 space-y-3">
+                        <p className="text-center text-[13px] text-[#7d86a8]">
+                          {convoListMerged.length === 0
+                            ? 'No threads.'
+                            : inboxSearchQuery.trim()
+                              ? 'No match in loaded threads — check below for members without a thread yet.'
+                              : 'No threads match your search or label filters.'}
+                        </p>
+                        {inboxSearchMemberMatches.length > 0 ? (
+                          <div className="rounded-xl border border-[#6f54ff]/30 bg-[#6f54ff]/8 p-2 space-y-1">
+                            <p className="text-[10px] uppercase tracking-wide text-[#9ea8cc] px-1">
+                              Matching members (no message thread yet)
+                            </p>
+                            {inboxSearchMemberMatches.map((m) => {
+                              const label =
+                                `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim() || m.username
+                              const starting = memberStartBusyId === m.id
+                              return (
+                                <div
+                                  key={m.id}
+                                  className="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-white/[0.04]"
+                                >
+                                  <div className="min-w-0">
+                                    <p className="text-[13px] font-semibold text-slate-900 truncate">{label}</p>
+                                    <p className="text-[11px] text-[#8892b0] truncate">@{m.username}</p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={starting}
+                                    onClick={() => void openInboxThreadForMember(m.id)}
+                                    className="shrink-0 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[12px] font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-40"
+                                  >
+                                    {starting ? 'Opening…' : 'Open chat'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                    inboxDisplayList.map((item) => {
+                      const active = selectedConvoId === item.id
+                      const displayLabels = convoLabelsWithUnread(item, inboxAttentionIds)
+                      return (
+                        <button
+                          type="button"
+                          key={item.id}
+                          onClick={() => void openThread(item.id)}
+                          className={`w-full text-left px-3 py-2.5 flex gap-2 items-start transition-colors ${
+                            active ? 'bg-[rgba(141,99,255,0.07)]' : 'hover:bg-slate-50'
+                          } ${item.unreadCount > 0 && !active ? 'border-l-2 border-[#ff3b5c]/70' : ''}`}
+                        >
+                          <div className="relative shrink-0">
+                            <div className="w-9 h-9 rounded-[10px] bg-slate-100 flex items-center justify-center text-[12px] font-bold overflow-hidden border border-slate-200 text-slate-600">
+                              {item.customerAvatar ? (
+                                <img src={item.customerAvatar} alt={`${item.customerName} avatar`} className="w-full h-full object-cover" />
+                              ) : (
+                                item.customerName.slice(0, 2).toUpperCase()
+                              )}
+                            </div>
+                            {item.unreadCount > 0 ? (
+                              <span className="absolute -top-1 -right-1 z-10 min-w-3.5 h-3.5 px-0.5 rounded-full bg-[#ff3b5c] text-white text-[8px] font-bold flex items-center justify-center leading-none tabular-nums border-2 border-white">
+                                {item.unreadCount > 9 ? '9+' : item.unreadCount}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <p
+                                className={`text-[13px] truncate ${
+                                  item.unreadCount > 0 ? 'font-bold text-slate-900' : 'font-semibold text-slate-900'
+                                }`}
+                              >
+                                {item.customerName}
+                              </p>
+                              <p className="shrink-0 text-[10px] text-[#4e5a7a]">{timeAgo(item.updated_at)}</p>
+                            </div>
+                            <p className="text-[11px] text-[#8892b0] truncate">@{item.customerUsername}</p>
+                            <p
+                              className={`text-[11px] truncate mt-0.5 max-w-[min(100%,220px)] ${
+                                item.unreadCount > 0 ? 'text-[#c4cbe6] font-medium' : 'text-[#8892b0]'
+                              }`}
+                            >
+                              {item.preview}
+                            </p>
+                            {displayLabels.length > 0 ? (
+                              <div className="flex flex-wrap gap-1 mt-1.5 max-w-[min(100%,220px)]">
+                                {displayLabels.slice(0, 4).map((l) => (
+                                  <span
+                                    key={l.id}
+                                    className="inline-flex max-w-full truncate rounded px-1 py-px text-[9px] font-semibold border"
+                                    style={inboxLabelChipStyle(l.color)}
+                                  >
+                                    {l.name}
+                                  </span>
+                                ))}
+                                {displayLabels.length > 4 ? (
+                                  <span className="text-[9px] text-[#5c647e] font-medium">+{displayLabels.length - 4}</span>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        </button>
+                      )
+                    })
+                    )}
+                  </div>
+                </aside>
+
+                <div
+                  className={
+                    inboxMobileThreadOpen
+                      ? 'flex flex-col flex-1 min-h-0 relative max-lg:overflow-hidden lg:min-h-0 lg:max-h-none lg:h-full lg:overflow-hidden'
+                      : 'hidden lg:flex lg:flex-col lg:min-h-0 lg:max-h-none lg:h-full lg:overflow-hidden relative'
+                  }
+                >
+                  {selectedConvo ? (
+                    <>
+                      <div className="px-3 py-2.5 border-b border-slate-200 shrink-0 space-y-2">
+                        <div className="flex items-center gap-2 justify-between">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <button
+                              type="button"
+                              onClick={closeInboxThread}
+                              className="lg:hidden shrink-0 p-2 -ml-1 rounded-lg text-[#9ea8cc] hover:text-white hover:bg-white/10"
+                              aria-label="Back to all threads"
+                            >
+                              <ArrowLeft className="w-5 h-5" />
+                            </button>
+                            <div className="w-8 h-8 rounded-full bg-[#d12f2f] overflow-hidden flex items-center justify-center text-[11px] font-bold text-white shrink-0">
+                              {selectedConvo.customerAvatar ? (
+                                <img src={selectedConvo.customerAvatar} alt={`${selectedConvo.customerName} avatar`} className="w-full h-full object-cover" />
+                              ) : (
+                                selectedConvo.customerName.slice(0, 2).toUpperCase()
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-semibold text-slate-900 truncate">{selectedConvo.customerName}</p>
+                              <p className="text-[11px] text-[#8892b0] truncate">@{selectedConvo.customerUsername} · Customer</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-0.5 shrink-0 relative">
+                            {selectedConvo && convoNeedsInboxTriage(selectedConvo, inboxAttentionIds) ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void markActiveThreadRead(selectedConvo.id, selectedConvo.customer_id)
+                                }
+                                className="rounded-lg border px-2 py-1 text-[11px] font-semibold transition"
+                                style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                                title="Clear triage queue and mark remaining messages read"
+                              >
+                                Mark done
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setInboxContactOpen(false)
+                                setInboxLabelsPopoverOpen((v) => !v)
+                              }}
+                              className={`p-2 rounded-lg hover:bg-white/10 ${
+                                inboxLabelsPopoverOpen ? 'text-white bg-white/10' : 'text-[#9ea8cc] hover:text-white'
+                              }`}
+                              aria-expanded={inboxLabelsPopoverOpen}
+                              aria-label="Labels"
+                            >
+                              <Tag className="w-5 h-5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setInboxLabelsPopoverOpen(false)
+                                setInboxContactOpen((v) => !v)
+                              }}
+                              className="p-2 rounded-lg text-[#9ea8cc] hover:text-white hover:bg-white/10"
+                              aria-label="Open contact profile"
+                            >
+                              <MoreHorizontal className="w-5 h-5" />
+                            </button>
+                            {inboxLabelsPopoverOpen ? (
+                              <div
+                                ref={inboxLabelsPopoverRef}
+                                className="absolute right-0 top-[calc(100%+6px)] z-30 w-[min(calc(100vw-2rem),320px)] rounded-2xl border border-white/10 bg-[#101937] shadow-[0_20px_40px_-25px_rgba(0,0,0,0.85)] overflow-hidden"
+                              >
+                                <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between gap-2">
+                                  <p className="text-[13px] font-semibold text-white">Labels</p>
+                                  <button
+                                    type="button"
+                                    onClick={() => setInboxLabelsPopoverOpen(false)}
+                                    className="p-1 rounded-md text-[#9ea8cc] hover:text-white hover:bg-white/10"
+                                    aria-label="Close labels"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+                                <div className="max-h-[min(50vh,280px)] overflow-y-auto p-2 space-y-0.5">
+                                  {inboxLabelCatalog.length === 0 ? (
+                                    <p className="text-xs text-[#7d86a8] px-2 py-3">
+                                      No labels yet. Run the inbox labels migration in Supabase, then refresh.
+                                    </p>
+                                  ) : (
+                                    inboxLabelCatalog.map((def) => {
+                                      const on = selectedConvo.labels.some((l) => l.id === def.id)
+                                      const busy = inboxLabelRowBusy === def.id
+                                      return (
+                                        <div
+                                          key={def.id}
+                                          className="flex items-center gap-1 rounded-lg px-1.5 py-1 hover:bg-white/[0.04]"
+                                        >
+                                          <button
+                                            type="button"
+                                            disabled={busy || !selectedConvoId}
+                                            onClick={() => void applyInboxLabelOnThread(def.id, !on, def)}
+                                            className="flex-1 min-w-0 flex items-center gap-2 text-left rounded-md px-2 py-1.5 text-[13px] text-[#e2e6f5] disabled:opacity-40"
+                                          >
+                                            <span
+                                              className="w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold"
+                                              style={inboxLabelChipStyle(def.color)}
+                                            >
+                                              {on ? '✓' : ''}
+                                            </span>
+                                            <span className="truncate">{def.name}</span>
+                                            {def.is_system ? (
+                                              <span className="text-[9px] text-[#5c647e] shrink-0 font-medium">preset</span>
+                                            ) : null}
+                                          </button>
+                                          {!def.is_system ? (
+                                            <button
+                                              type="button"
+                                              disabled={busy}
+                                              onClick={() => void deleteInboxLabelDefinition(def.id)}
+                                              className="p-1.5 rounded-md text-[#9ea8cc] hover:text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                                              aria-label={`Delete label ${def.name}`}
+                                            >
+                                              <Trash2 className="w-4 h-4" />
+                                            </button>
+                                          ) : null}
+                                        </div>
+                                      )
+                                    })
+                                  )}
+                                </div>
+                                <div className="p-2 border-t border-slate-200 space-y-2 bg-slate-50">
+                                  <p className="text-[10px] uppercase tracking-wide text-[#5c647e] font-semibold px-1">New label</p>
+                                  <div className="flex gap-1.5">
+                                    <input
+                                      className="flex-1 min-w-0 border border-slate-200 bg-white rounded-lg px-2.5 py-2 text-[13px] outline-none focus:border-[#6f54ff]/50"
+                                      placeholder="e.g. Refund"
+                                      value={newInboxLabelName}
+                                      onChange={(e) => setNewInboxLabelName(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          e.preventDefault()
+                                          void createInboxLabelFromDraft()
+                                        }
+                                      }}
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={inboxLabelCreateBusy || !newInboxLabelName.trim()}
+                                      onClick={() => void createInboxLabelFromDraft()}
+                                      className="shrink-0 rounded-lg px-3 py-2 text-[12px] font-semibold bg-white/10 text-white hover:bg-white/[0.14] disabled:opacity-40"
+                                    >
+                                      {inboxLabelCreateBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Add'}
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                        {convoLabelsWithUnread(selectedConvo, inboxAttentionIds).length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5 items-center pl-[42px]">
+                            {convoLabelsWithUnread(selectedConvo, inboxAttentionIds).map((l) =>
+                              l.id === INBOX_UNREAD_VIRTUAL_LABEL.id ? (
+                                <span
+                                  key={l.id}
+                                  className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold max-w-[200px]"
+                                  style={inboxLabelChipStyle(l.color)}
+                                >
+                                  <span className="truncate">{l.name}</span>
+                                </span>
+                              ) : (
+                                <button
+                                  key={l.id}
+                                  type="button"
+                                  disabled={inboxLabelRowBusy === l.id}
+                                  onClick={() => void applyInboxLabelOnThread(l.id, false, l)}
+                                  className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold max-w-[200px] group disabled:opacity-40"
+                                  style={inboxLabelChipStyle(l.color)}
+                                  title="Remove label"
+                                >
+                                  <span className="truncate">{l.name}</span>
+                                  <X className="w-3 h-3 shrink-0 opacity-70 group-hover:opacity-100" />
+                                </button>
+                              )
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-[#5c647e] pl-[42px]">No labels — use the tag icon to add some.</p>
+                        )}
+                      </div>
+                      {inboxContactOpen ? (
+                        <div className="absolute top-[62px] right-3 z-20 w-[280px] rounded-2xl border border-white/10 bg-[#101937] p-4 space-y-3 shadow-[0_20px_40px_-25px_rgba(0,0,0,0.8)]">
+                          <p className="text-sm font-semibold text-white">Contact profile</p>
+                          <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 rounded-full bg-[#6f54ff] overflow-hidden flex items-center justify-center font-bold">
+                              {selectedConvo.customerAvatar ? (
+                                <img src={selectedConvo.customerAvatar} alt={`${selectedConvo.customerName} avatar`} className="w-full h-full object-cover" />
+                              ) : (
+                                selectedConvo.customerName.slice(0, 2).toUpperCase()
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-white truncate">{selectedConvo.customerName}</p>
+                              <p className="text-xs text-[#7d86a8] truncate">@{selectedConvo.customerUsername}</p>
+                            </div>
+                          </div>
+                          <div className="pt-2 border-t border-white/10 text-xs text-[#7d86a8] space-y-1">
+                            <p>Conversation ID</p>
+                            <p className="text-[#aeb7d6] font-mono truncate" title={selectedConvo.id}>
+                              {selectedConvo.id}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="relative flex-1 min-h-0 flex flex-col">
+                      <div
+                        ref={threadScrollRef}
+                        onScroll={threadChatScroll.onScroll}
+                        className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2"
+                      >
+                        {threadLoading ? (
+                          <div className="flex justify-center py-12">
+                            <Loader2 className="w-6 h-6 animate-spin text-[#8d63ff]" />
+                          </div>
+                        ) : threadMessages.length === 0 ? (
+                          <p className="text-sm text-[#7d86a8] py-6 text-center">No messages yet. Say hello below.</p>
+                        ) : (
+                          threadMessages.map((m, i) => {
+                            const isFromTeam = m.sender_id !== selectedConvo.customer_id
+                            const teamLine = isFromTeam
+                              ? formatTeamSenderLine(oneEmbed(m.profiles))
+                              : null
+                            const showText = Boolean(m.body?.trim()) && m.body !== '📷'
+                            const showSeen =
+                              m.read === true &&
+                              m.read_at &&
+                              ((isFromTeam && i === threadSeenIndexes.lastStaff) ||
+                                (!isFromTeam && i === threadSeenIndexes.lastOther))
+                            const replyParent = oneReplyEmbed(m.reply_to)
+                            const customerId = selectedConvo.customer_id
+                            const replyQuoteVariant = isFromTeam ? 'staff-out' : 'staff-in'
+                            const sentAtLabel = timeAgo(m.created_at)
+                            const seenAtLabel = m.read_at ? timeAgo(m.read_at) : null
+                            const hideSentTime = isFromTeam && showSeen && seenAtLabel === sentAtLabel
+                            const scrollToMessage = (messageId: string) => {
+                              document
+                                .getElementById(`inbox-msg-${messageId}`)
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                            }
+                            const showUnreadDivider = i === threadFirstUnreadIndex
+                            return (
+                              <div key={m.id} className="contents">
+                                {showUnreadDivider ? (
+                                  <div
+                                    className="col-span-full flex items-center gap-2 py-1"
+                                    role="separator"
+                                    aria-label="Unread messages"
+                                  >
+                                    <div className="h-px flex-1 bg-[#ff3b5c]/35" />
+                                    <span
+                                      className="shrink-0 rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                                      style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
+                                    >
+                                      Unread
+                                    </span>
+                                    <div className="h-px flex-1 bg-[#ff3b5c]/35" />
+                                  </div>
+                                ) : null}
+                                <div
+                                  id={`inbox-msg-${m.id}`}
+                                  data-message-id={m.id}
+                                  className={`flex flex-col w-full min-w-0 ${isFromTeam ? 'items-end' : 'items-start'}`}
+                                >
+                                {teamLine ? (
+                                  <p
+                                    className="text-[10px] text-[#7d86a8] px-1 pb-0.5 font-medium truncate max-w-full text-right"
+                                    title={teamLine}
+                                  >
+                                    {teamLine}
+                                  </p>
+                                ) : null}
+                                <div className={`flex w-full min-w-0 ${isFromTeam ? 'justify-end' : 'justify-start'}`}>
+                                  <div
+                                    className={`w-fit max-w-[min(85%,24rem)] shrink-0 rounded-2xl text-sm overflow-hidden ${
+                                      isFromTeam
+                                        ? 'bg-[#6f54ff] text-white'
+                                        : 'bg-slate-100 border border-slate-200 text-slate-800'
+                                    }`}
+                                  >
+                                    {replyParent ? (
+                                      <div className={showText || m.image_url ? 'px-2 pt-2' : 'p-2'}>
+                                        <MessageReplyQuote
+                                          authorLabel={replyAuthorLabel(
+                                            replyParent.sender_id,
+                                            customerId,
+                                            oneReplyEmbed(replyParent.profiles),
+                                            {
+                                              viewerIsCustomer: false,
+                                              businessName: businessInfo?.name,
+                                            }
+                                          )}
+                                          body={replyParent.body}
+                                          imageUrl={replyParent.image_url}
+                                          variant={replyQuoteVariant}
+                                          onClick={() => scrollToMessage(replyParent.id)}
+                                        />
+                                      </div>
+                                    ) : null}
+                                    {m.image_url ? (
+                                      <ChatMessageImage
+                                        imageUrl={m.image_url}
+                                        alt="Attachment"
+                                        className={`max-h-40 max-w-full w-full object-cover block ${
+                                          showText ? 'rounded-t-lg' : 'rounded-lg'
+                                        } ${replyParent ? 'mx-2 mb-1 rounded-lg' : ''}`}
+                                      />
+                                    ) : null}
+                                    {showText ? (
+                                      <LinkifiedText
+                                        text={m.body}
+                                        className={`whitespace-pre-wrap break-words px-3 py-2 ${
+                                          replyParent && !m.image_url ? 'pt-0' : ''
+                                        }`}
+                                        linkClassName={isFromTeam ? 'text-white' : 'text-violet-600 underline'}
+                                      />
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <div
+                                  className={`mt-1 flex max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] ${
+                                    isFromTeam ? 'justify-end' : 'justify-start'
+                                  }`}
+                                >
+                                  {!hideSentTime ? (
+                                    <span className="text-[#7d86a8] tabular-nums">{sentAtLabel}</span>
+                                  ) : null}
+                                  {!isFromTeam ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setReplyTarget(m)}
+                                      className="font-semibold text-[#8d63ff] hover:text-[#a78bff] hover:underline"
+                                    >
+                                      Reply
+                                    </button>
+                                  ) : null}
+                                  {showSeen && seenAtLabel ? (
+                                    <span className="text-[#7d86a8]">Seen · {seenAtLabel}</span>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                            )
+                          })
+                        )}
+                        <div ref={threadEndRef} className="h-px w-full" aria-hidden />
+                      </div>
+                      <ChatJumpToLatestButton
+                        visible={threadChatScroll.showJumpButton}
+                        onClick={() => threadChatScroll.jumpToLatest(scrollThreadToLatest)}
+                      />
+                      </div>
+                      <div className="p-2 border-t border-slate-200 space-y-1.5 shrink-0 bg-white">
+                        {peerCustomerTyping ? (
+                          <p className="text-xs text-[#7d86a8]" aria-live="polite">
+                            {selectedConvo.customerName} is typing…
+                          </p>
+                        ) : null}
+                        <input
+                          ref={replyImageInputRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/gif"
+                          className="hidden"
+                          onChange={onReplyImagePick}
+                        />
+                        {replyPendingImage ? (
+                          <div className="relative rounded-xl overflow-hidden border border-white/10 max-h-32 w-fit max-w-full">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={replyPendingImage.previewUrl}
+                              alt="Attachment preview"
+                              className="max-h-32 w-auto max-w-full object-contain bg-[#0a1020]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => clearReplyPendingImage()}
+                              className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/65 text-white flex items-center justify-center text-xs hover:bg-black/80"
+                              aria-label="Remove photo"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ) : null}
+                        {replyTarget ? (
+                          <ReplyTargetBar
+                            authorLabel={replyAuthorLabel(
+                              replyTarget.sender_id,
+                              selectedConvo.customer_id,
+                              oneReplyEmbed(replyTarget.profiles),
+                              {
+                                viewerIsCustomer: false,
+                                businessName: businessInfo?.name,
+                              }
+                            )}
+                            previewText={replyPreviewText(replyTarget.body, replyTarget.image_url)}
+                            onCancel={() => setReplyTarget(null)}
+                          />
+                        ) : null}
+                        <div className="flex gap-2 items-end">
+                          <button
+                            type="button"
+                            onClick={() => replyImageInputRef.current?.click()}
+                            disabled={replyBusy}
+                            className="shrink-0 p-2.5 rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-violet-600 hover:border-violet-300 disabled:opacity-40"
+                            aria-label="Attach image"
+                          >
+                            <ImagePlus className="w-5 h-5" />
+                          </button>
+                          <div className="relative shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setInboxLabelsPopoverOpen(false)
+                                setInboxContactOpen(false)
+                                setCannedPickerQuery('')
+                                setCannedPopoverOpen((v) => !v)
+                              }}
+                              disabled={replyBusy}
+                              className={`p-2.5 rounded-xl border border-slate-200 bg-white disabled:opacity-40 ${
+                                cannedPopoverOpen
+                                  ? 'text-violet-700 border-violet-300 bg-violet-50'
+                                  : 'text-slate-500 hover:text-violet-600 hover:border-violet-300'
+                              }`}
+                              aria-expanded={cannedPopoverOpen}
+                              aria-label="Quick replies"
+                            >
+                              <BookMarked className="w-5 h-5" />
+                            </button>
+                            {cannedPopoverOpen ? (
+                              <div
+                                ref={cannedPopoverRef}
+                                className="absolute bottom-[calc(100%+8px)] left-0 z-30 w-[min(calc(100vw-2rem),360px)] max-h-[min(70vh,420px)] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg flex flex-col"
+                              >
+                                <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 shrink-0">
+                                  <p className="text-[13px] font-semibold text-slate-900">Quick replies</p>
+                                  <button
+                                    type="button"
+                                    onClick={() => setCannedPopoverOpen(false)}
+                                    className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                                    aria-label="Close quick replies"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+                                <div className="px-2 py-2 border-b border-slate-200 shrink-0">
+                                  <input
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[12px] text-slate-800 outline-none focus:border-[#6f54ff]/50 placeholder:text-slate-500"
+                                    placeholder="Filter saved replies…"
+                                    value={cannedPickerQuery}
+                                    onChange={(e) => setCannedPickerQuery(e.target.value)}
+                                  />
+                                </div>
+                                <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
+                                  {filteredCannedPickerList.length === 0 ? (
+                                    <p className="px-2 py-4 text-center text-[12px] text-[#7d86a8]">
+                                      {cannedReplies.length === 0
+                                        ? 'No saved replies yet. Add one below (requires inbox_canned_replies migration).'
+                                        : 'No matches.'}
+                                    </p>
+                                  ) : (
+                                    filteredCannedPickerList.map((r) => (
+                                      <div
+                                        key={r.id}
+                                        className="rounded-xl border border-slate-200 bg-slate-50 p-2.5 space-y-2"
+                                      >
+                                        <div className="min-w-0">
+                                          <p className="text-[12px] font-semibold text-slate-900 truncate">{r.title}</p>
+                                          <p className="text-[11px] text-slate-600 line-clamp-2 whitespace-pre-wrap break-words">
+                                            {r.body}
+                                          </p>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          <button
+                                            type="button"
+                                            disabled={replyBusy}
+                                            onClick={() => insertCannedReplyIntoDraft(r)}
+                                            className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-40"
+                                          >
+                                            Insert
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={cannedDeleteBusyId === r.id}
+                                            onClick={() => beginEditCanned(r)}
+                                            className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1.5 text-[11px] font-medium text-[#c4cbe6] hover:bg-white/[0.06]"
+                                          >
+                                            <Pencil className="w-3 h-3" />
+                                            Edit
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={cannedDeleteBusyId === r.id}
+                                            onClick={() => void deleteCannedReply(r.id)}
+                                            className="inline-flex items-center gap-1 rounded-lg border border-red-500/25 px-2 py-1.5 text-[11px] font-medium text-red-300/90 hover:bg-red-500/10 disabled:opacity-40"
+                                          >
+                                            {cannedDeleteBusyId === r.id ? (
+                                              <Loader2 className="w-3 h-3 animate-spin" />
+                                            ) : (
+                                              <Trash2 className="w-3 h-3" />
+                                            )}
+                                            Delete
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                                <div className="border-t border-slate-200 bg-slate-50 p-2.5 space-y-2 shrink-0">
+                                  <p className="text-[10px] font-semibold uppercase tracking-wide text-[#5c647e] px-0.5">
+                                    {cannedEditId ? 'Edit quick reply' : 'New quick reply'}
+                                  </p>
+                                  <input
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[12px] text-[#e2e6f5] outline-none focus:border-[#6f54ff]/50"
+                                    placeholder="Short title (e.g. Thanks — investigating)"
+                                    value={cannedFormTitle}
+                                    onChange={(e) => setCannedFormTitle(e.target.value)}
+                                  />
+                                  <textarea
+                                    className="w-full min-h-[88px] resize-y rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[12px] text-[#e2e6f5] outline-none focus:border-[#6f54ff]/50"
+                                    placeholder="Message body… Use placeholders: {customer_name}, {username}, {business}"
+                                    value={cannedFormBody}
+                                    onChange={(e) => setCannedFormBody(e.target.value)}
+                                  />
+                                  <div className="flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={cannedSaveBusy}
+                                      onClick={() => void saveCannedReplyForm()}
+                                      className="rounded-lg bg-white/10 px-3 py-2 text-[12px] font-semibold text-white hover:bg-white/[0.14] disabled:opacity-40"
+                                    >
+                                      {cannedSaveBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : cannedEditId ? 'Save changes' : 'Save reply'}
+                                    </button>
+                                    {cannedEditId ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => cancelCannedForm()}
+                                        className="rounded-lg border border-white/10 px-3 py-2 text-[12px] font-medium text-[#c4cbe6] hover:bg-white/[0.06]"
+                                      >
+                                        Cancel edit
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                          <textarea
+                            rows={1}
+                            className="flex-1 min-w-0 border border-slate-200 bg-white rounded-xl px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-[#6f54ff] resize-none min-h-[42px] max-h-32 placeholder:text-slate-500"
+                            placeholder="Reply or add a caption…"
+                            value={replyDraft}
+                            onChange={(e) => setReplyDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault()
+                                void sendReply()
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            disabled={replyBusy || (!replyDraft.trim() && !replyPendingImage)}
+                            onClick={() => void sendReply()}
+                            className="shrink-0 rounded-xl px-3.5 py-2.5 font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
+                          >
+                            Send
+                          </button>
+                        </div>
+                        <p className="hidden xl:block text-[10px] text-[#5c647e] leading-tight">
+                          Photos only (no video). Quick replies support {'{customer_name}'}, {'{username}'}, and {'{business}'} in the saved
+                          message.
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="hidden lg:flex h-full items-center justify-center px-5 text-center text-[#7d86a8] text-sm">
+                      Select a conversation from the list to open thread details.
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            )}
+          
+          </>)} />
+
+        <StaffTabPanel tab="users" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-4" render={() => (
+          <>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <p className="text-[12px] text-[#8892b0] leading-relaxed flex-1 min-w-[200px]">
+                Approve new signups and manage active members for your business. Admins and support use the same tools here; pending customers cannot
+                use the app until approved.
+              </p>
+              <button
+                type="button"
+                onClick={() => void refreshUsers()}
+                disabled={usersRefreshing || !profile.business_id}
+                className="inline-flex items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-3 py-2 text-[13px] font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-50 shadow-sm disabled:opacity-40 shrink-0"
+                aria-label="Refresh users"
+              >
+                <RefreshCw className={`w-4 h-4 ${usersRefreshing ? 'animate-spin' : ''}`} />
+                <span className="max-sm:sr-only">Refresh users</span>
+              </button>
+            </div>
+            {usersLoading && hasUsersData ? (
+              <p className="text-[11px] text-[#8d63ff] inline-flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Refreshing members…
+              </p>
+            ) : null}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <StatCard icon={<User2 className="w-4 h-4" />} label="Pending" value={pendingSignupCount} accent="yellow" />
+              <StatCard icon={<Users className="w-4 h-4" />} label="Active" value={activeMembers.length} accent="green" />
+              <StatCard icon={<Ban className="w-4 h-4" />} label="Suspended" value={suspendedMembers.length} accent="red" />
+              <StatCard
+                icon={<ClipboardList className="w-4 h-4" />}
+                label="Total managed"
+                value={pendingSignupCount + activeMembers.length + suspendedMembers.length}
+                accent="purple"
+              />
+            </div>
+              <div className="flex gap-0.5 rounded-[10px] bg-slate-100 border border-slate-200 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => switchUsersPanelTab('pending')}
+                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold ${
+                    usersPanelTab === 'pending' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'
+                  }`}
+                >
+                  Pending ({pendingCustomers.length || pendingSignupCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchUsersPanelTab('active')}
+                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold ${
+                    usersPanelTab === 'active' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'
+                  }`}
+                >
+                  Active ({activeMembers.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchUsersPanelTab('suspended')}
+                  className={`flex-1 rounded-lg py-1.5 text-[11px] font-semibold ${
+                    usersPanelTab === 'suspended' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'
+                  }`}
+                >
+                  Suspended ({suspendedMembers.length})
+                </button>
+              </div>
+
+              <StaffUsersSubPanel panel="pending" activePanel={usersPanelTab} mountedPanels={mountedUsersPanels} className="space-y-2" render={() => (
+                  <>
+                  <h4 className="relay-staff-panel-title">Pending approval</h4>
+                  <div className="relay-staff-card p-2.5 sm:p-3 space-y-2.5 shadow-[0_20px_50px_-35px_rgba(30,49,112,0.95)]">
+                    {usersLoading && pendingCustomers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#7d86a8]">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                        Loading pending signups…
+                      </div>
+                    ) : pendingCustomers.length === 0 ? (
+                      <p className="text-sm text-[#7d86a8] py-4 text-center">No pending signups.</p>
+                    ) : (
+                      pendingCustomers.map((cust) => (
+                        <article key={cust.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+                          <div>
+                            <p className="font-semibold">
+                              {`${cust.first_name ?? ''} ${cust.last_name ?? ''}`.trim() || cust.username}
+                            </p>
+                            <p className="text-[#7d86a8] text-sm">
+                              @{cust.username} · joined {timeAgo(cust.created_at)}
+                            </p>
+                            <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-[#9ea8cc]">
+                              <p className="break-all">
+                                <span className="text-[#7d86a8]">Username:</span> @{cust.username}
+                              </p>
+                              <p className="break-all">
+                                <span className="text-[#7d86a8]">Email:</span>{' '}
+                                {cust.email ? (
+                                  <>
+                                    {cust.email}
+                                    <span
+                                      className={`ml-1 inline-block rounded-full px-1.5 py-[1px] text-[10px] font-semibold uppercase tracking-wide ${
+                                        cust.email_verified
+                                          ? 'bg-emerald-500/15 text-emerald-300'
+                                          : 'bg-amber-500/15 text-amber-300'
+                                      }`}
+                                    >
+                                      {cust.email_verified ? 'Verified' : 'Unverified'}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="text-[#7d86a8]">—</span>
+                                )}
+                              </p>
+                              <p className="break-all">
+                                <span className="text-[#7d86a8]">Phone:</span>{' '}
+                                {cust.phone?.trim() ? cust.phone : <span className="text-[#7d86a8]">—</span>}
+                              </p>
+                              <p className="break-all">
+                                <span className="text-[#7d86a8]">Referral:</span>{' '}
+                                {cust.referral_username ? (
+                                  `@${cust.referral_username}`
+                                ) : (
+                                  <span className="text-[#7d86a8]">—</span>
+                                )}
+                              </p>
+                              {cust.signup_question?.trim() ? (
+                                <p className="break-words sm:col-span-2 rounded-lg border border-white/10 bg-[#0d1220] px-3 py-2 text-[#c4cbe6]">
+                                  <span className="text-[#7d86a8]">Question:</span> {cust.signup_question.trim()}
+                                </p>
+                              ) : null}
+                              <p className="break-all sm:col-span-2">
+                                <span className="text-[#7d86a8]">Signed up:</span>{' '}
+                                {new Date(cust.created_at).toLocaleString()} ({timeAgo(cust.created_at)})
+                              </p>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <button
+                              type="button"
+                              disabled={reviewBusyId === cust.id}
+                              onClick={() => void reviewCustomer(cust.id, 'approve')}
+                              className="rounded-xl py-2 font-semibold bg-emerald-500/90 hover:bg-emerald-500 disabled:opacity-40"
+                            >
+                              {reviewBusyId === cust.id ? '…' : 'Approve'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={reviewBusyId === cust.id}
+                              onClick={() => void reviewCustomer(cust.id, 'reject')}
+                              className="rounded-xl py-2 font-semibold bg-red-500/90 hover:bg-red-500 disabled:opacity-40"
+                            >
+                              Reject
+                            </button>
+                            <button
+                              type="button"
+                              disabled={reviewBusyId === cust.id}
+                              onClick={() => void reviewCustomer(cust.id, 'block')}
+                              className="rounded-xl py-2 font-semibold bg-white/10 hover:bg-white/15 disabled:opacity-40"
+                            >
+                              Block
+                            </button>
+                          </div>
+                        </article>
+                      ))
+                    )}
+                  </div>
+              </>)} />
+
+              <StaffUsersSubPanel panel="active" activePanel={usersPanelTab} mountedPanels={mountedUsersPanels} className="space-y-2" render={() => (
+                  <>
+                  <h4 className="relay-staff-panel-title">Active members</h4>
+                  <p className="text-[#7d86a8] text-xs">
+                    Customers approved for the platform who follow your business or have a support thread with you.
+                  </p>
+                  {activeMembers.length > 0 ? (
+                    <div className="space-y-1">
+                      <div className="relative">
+                        <Search
+                          className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c647e]"
+                          aria-hidden
+                        />
+                        <input
+                          type="search"
+                          className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-8 pr-2 text-sm text-slate-800 outline-none focus:border-[#6f54ff]/50"
+                          placeholder="Search by name, @username, or email…"
+                          value={activeMemberQuery}
+                          onChange={(e) => setActiveMemberQuery(e.target.value)}
+                          aria-label="Search active members"
+                        />
+                      </div>
+                      {activeMemberQuery.trim() ? (
+                        <p className="text-[10px] text-[#5c647e] px-0.5">
+                          {filteredActiveMembers.length} match{filteredActiveMembers.length === 1 ? '' : 'es'} for your
+                          search
+                          {filteredActiveMembers.length === 0 ? ' — try another name or @handle' : ''}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <div className="relay-staff-card divide-y divide-slate-100 shadow-[0_20px_50px_-35px_rgba(30,49,112,0.95)] max-h-[380px] overflow-y-auto">
+                    {activeMemberQuery.trim().length >= 2 &&
+                    activeMemberLookup &&
+                    !activeMembers.some((m) => m.id === activeMemberLookup.id) ? (
+                      <div className="px-3 py-2.5 border-b border-[#6f54ff]/25 bg-[#6f54ff]/8">
+                        <p className="text-[10px] uppercase tracking-wide text-[#9ea8cc] mb-1">Found on platform</p>
+                        <p className="font-medium text-[14px]">
+                          {[activeMemberLookup.first_name, activeMemberLookup.last_name].filter(Boolean).join(' ').trim() ||
+                            activeMemberLookup.username}
+                        </p>
+                        <p className="text-[13px] text-[#7d86a8]">
+                          @{activeMemberLookup.username}
+                          {activeMemberLookup.email ? ` · ${activeMemberLookup.email}` : ''}
+                        </p>
+                        <p className="text-[11px] text-[#7d86a8] mt-1">
+                          Status: {activeMemberLookup.account_status}. They must follow your business or message you to appear in Active members.
+                        </p>
+                      </div>
+                    ) : null}
+                    {activeMemberLookupBusy && activeMemberQuery.trim().length >= 2 ? (
+                      <p className="text-xs text-[#7d86a8] px-3 py-2">Looking up account…</p>
+                    ) : null}
+                    {usersLoading && activeMembers.length === 0 && suspendedMembers.length === 0 && pendingCustomers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#7d86a8]">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                        Loading members…
+                      </div>
+                    ) : activeMembers.length === 0 ? (
+                      <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">
+                        No active members linked to this business yet — approve customers and have them follow or message you.
+                      </p>
+                    ) : filteredActiveMembers.length === 0 ? (
+                      <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">
+                        {activeMemberLookup
+                          ? 'No linked members match — see the account found above if shown.'
+                          : 'No members match your search.'}
+                      </p>
+                    ) : (
+                      filteredActiveMembers.map((m) => {
+                        const label = `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim() || m.username
+                        const memberInitials = label.slice(0, 2).toUpperCase()
+                        const memberDraft = memberMessageDrafts[m.id] ?? ''
+                        const memberSending = memberSendBusyId === m.id
+                        const composeOpen = memberComposeOpenId === m.id
+                        return (
+                          <div key={m.id} className="px-3 py-2.5 space-y-2">
+                            <div className="flex items-center justify-between gap-2.5">
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                {m.avatar_url ? (
+                                  <img
+                                    src={m.avatar_url}
+                                    alt={`${label} avatar`}
+                                    className="w-9 h-9 rounded-full object-cover border border-white/10 shrink-0"
+                                  />
+                                ) : (
+                                  <div
+                                    className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 border border-white/10"
+                                    style={{ backgroundColor: '#606770' }}
+                                  >
+                                    {memberInitials}
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate text-[14px]">{label}</p>
+                                  <p className="text-[13px] text-[#7d86a8] truncate">@{m.username}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={memberSending}
+                                  onClick={() =>
+                                    setMemberComposeOpenId((prev) => (prev === m.id ? null : m.id))
+                                  }
+                                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px] font-semibold disabled:opacity-40 ${
+                                    composeOpen
+                                      ? 'border-violet-300 bg-violet-50 text-violet-700'
+                                      : 'border-violet-200 bg-violet-50/70 text-violet-700 hover:bg-violet-100'
+                                  }`}
+                                >
+                                  <Send className="w-4 h-4 shrink-0" />
+                                  Send
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={modBusyId === m.id}
+                                  onClick={() => void moderateSuspension(m.id, 'suspend', label)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[13px] font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-40"
+                                >
+                                  <Ban className="w-4 h-4 shrink-0" />
+                                  {modBusyId === m.id ? '…' : 'Suspend'}
+                                </button>
+                              </div>
+                            </div>
+                            {composeOpen ? (
+                              <div className="flex gap-2 pl-12">
+                                <input
+                                  className="flex-1 min-w-0 border border-slate-200 bg-white rounded-xl px-3 py-2 text-sm outline-none focus:border-[#6f54ff] disabled:opacity-50"
+                                  placeholder="Type a message…"
+                                  value={memberDraft}
+                                  disabled={memberSending}
+                                  autoFocus
+                                  onChange={(e) =>
+                                    setMemberMessageDrafts((prev) => ({ ...prev, [m.id]: e.target.value }))
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                      e.preventDefault()
+                                      void sendMessageToActiveMember(m.id)
+                                    }
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  disabled={memberSending || !memberDraft.trim()}
+                                  onClick={() => void sendMessageToActiveMember(m.id)}
+                                  className="shrink-0 inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
+                                >
+                                  {memberSending ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <Send className="w-4 h-4" />
+                                  )}
+                                  Send
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+              </>)} />
+
+              <StaffUsersSubPanel panel="suspended" activePanel={usersPanelTab} mountedPanels={mountedUsersPanels} className="space-y-2" render={() => (
+                  <>
+                  <h4 className="relay-staff-panel-title">Suspended</h4>
+                  <p className="text-[#7d86a8] text-xs">
+                    These customers cannot use the app until you unsuspend them. Actions are recorded in the moderation log.
+                  </p>
+                  <div className="relay-staff-card border-amber-200 divide-y divide-slate-100 max-h-[340px] overflow-y-auto">
+                    {usersLoading && suspendedMembers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#7d86a8]">
+                        <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" />
+                        Loading suspended members…
+                      </div>
+                    ) : suspendedMembers.length === 0 ? (
+                      <p className="text-sm text-[#7d86a8] py-6 px-4 text-center">No suspended members for this business.</p>
+                    ) : (
+                      suspendedMembers.map((m) => {
+                        const label = `${m.first_name ?? ''} ${m.last_name ?? ''}`.trim() || m.username
+                        return (
+                          <div key={m.id} className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2.5">
+                            <div className="min-w-0">
+                              <p className="font-medium truncate text-[14px]">{label}</p>
+                              <p className="text-[13px] text-[#7d86a8] truncate">@{m.username}</p>
+                            </div>
+                            <button
+                                type="button"
+                                disabled={modBusyId === m.id}
+                                onClick={() => void moderateSuspension(m.id, 'unsuspend', label)}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[13px] text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-40"
+                              >
+                                <UserCheck className="w-4 h-4 shrink-0" />
+                                {modBusyId === m.id ? '…' : 'Unsuspend'}
+                              </button>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+              </>)} />
+          
+          </>)} />
+
+        {isAdmin ? (
+          <StaffTabPanel tab="team" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-4 max-w-3xl" render={() => (
+          <>
+            <p className="text-[12px] text-[#8892b0] leading-relaxed">
+              Everyone on the business team shares this dashboard: inbox, users, posts, and reports. Customers see who sent each reply; in your
+              inbox you see the same for every admin and support agent. Only admins can add or remove support accounts below.
+            </p>
+            {isAdmin ? (
+              <div className="relay-staff-card p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-slate-900">Add support staff</h3>
+                <p className="text-[11px] text-[#8892b0]">
+                  They sign in at Relay with <strong className="text-[#c4cbe6]">email + password</strong> (same login page as you). Username is their
+                  public <strong className="text-[#c4cbe6]">@handle</strong> for sign-in (lowercase, digits, underscore; 3–30 chars). Only{' '}
+                  <strong className="text-[#c4cbe6]">first name</strong> is collected here for your records. Up to 4 support agents per business.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff]/50"
+                  placeholder="First name"
+                  value={newStaffFirst}
+                  onChange={(e) => setNewStaffFirst(e.target.value)}
+                  autoComplete="given-name"
+                />
+                <input
+                  type="email"
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff]/50"
+                  placeholder="Work email (their login)"
+                  value={newStaffEmail}
+                  onChange={(e) => setNewStaffEmail(e.target.value)}
+                  autoComplete="off"
+                />
+                <input
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff]/50 sm:col-span-2"
+                  placeholder="Username — public @handle (e.g. alex_support)"
+                  value={newStaffUsername}
+                  onChange={(e) => setNewStaffUsername(e.target.value.replace(/\s+/g, '').replace(/^@+/, ''))}
+                  autoComplete="off"
+                />
+                <div className="relative sm:col-span-2">
+                  <input
+                    type={showNewStaffPassword ? 'text' : 'password'}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-10 text-sm outline-none focus:border-[#6f54ff]/50"
+                    placeholder="Password (min 8 characters)"
+                    value={newStaffPassword}
+                    onChange={(e) => setNewStaffPassword(e.target.value)}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewStaffPassword((v) => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6f7896] hover:text-white p-0.5"
+                    aria-label={showNewStaffPassword ? 'Hide passwords' : 'Show passwords'}
+                  >
+                    {showNewStaffPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <div className="relative sm:col-span-2">
+                  <input
+                    type={showNewStaffPassword ? 'text' : 'password'}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-10 text-sm outline-none focus:border-[#6f54ff]/50"
+                    placeholder="Confirm password"
+                    value={newStaffPasswordConfirm}
+                    onChange={(e) => setNewStaffPasswordConfirm(e.target.value)}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewStaffPassword((v) => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6f7896] hover:text-white p-0.5"
+                    aria-label={showNewStaffPassword ? 'Hide passwords' : 'Show passwords'}
+                  >
+                    {showNewStaffPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={createStaffBusy}
+                onClick={() => void createSupportStaff()}
+                className="w-full rounded-xl py-2.5 font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {createStaffBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                {createStaffBusy ? 'Creating…' : 'Create staff account'}
+              </button>
+            </div>
+            ) : null}
+
+            <div className="relay-staff-card overflow-hidden">
+              <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
+                <h3 className="relay-staff-section-title">Team roster</h3>
+                {teamLoadBusy ? <Loader2 className="w-4 h-4 animate-spin text-[#8d63ff]" /> : null}
+              </div>
+              <div className="divide-y divide-slate-100">
+                {teamRows.length === 0 && !teamLoadBusy ? (
+                  <p className="px-3 py-5 text-[13px] text-[#8892b0]">No team rows loaded.</p>
+                ) : (
+                  teamRows.map((row) => {
+                    const label = `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || row.username
+                    const isSupport = row.business_role === 'support'
+                    const removed = Boolean(row.deleted_at)
+                    return (
+                      <div key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-3">
+                        <div className="min-w-0">
+                          <p className="font-medium text-slate-900 truncate">{label}</p>
+                          <p className="text-[12px] text-[#7d86a8] truncate">
+                            @{row.username} · {row.business_role === 'admin' ? 'Admin' : 'Support'}
+                            {removed ? <span className="text-red-600 font-medium"> · removed</span> : null}
+                          </p>
+                        </div>
+                        {isAdmin && isSupport && !removed ? (
+                          <button
+                            type="button"
+                            disabled={removeStaffBusyId === row.id}
+                            onClick={() => void removeSupportMember(row.id, label)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-[12px] font-semibold text-red-600 hover:bg-red-100 disabled:opacity-40"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                            {removeStaffBusyId === row.id ? '…' : 'Remove'}
+                          </button>
+                        ) : null}
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          
+          </>)} />
+        ) : null}
+
+        <StaffTabPanel tab="notify" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3 max-w-3xl" render={() => (
+          <>
+            <p className="text-[12px] text-[#8892b0] leading-relaxed">
+              Sends an <strong className="text-[#c4cbe6]">in-app notification</strong> and <strong className="text-[#c4cbe6]">email</strong> to each recipient (bell / Notifications screen).{' '}
+              This is <strong className="text-[#c4cbe6]">not</strong> SMS, email, or a DM in their support thread — only the notifications list.
+            </p>
+            <p className="text-[12px] text-[#8892b0] leading-relaxed">
+              <strong className="text-[#c4cbe6]">All</strong>: anyone who has messaged your business or follows you.{' '}
+              <strong className="text-[#c4cbe6]">Selected</strong>: pick from that same member list.{' '}
+              <strong className="text-[#c4cbe6]">Labels</strong>: approved customers with at least one conversation tagged with any label you pick.{' '}
+              <strong className="text-[#c4cbe6]">One user</strong>: username or UUID. Pending or suspended customers are always skipped.
+            </p>
+            <div className="relay-staff-card p-3 space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                {(['announcement', 'alert', 'update'] as const).map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setAnnouncementType(opt)}
+                    className={`rounded-xl py-2.5 border capitalize text-[13px] ${
+                      announcementType === opt
+                        ? 'border-[#6f54ff] bg-violet-50 text-[#6f54ff]'
+                        : 'border-slate-200 bg-white text-slate-600'
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+              <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden bg-white">
+                <AudienceRow label="All (thread + followers)" selected={audience === 'all'} onClick={() => setAudience('all')} />
+                <AudienceRow label="Selected users" selected={audience === 'selected'} onClick={() => setAudience('selected')} />
+                <AudienceRow label="Users with inbox labels" selected={audience === 'labels'} onClick={() => setAudience('labels')} />
+                <AudienceRow label="One user" selected={audience === 'one'} onClick={() => setAudience('one')} />
+              </div>
+              {audience === 'labels' ? (
+                <div className="rounded-xl border border-slate-200 bg-white p-2 space-y-1">
+                  <p className="text-[11px] text-[#8892b0] px-1.5 pt-0.5">
+                    Tick one or more labels. Anyone with a tagged thread for your business (any of these labels) gets the notification.
+                  </p>
+                  <p className="text-[11px] text-[#c4cbe6] px-1.5 pb-1 tabular-nums">
+                    {notifyAudienceLabelIds.length} label{notifyAudienceLabelIds.length === 1 ? '' : 's'} selected
+                  </p>
+                  <div className="max-h-56 overflow-y-auto space-y-1">
+                    {inboxLabelCatalog.length === 0 ? (
+                      <p className="text-xs text-[#7d86a8] px-2 py-3">
+                        No labels defined yet. Add labels from the Inbox tab (requires migration 013), then choose who has those tags on a thread.
+                      </p>
+                    ) : (
+                      inboxLabelCatalog.map((lbl) => {
+                        const selected = notifyAudienceLabelIds.includes(lbl.id)
+                        return (
+                          <button
+                            key={lbl.id}
+                            type="button"
+                            onClick={() => toggleNotifyAudienceLabel(lbl.id)}
+                            className={`w-full text-left rounded-lg border px-3 py-2.5 transition-colors flex items-start gap-3 ${
+                              selected
+                                ? 'border-violet-400 bg-violet-50 text-violet-800'
+                                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                            }`}
+                          >
+                            <SelectionCheckbox checked={selected} />
+                            <span
+                              className="shrink-0 mt-1 w-2.5 h-2.5 rounded-full ring-1 ring-white/15"
+                              style={{ backgroundColor: lbl.color ?? '#64748b' }}
+                              title="Label color"
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="text-sm font-medium truncate block">{lbl.name}</span>
+                              {lbl.is_system ? (
+                                <span className="text-[10px] text-[#5c647e]">preset</span>
+                              ) : null}
+                            </span>
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              {audience === 'selected' ? (
+                <div className="rounded-xl border border-slate-200 bg-white p-2 space-y-2">
+                  <p className="text-[11px] text-[#8892b0] px-1.5">
+                    Same people as <strong className="text-[#c4cbe6]">Users → Active</strong>: all approved customers.
+                    Tap rows to toggle, or use Select all / Clear.
+                  </p>
+                  {selectableRecipients.length === 0 ? (
+                    <p className="text-xs text-[#7d86a8] px-2 py-3">
+                      No approved customers yet.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5c647e]" aria-hidden />
+                        <input
+                          type="search"
+                          className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-2 text-[12px] text-[#e2e6f5] outline-none focus:border-[#6f54ff]/50"
+                          placeholder="Search by name, @username, or email…"
+                          value={notifyRecipientQuery}
+                          onChange={(e) => setNotifyRecipientQuery(e.target.value)}
+                          aria-label="Filter members for notify"
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 px-0.5">
+                        <button
+                          type="button"
+                          onClick={selectAllNotifyRecipients}
+                          className="rounded-lg border border-white/15 bg-white/[0.06] px-2.5 py-1.5 text-[11px] font-semibold text-[#c4cbe6] hover:bg-white/[0.1]"
+                        >
+                          Select all ({selectableRecipients.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearNotifyRecipients}
+                          disabled={selectedRecipientIds.length === 0}
+                          className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[11px] font-semibold text-[#8892b0] hover:text-white hover:bg-white/[0.06] disabled:opacity-40"
+                        >
+                          Clear
+                        </button>
+                        {notifyRecipientQuery.trim() && filteredSelectableRecipients.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={addFilteredRecipientsToSelection}
+                            className="rounded-lg border border-[#6f54ff]/40 bg-[#6f54ff]/15 px-2.5 py-1.5 text-[11px] font-semibold text-[#d4c4ff] hover:bg-[#6f54ff]/25"
+                          >
+                            Add shown ({filteredSelectableRecipients.length})
+                          </button>
+                        ) : null}
+                        <span className="text-[11px] text-[#c4cbe6] tabular-nums ml-auto">
+                          {selectedRecipientIds.length} selected
+                        </span>
+                      </div>
+                      {notifySearchBusy ? (
+                        <p className="text-[10px] text-[#8892b0] px-0.5 flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" aria-hidden />
+                          Searching…
+                        </p>
+                      ) : null}
+                      {notifyRecipientQuery.trim() && !notifySearchBusy ? (
+                        <p className="text-[10px] text-[#5c647e] px-0.5">
+                          {filteredSelectableRecipients.length} match{filteredSelectableRecipients.length === 1 ? '' : 'es'} for your search
+                          {filteredSelectableRecipients.length === 0 ? ' — try @username or full email' : ''}
+                        </p>
+                      ) : null}
+                      <div className="max-h-56 overflow-y-auto space-y-1">
+                        {filteredSelectableRecipients.length === 0 ? (
+                          <p className="text-xs text-[#7d86a8] px-2 py-3 text-center">No members match your search.</p>
+                        ) : (
+                          filteredSelectableRecipients.map((member) => {
+                            const label = `${member.first_name ?? ''} ${member.last_name ?? ''}`.trim() || member.username
+                            const selected = selectedRecipientIds.includes(member.id)
+                            return (
+                              <button
+                                key={member.id}
+                                type="button"
+                                onClick={() => toggleSelectedRecipient(member.id)}
+                                className={`w-full text-left rounded-lg border px-3 py-2.5 transition-colors flex items-start gap-3 ${
+                                  selected
+                                    ? 'border-violet-400 bg-violet-50 text-violet-800'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                                }`}
+                              >
+                                <SelectionCheckbox checked={selected} />
+                                <span className="min-w-0 flex-1">
+                                  <span className="text-sm font-medium truncate block">{label}</span>
+                                  <span className="text-xs text-[#7d86a8] truncate block">@{member.username}</span>
+                                  {member.email ? (
+                                    <span className="text-[10px] text-[#5c647e] truncate block">{member.email}</span>
+                                  ) : null}
+                                </span>
+                              </button>
+                            )
+                          })
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
+              {audience === 'one' ? (
+                <input
+                  className="w-full border border-slate-200 bg-white rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff]"
+                  placeholder="Username, email, or user UUID"
+                  value={oneUserQuery}
+                  onChange={(e) => setOneUserQuery(e.target.value)}
+                />
+              ) : null}
+              <input
+                className="w-full border border-slate-200 bg-white rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff]"
+                placeholder="Title"
+                value={notifyTitle}
+                onChange={(e) => setNotifyTitle(e.target.value)}
+              />
+              <textarea
+                className="w-full border border-slate-200 bg-white rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#6f54ff] min-h-24"
+                placeholder="Message"
+                value={notifyBody}
+                onChange={(e) => setNotifyBody(e.target.value)}
+              />
+              <button
+                type="button"
+                disabled={
+                  notifyBusy ||
+                  !notifyTitle.trim() ||
+                  !notifyBody.trim() ||
+                  (audience === 'selected' && selectedRecipientIds.length === 0) ||
+                  (audience === 'labels' && notifyAudienceLabelIds.length === 0)
+                }
+                onClick={() => void sendMemberNotifications()}
+                className="w-full rounded-xl py-2.5 font-semibold bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] disabled:opacity-40"
+              >
+                {notifyBusy ? 'Sending…' : 'Send'}
+              </button>
+            </div>
+          
+          </>)} />
+
+        <StaffTabPanel tab="reports" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3" render={() => (
+          <>
+            {reports.length === 0 ? (
+              <p className="text-sm text-[#7d86a8]">No reports for this business.</p>
+            ) : (
+              <div className="space-y-2.5">
+                {reports.map((report) => (
+                  <article key={report.id} className="relay-staff-card p-3 shadow-[0_20px_50px_-35px_rgba(30,49,112,0.95)]">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-semibold">{report.name}</p>
+                      <StatusPill status={report.status} />
+                    </div>
+                    <p className="text-sm text-[#73a9ff] mt-2">{report.type}</p>
+                    <p className="text-[#7d86a8] mt-1">{report.details}</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {(['new', 'in_review', 'resolved'] as const).map((nextStatus) => (
+                        <button
+                          key={nextStatus}
+                          type="button"
+                          disabled={reportBusyId === report.id || report.status === nextStatus}
+                          onClick={() => void updateReportStatus(report.id, nextStatus)}
+                          className={`rounded-lg border px-2.5 py-1.5 text-xs capitalize transition-colors disabled:opacity-40 ${
+                            report.status === nextStatus
+                              ? 'border-violet-400 bg-violet-50 text-violet-800'
+                              : 'border-slate-200 text-slate-600 hover:text-slate-800 hover:border-slate-300'
+                          }`}
+                        >
+                          {nextStatus === 'in_review' ? 'In review' : nextStatus}
+                        </button>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          
+          </>)} />
+          </div>
+        </div>
+      </main>
+
+      <DashboardNavButtons
+        navItems={navItems}
+        activeTab={activeTab}
+        inboxTriageThreadCount={inboxTriageThreadCount}
+        onSelect={switchTab}
+        layout="mobile"
+        mobileGridClass={mobileGridClass}
+        hideMobile={activeTab === 'inbox' && inboxMobileThreadOpen}
+      />
+    </div>
+  )
+}
+
+function StatCard({
+  icon,
+  label,
+  value,
+  accent,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: number
+  accent: 'yellow' | 'purple' | 'red' | 'green'
+}) {
+  const iconWrap =
+    accent === 'yellow'
+      ? 'bg-amber-50 text-amber-500'
+      : accent === 'purple'
+        ? 'bg-violet-50 text-violet-500'
+        : accent === 'red'
+          ? 'bg-rose-50 text-rose-500'
+          : 'bg-emerald-50 text-emerald-500'
+  return (
+    <div className="relay-staff-card p-3 flex items-center gap-2">
+      <div className={`w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 [&_svg]:stroke-current ${iconWrap}`}>
+        {icon}
+      </div>
+      <div className="min-w-0">
+        <p className="text-[20px] font-bold leading-none text-slate-900 tabular-nums">{value}</p>
+        <p className="text-[11px] text-slate-600 mt-0.5">{label}</p>
+      </div>
+    </div>
+  )
+}
+
+function QuickButton({
+  icon,
+  label,
+  badgeCount,
+  onClick,
+}: {
+  icon: React.ReactNode
+  label: string
+  badgeCount?: number
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="relay-staff-card px-3 py-2.5 flex items-center justify-center gap-2 text-[12px] font-semibold text-slate-700 hover:text-slate-900 hover:border-violet-300 hover:bg-violet-50/60 transition-all relative [&_svg]:text-[#8d63ff] [&_svg]:w-[15px] [&_svg]:h-[15px]"
+    >
+      {typeof badgeCount === 'number' && badgeCount > 0 ? (
+        <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[#8d63ff] text-white text-[9px] font-bold flex items-center justify-center tabular-nums border-2 border-white">
+          {badgeCount > 99 ? '99+' : badgeCount}
+        </span>
+      ) : null}
+      {icon}
+      {label}
+    </button>
+  )
+}
+
+function SelectionCheckbox({ checked }: { checked: boolean }) {
+  return (
+    <span
+      className={`mt-0.5 shrink-0 w-[18px] h-[18px] rounded-[4px] border-2 flex items-center justify-center ${
+        checked ? 'border-[#a78bfa] bg-[#6f54ff]/35' : 'border-slate-300 bg-white'
+      }`}
+      aria-hidden
+    >
+      {checked ? <Check className="w-3.5 h-3.5 text-[#ede9fe]" strokeWidth={3} /> : null}
+    </span>
+  )
+}
+
+function AudienceRow({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="w-full px-3 py-2.5 flex items-center justify-between gap-3">
+      <span className="text-left text-sm">{label}</span>
+      <span
+        className={`w-5 h-5 rounded-full border-2 shrink-0 flex items-center justify-center ${
+          selected ? 'border-[#a78bfa] bg-[#6f54ff]/40' : 'border-slate-300 bg-transparent'
+        }`}
+      >
+        {selected ? <Check className="w-3 h-3 text-[#ede9fe]" strokeWidth={3} /> : null}
+      </span>
+    </button>
+  )
+}
+
+function StatusPill({ status }: { status: ReportItem['status'] }) {
+  if (status === 'new') return <span className="px-2 py-1 rounded-full text-xs bg-sky-500/20 text-sky-300">New</span>
+  if (status === 'in_review')
+    return <span className="px-2 py-1 rounded-full text-xs bg-amber-500/20 text-amber-300">In Review</span>
+  return <span className="px-2 py-1 rounded-full text-xs bg-emerald-500/20 text-emerald-300">Resolved</span>
+}

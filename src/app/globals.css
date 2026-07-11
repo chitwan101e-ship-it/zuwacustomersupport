@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+/* Lock horizontal scroll on every screen so a stray wide element never pushes the
+   fixed bottom nav / floating chat button off-viewport on phones. */
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-x: contain;
+}
+
+img,
+video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Inter typography (matches HTML mock). */
+.relay-wordmark {
+  font-family: var(--font-relay-footer), 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+.relay-footer-bar {
+  font-family: var(--font-relay-footer), 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900;
+  font-family: var(--font-relay-footer), 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea {
+  font-family: inherit;
+}
+
+.otp-input {
+  @apply w-12 h-14 text-center text-xl font-semibold border border-gray-200 rounded-xl focus:border-brand-500 focus:ring-4 focus:ring-brand-100 focus:outline-none transition-all;
+}
+
+/* Staff portal — light workspace (sidebar + header stay dark) */
+@layer components {
+  .relay-staff-workspace {
+    @apply bg-[#f0f2f5] text-slate-800;
+  }
+
+  .relay-staff-card {
+    @apply rounded-2xl border border-slate-200 bg-white text-slate-800 shadow-sm;
+  }
+
+  .relay-staff-section-title {
+    @apply text-[10px] font-bold uppercase tracking-[0.16em] text-slate-600;
+  }
+
+  .relay-staff-panel-title {
+    @apply text-sm font-semibold tracking-wide text-slate-600 uppercase;
+  }
+
+  .relay-staff-muted {
+    @apply text-slate-600;
+  }
+
+  .relay-staff-subtle {
+    @apply text-slate-500;
+  }
+
+  .relay-staff-input {
+    @apply rounded-xl border border-slate-200 bg-white text-sm text-slate-800 outline-none placeholder:text-slate-500 focus:border-[#6f54ff] focus:ring-1 focus:ring-[#6f54ff]/20;
+  }
+
+  /* Remap legacy dark-theme muted text to higher-contrast light-theme colors */
+  .relay-staff-workspace .text-\[\#8892b0\] {
+    @apply text-slate-600;
+  }
+
+  .relay-staff-workspace .text-\[\#c4cbe6\] {
+    @apply text-slate-800;
+  }
+
+  .relay-staff-workspace .text-\[\#4e5a7a\] {
+    @apply text-slate-500;
+  }
+
+  .relay-staff-workspace .text-\[\#7d86a8\] {
+    @apply text-slate-600;
+  }
+
+  .relay-staff-workspace .text-\[\#9ea8cc\] {
+    @apply text-slate-700;
+  }
+
+  .relay-staff-workspace .text-\[\#aeb7d6\] {
+    @apply text-slate-700;
+  }
+
+  .relay-staff-workspace .text-\[\#5c647e\] {
+    @apply text-slate-500;
+  }
+
+  .relay-staff-workspace .text-\[\#6f7896\] {
+    @apply text-slate-500;
+  }
+
+  .relay-staff-workspace .text-\[\#8b97bf\] {
+    @apply text-slate-500;
+  }
+
+  .relay-staff-workspace .text-\[\#dce3f9\] {
+    @apply text-slate-800;
+  }
+
+  .relay-staff-workspace .text-\[\#e2e6f5\] {
+    @apply text-slate-800;
+  }
+
+  .relay-staff-workspace .text-\[\#d4dbf0\] {
+    @apply text-slate-700;
+  }
+
+  .relay-staff-card .font-bold.text-white,
+  .relay-staff-card .font-semibold.text-white,
+  .relay-staff-card .font-medium.text-white,
+  .relay-staff-card p.text-white {
+    @apply text-slate-900;
+  }
+}
