@@ -5124,7 +5124,7 @@ export default function DashboardPage() {
                             <button
                               type="button"
                               onClick={closeInboxThread}
-                              className="lg:hidden shrink-0 p-2 -ml-1 rounded-lg text-[#9ea8cc] hover:text-white hover:bg-white/10"
+                              className="lg:hidden shrink-0 p-2 -ml-1 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100"
                               aria-label="Back to all threads"
                             >
                               <ArrowLeft className="w-5 h-5" />
@@ -5161,8 +5161,10 @@ export default function DashboardPage() {
                                 setInboxContactOpen(false)
                                 setInboxLabelsPopoverOpen((v) => !v)
                               }}
-                              className={`p-2 rounded-lg hover:bg-white/10 ${
-                                inboxLabelsPopoverOpen ? 'text-white bg-white/10' : 'text-[#9ea8cc] hover:text-white'
+                              className={`p-2 rounded-lg ${
+                                inboxLabelsPopoverOpen
+                                  ? 'text-violet-700 bg-violet-50'
+                                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
                               }`}
                               aria-expanded={inboxLabelsPopoverOpen}
                               aria-label="Labels"
@@ -5175,7 +5177,11 @@ export default function DashboardPage() {
                                 setInboxLabelsPopoverOpen(false)
                                 setInboxContactOpen((v) => !v)
                               }}
-                              className="p-2 rounded-lg text-[#9ea8cc] hover:text-white hover:bg-white/10"
+                              className={`p-2 rounded-lg ${
+                                inboxContactOpen
+                                  ? 'text-violet-700 bg-violet-50'
+                                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
+                              }`}
                               aria-label="Open contact profile"
                             >
                               <MoreHorizontal className="w-5 h-5" />
@@ -5183,14 +5189,14 @@ export default function DashboardPage() {
                             {inboxLabelsPopoverOpen ? (
                               <div
                                 ref={inboxLabelsPopoverRef}
-                                className="absolute right-0 top-[calc(100%+6px)] z-30 w-[min(calc(100vw-2rem),320px)] rounded-2xl border border-white/10 bg-[#101937] shadow-[0_20px_40px_-25px_rgba(0,0,0,0.85)] overflow-hidden"
+                                className="absolute right-0 top-[calc(100%+6px)] z-30 w-[min(calc(100vw-2rem),320px)] rounded-2xl border border-slate-200 bg-white shadow-lg overflow-hidden"
                               >
-                                <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between gap-2">
-                                  <p className="text-[13px] font-semibold text-white">Labels</p>
+                                <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
+                                  <p className="text-[13px] font-semibold text-slate-900">Labels</p>
                                   <button
                                     type="button"
                                     onClick={() => setInboxLabelsPopoverOpen(false)}
-                                    className="p-1 rounded-md text-[#9ea8cc] hover:text-white hover:bg-white/10"
+                                    className="p-1 rounded-md text-slate-500 hover:text-slate-800 hover:bg-slate-100"
                                     aria-label="Close labels"
                                   >
                                     <X className="w-4 h-4" />
@@ -5198,7 +5204,7 @@ export default function DashboardPage() {
                                 </div>
                                 <div className="max-h-[min(50vh,280px)] overflow-y-auto p-2 space-y-0.5">
                                   {inboxLabelCatalog.length === 0 ? (
-                                    <p className="text-xs text-[#7d86a8] px-2 py-3">
+                                    <p className="text-xs text-slate-600 px-2 py-3">
                                       No labels yet. Run the inbox labels migration in Supabase, then refresh.
                                     </p>
                                   ) : (
@@ -5208,13 +5214,13 @@ export default function DashboardPage() {
                                       return (
                                         <div
                                           key={def.id}
-                                          className="flex items-center gap-1 rounded-lg px-1.5 py-1 hover:bg-white/[0.04]"
+                                          className="flex items-center gap-1 rounded-lg px-1.5 py-1 hover:bg-slate-50"
                                         >
                                           <button
                                             type="button"
                                             disabled={busy || !selectedConvoId}
                                             onClick={() => void applyInboxLabelOnThread(def.id, !on, def)}
-                                            className="flex-1 min-w-0 flex items-center gap-2 text-left rounded-md px-2 py-1.5 text-[13px] text-[#e2e6f5] disabled:opacity-40"
+                                            className="flex-1 min-w-0 flex items-center gap-2 text-left rounded-md px-2 py-1.5 text-[13px] text-slate-800 disabled:opacity-40"
                                           >
                                             <span
                                               className="w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold"
@@ -5224,7 +5230,7 @@ export default function DashboardPage() {
                                             </span>
                                             <span className="truncate">{def.name}</span>
                                             {def.is_system ? (
-                                              <span className="text-[9px] text-[#5c647e] shrink-0 font-medium">preset</span>
+                                              <span className="text-[9px] text-slate-500 shrink-0 font-medium">preset</span>
                                             ) : null}
                                           </button>
                                           {!def.is_system ? (
@@ -5232,7 +5238,7 @@ export default function DashboardPage() {
                                               type="button"
                                               disabled={busy}
                                               onClick={() => void deleteInboxLabelDefinition(def.id)}
-                                              className="p-1.5 rounded-md text-[#9ea8cc] hover:text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                                              className="p-1.5 rounded-md text-slate-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-40"
                                               aria-label={`Delete label ${def.name}`}
                                             >
                                               <Trash2 className="w-4 h-4" />
@@ -5244,10 +5250,10 @@ export default function DashboardPage() {
                                   )}
                                 </div>
                                 <div className="p-2 border-t border-slate-200 space-y-2 bg-slate-50">
-                                  <p className="text-[10px] uppercase tracking-wide text-[#5c647e] font-semibold px-1">New label</p>
+                                  <p className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold px-1">New label</p>
                                   <div className="flex gap-1.5">
                                     <input
-                                      className="flex-1 min-w-0 border border-slate-200 bg-white rounded-lg px-2.5 py-2 text-[13px] outline-none focus:border-[#6f54ff]/50"
+                                      className="flex-1 min-w-0 border border-slate-200 bg-white rounded-lg px-2.5 py-2 text-[13px] text-slate-800 placeholder:text-slate-500 outline-none focus:border-[#6f54ff]/50"
                                       placeholder="e.g. Refund"
                                       value={newInboxLabelName}
                                       onChange={(e) => setNewInboxLabelName(e.target.value)}
@@ -5262,7 +5268,7 @@ export default function DashboardPage() {
                                       type="button"
                                       disabled={inboxLabelCreateBusy || !newInboxLabelName.trim()}
                                       onClick={() => void createInboxLabelFromDraft()}
-                                      className="shrink-0 rounded-lg px-3 py-2 text-[12px] font-semibold bg-white/10 text-white hover:bg-white/[0.14] disabled:opacity-40"
+                                      className="shrink-0 rounded-lg px-3 py-2 text-[12px] font-semibold bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40"
                                     >
                                       {inboxLabelCreateBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Add'}
                                     </button>
@@ -5300,14 +5306,14 @@ export default function DashboardPage() {
                             )}
                           </div>
                         ) : (
-                          <p className="text-[10px] text-[#5c647e] pl-[42px]">No labels — use the tag icon to add some.</p>
+                          <p className="text-[10px] text-slate-500 pl-[42px]">No labels — use the tag icon to add some.</p>
                         )}
                       </div>
                       {inboxContactOpen ? (
-                        <div className="absolute top-[62px] right-3 z-20 w-[280px] rounded-2xl border border-white/10 bg-[#101937] p-4 space-y-3 shadow-[0_20px_40px_-25px_rgba(0,0,0,0.8)]">
-                          <p className="text-sm font-semibold text-white">Contact profile</p>
+                        <div className="absolute top-[62px] right-3 z-20 w-[280px] rounded-2xl border border-slate-200 bg-white p-4 space-y-3 shadow-lg">
+                          <p className="text-sm font-semibold text-slate-900">Contact profile</p>
                           <div className="flex items-center gap-3">
-                            <div className="w-12 h-12 rounded-full bg-[#6f54ff] overflow-hidden flex items-center justify-center font-bold">
+                            <div className="w-12 h-12 rounded-full bg-violet-100 text-violet-700 overflow-hidden flex items-center justify-center font-bold">
                               {selectedConvo.customerAvatar ? (
                                 <img src={selectedConvo.customerAvatar} alt={`${selectedConvo.customerName} avatar`} className="w-full h-full object-cover" />
                               ) : (
@@ -5315,13 +5321,13 @@ export default function DashboardPage() {
                               )}
                             </div>
                             <div className="min-w-0">
-                              <p className="font-semibold text-white truncate">{selectedConvo.customerName}</p>
-                              <p className="text-xs text-[#7d86a8] truncate">@{selectedConvo.customerUsername}</p>
+                              <p className="font-semibold text-slate-900 truncate">{selectedConvo.customerName}</p>
+                              <p className="text-xs text-slate-600 truncate">@{selectedConvo.customerUsername}</p>
                             </div>
                           </div>
-                          <div className="pt-2 border-t border-white/10 text-xs text-[#7d86a8] space-y-1">
+                          <div className="pt-2 border-t border-slate-200 text-xs text-slate-600 space-y-1">
                             <p>Conversation ID</p>
-                            <p className="text-[#aeb7d6] font-mono truncate" title={selectedConvo.id}>
+                            <p className="text-slate-700 font-mono truncate" title={selectedConvo.id}>
                               {selectedConvo.id}
                             </p>
                           </div>
