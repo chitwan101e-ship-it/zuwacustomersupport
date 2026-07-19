@@ -1,4 +1,7 @@
-/** Session-persisted triage queue: threads stay in the Unread filter until explicitly cleared. */
+/**
+ * Unread = threads with unread inbound customer messages (unreadCount > 0).
+ * Session attention helpers remain for optional triage UX; they do not drive the Unread label.
+ */
 
 export function inboxAttentionStorageKey(businessId: string): string {
   return `relay-inbox-attention-${businessId}`
@@ -26,9 +29,7 @@ export function saveInboxAttentionIds(businessId: string, ids: Iterable<string>)
   }
 }
 
-export function convoNeedsInboxTriage(
-  item: { id: string; unreadCount: number },
-  attentionIds: ReadonlySet<string>
-): boolean {
-  return item.unreadCount > 0 || attentionIds.has(item.id)
+/** True when this thread has unread customer messages staff has not read yet. */
+export function convoNeedsInboxTriage(item: { unreadCount: number }): boolean {
+  return item.unreadCount > 0
 }

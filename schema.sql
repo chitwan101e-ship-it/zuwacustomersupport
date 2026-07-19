@@ -296,11 +296,21 @@ create policy "announce_delete"   on public.announcements for delete
 
 -- REACTIONS: anyone can read; authenticated users manage their own
 create policy "reactions_read"    on public.reactions for select using (true);
-create policy "reactions_own"     on public.reactions for all    using (user_id = auth.uid());
+create policy "reactions_insert_own" on public.reactions for insert to authenticated
+  with check (user_id = auth.uid());
+create policy "reactions_update_own" on public.reactions for update to authenticated
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "reactions_delete_own" on public.reactions for delete to authenticated
+  using (user_id = auth.uid());
 
 -- COMMENTS: anyone can read; authenticated users manage their own
 create policy "comments_read"     on public.comments for select using (true);
-create policy "comments_own"      on public.comments for all    using (user_id = auth.uid());
+create policy "comments_insert_own" on public.comments for insert to authenticated
+  with check (user_id = auth.uid());
+create policy "comments_update_own" on public.comments for update to authenticated
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "comments_delete_own" on public.comments for delete to authenticated
+  using (user_id = auth.uid());
 
 -- CONVERSATIONS: customer sees own; business members see their business's
 create policy "convo_customer"    on public.conversations for select

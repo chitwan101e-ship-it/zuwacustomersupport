@@ -31,6 +31,7 @@ import {
   Eye,
   Pencil,
   EyeOff,
+  ChevronDown,
   Trash2,
   ThumbsUp,
   Share2,
@@ -62,6 +63,7 @@ import {
   type ReplyTargetMessage,
 } from '@/lib/customerMessaging'
 import { FeedPostImage } from '@/components/FeedPostImage'
+import { ExpandablePostText } from '@/components/ExpandablePostText'
 import { LinkifiedText } from '@/components/LinkifiedText'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
 import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
@@ -86,6 +88,10 @@ import {
 } from '@/lib/inboxAttention'
 import { markMessagesReadByIds } from '@/lib/markMessagesReadByIds'
 import { useMarkMessagesReadOnView } from '@/lib/useMarkMessagesReadOnView'
+import {
+  fetchAllForAnnouncementIds,
+  fetchStaffEngagementCounts,
+} from '@/lib/postEngagement'
 
 const autoApproveSignups = isAutoApproveSignupsEnabled()
 
@@ -151,10 +157,9 @@ type ThreadMessage = {
 /** PostgREST `.in()` filters are sent on the URL; chunk to stay under proxy length limits. */
 const PROFILE_ID_IN_CHUNK = 200
 const CONVO_ID_IN_CHUNK = 200
-const COMMENT_PROFILE_EMBED =
-  'id, username, first_name, last_name, avatar_url, role, business_role'
 
-/** Computed inbox chip — not stored in conversation_inbox_labels (like Meta Business Suite). */
+/** Computed inbox chip — not stored in conversation_inbox_labels.
+ * Shown only when there are unread inbound customer messages (unreadCount > 0). */
 const INBOX_UNREAD_VIRTUAL_LABEL: InboxLabelRow = {
   id: '__virtual_unread__',
   name: 'Unread',
@@ -162,8 +167,8 @@ const INBOX_UNREAD_VIRTUAL_LABEL: InboxLabelRow = {
   is_system: true,
 }
 
-function convoLabelsWithUnread(item: ConvoListItem, attentionIds: ReadonlySet<string>): InboxLabelRow[] {
-  if (!convoNeedsInboxTriage(item, attentionIds)) return item.labels
+function convoLabelsWithUnread(item: ConvoListItem): InboxLabelRow[] {
+  if (!convoNeedsInboxTriage(item)) return item.labels
   return [INBOX_UNREAD_VIRTUAL_LABEL, ...item.labels]
 }
 
@@ -556,6 +561,11 @@ type DashboardNavButtonProps = {
   layout: 'sidebar' | 'mobile'
   mobileGridClass?: string
   hideMobile?: boolean
+  inboxFilterLabels?: InboxLabelRow[]
+  inboxUnreadFilterOnly?: boolean
+  inboxThreadLabelFilterIds?: string[]
+  onInboxFilterUnread?: () => void
+  onInboxFilterLabel?: (labelId: string) => void
 }
 
 const DashboardNavButtons = memo(function DashboardNavButtons({
@@ -566,13 +576,121 @@ const DashboardNavButtons = memo(function DashboardNavButtons({
   layout,
   mobileGridClass,
   hideMobile,
+  inboxFilterLabels = [],
+  inboxUnreadFilterOnly = false,
+  inboxThreadLabelFilterIds = [],
+  onInboxFilterUnread,
+  onInboxFilterLabel,
 }: DashboardNavButtonProps) {
+  const [inboxSubmenuOpen, setInboxSubmenuOpen] = useState(activeTab === 'inbox')
+
+  useEffect(() => {
+    if (activeTab === 'inbox') setInboxSubmenuOpen(true)
+  }, [activeTab])
+
   if (layout === 'sidebar') {
     return (
-      <nav className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
+      <nav className="relay-scrollbar-dark flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
         {navItems.map((item) => {
           const Icon = item.icon
           const active = item.id === activeTab
+          if (item.id === 'inbox') {
+            return (
+              <div key={item.id} className="space-y-0.5">
+                <div
+                  className={`w-full flex items-center gap-1 rounded-xl border ${
+                    active
+                      ? 'border-[rgba(141,99,255,0.4)] bg-[rgba(141,99,255,0.1)] text-white shadow-[0_4px_16px_-8px_rgba(124,90,246,0.4)]'
+                      : 'border-transparent text-[#8892b0] hover:bg-white/[0.04] hover:text-[#c4cbe6]'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelect('inbox')
+                      setInboxSubmenuOpen(true)
+                    }}
+                    className="flex-1 min-w-0 flex items-center gap-2.5 px-2.5 py-2 text-left text-[13px] font-medium"
+                  >
+                    <Icon className="w-[15px] h-[15px] shrink-0 opacity-90" />
+                    <span className="flex-1 min-w-0">{item.label}</span>
+                    {inboxTriageThreadCount > 0 ? (
+                      <span className="shrink-0 min-w-4 h-4 px-1 rounded-full bg-[#8d63ff] text-white text-[9px] font-bold flex items-center justify-center tabular-nums">
+                        {inboxTriageThreadCount > 99 ? '99+' : inboxTriageThreadCount}
+                      </span>
+                    ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelect('inbox')
+                      setInboxSubmenuOpen((v) => !v)
+                    }}
+                    className="shrink-0 p-2 mr-1 rounded-lg text-current/80 hover:bg-white/10"
+                    aria-expanded={inboxSubmenuOpen}
+                    aria-label={inboxSubmenuOpen ? 'Hide inbox labels' : 'Show inbox labels'}
+                  >
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 transition-transform ${inboxSubmenuOpen ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+                </div>
+                {inboxSubmenuOpen ? (
+                  <div className="ml-3 pl-2 border-l border-white/10 space-y-0.5 py-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelect('inbox')
+                        onInboxFilterUnread?.()
+                      }}
+                      className={`w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] ${
+                        inboxUnreadFilterOnly
+                          ? 'bg-white/10 text-white font-semibold'
+                          : 'text-[#8892b0] hover:bg-white/[0.04] hover:text-[#c4cbe6]'
+                      }`}
+                    >
+                      <span
+                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: INBOX_UNREAD_VIRTUAL_LABEL.color }}
+                        aria-hidden
+                      />
+                      <span className="truncate">
+                        Unread
+                        {inboxTriageThreadCount > 0
+                          ? ` (${inboxTriageThreadCount > 99 ? '99+' : inboxTriageThreadCount})`
+                          : ''}
+                      </span>
+                    </button>
+                    {inboxFilterLabels.map((lbl) => {
+                      const on = inboxThreadLabelFilterIds.includes(lbl.id)
+                      return (
+                        <button
+                          key={lbl.id}
+                          type="button"
+                          onClick={() => {
+                            onSelect('inbox')
+                            onInboxFilterLabel?.(lbl.id)
+                          }}
+                          className={`w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] ${
+                            on
+                              ? 'bg-white/10 text-white font-semibold'
+                              : 'text-[#8892b0] hover:bg-white/[0.04] hover:text-[#c4cbe6]'
+                          }`}
+                        >
+                          <span
+                            className="h-1.5 w-1.5 rounded-full shrink-0"
+                            style={{ backgroundColor: lbl.color || '#8892b0' }}
+                            aria-hidden
+                          />
+                          <span className="truncate">{lbl.name}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            )
+          }
           return (
             <button
               key={item.id}
@@ -586,11 +704,6 @@ const DashboardNavButtons = memo(function DashboardNavButtons({
             >
               <Icon className="w-[15px] h-[15px] shrink-0 opacity-90" />
               <span className="flex-1 min-w-0">{item.label}</span>
-              {item.id === 'inbox' && inboxTriageThreadCount > 0 ? (
-                <span className="shrink-0 min-w-4 h-4 px-1 rounded-full bg-[#8d63ff] text-white text-[9px] font-bold flex items-center justify-center tabular-nums">
-                  {inboxTriageThreadCount > 99 ? '99+' : inboxTriageThreadCount}
-                </span>
-              ) : null}
             </button>
           )
         })}
@@ -649,10 +762,116 @@ export default function DashboardPage() {
   const [selectedConvoId, setSelectedConvoId] = useState<string | null>(null)
   const selectedConvoIdRef = useRef<string | null>(null)
   selectedConvoIdRef.current = selectedConvoId
+  /** Dedupes unread +1 when notify + messages realtime both fire for the same send. */
+  const inboxUnreadClaimAtRef = useRef(new Map<string, number>())
+  const applyFastCustomerInboundRef = useRef<
+    (opts: {
+      conversationId: string
+      preview: string
+      createdAt?: string
+      message?: Record<string, unknown> | null
+    }) => void
+  >(() => {})
 
   /** Only mark customer messages read while the admin is on Inbox viewing this thread. */
   function isActivelyViewingInboxThread(conversationId: string) {
     return activeTabRef.current === 'inbox' && selectedConvoIdRef.current === conversationId
+  }
+
+  function claimInboxUnreadBump(conversationId: string, withinMs = 8000): boolean {
+    const now = Date.now()
+    const prev = inboxUnreadClaimAtRef.current.get(conversationId)
+    if (prev != null && now - prev < withinMs) return false
+    inboxUnreadClaimAtRef.current.set(conversationId, now)
+    return true
+  }
+
+  function appendStaffThreadMessageFromPayload(raw: Record<string, unknown>) {
+    const id = typeof raw.id === 'string' ? raw.id : null
+    if (!id) return
+    setThreadMessages((prev) => {
+      if (prev.some((m) => m.id === id)) return prev
+      const replyToId = typeof raw.reply_to_message_id === 'string' ? raw.reply_to_message_id : null
+      let reply_to: ThreadMessage['reply_to'] = null
+      if (replyToId) {
+        const parent = prev.find((m) => m.id === replyToId)
+        if (parent) {
+          reply_to = {
+            id: parent.id,
+            sender_id: parent.sender_id,
+            body: parent.body,
+            image_url: parent.image_url ?? null,
+            profiles: oneEmbed(parent.profiles),
+          }
+        }
+      }
+      const incoming: ThreadMessage = {
+        id,
+        sender_id: String(raw.sender_id ?? ''),
+        body: String(raw.body ?? ''),
+        created_at: String(raw.created_at ?? new Date().toISOString()),
+        image_url: (raw.image_url as string | null | undefined) ?? null,
+        read: (raw.read as boolean | null | undefined) ?? null,
+        read_at: (raw.read_at as string | null | undefined) ?? null,
+        reply_to_message_id: replyToId,
+        reply_to,
+        profiles: null,
+      }
+      return [...prev, incoming]
+    })
+  }
+
+  applyFastCustomerInboundRef.current = (opts) => {
+    const { conversationId, preview, createdAt, message } = opts
+    const conv = convoListRef.current.find((c) => c.id === conversationId)
+    const viewing = isActivelyViewingInboxThread(conversationId)
+    const trimmedPreview = preview.trim()
+    const updated_at = createdAt || new Date().toISOString()
+
+    if (conv) {
+      if (!viewing) addInboxAttention(conversationId)
+      setConvoList((prev) => {
+        const idx = prev.findIndex((c) => c.id === conversationId)
+        if (idx < 0) return prev
+        const bumpUnread = !viewing && claimInboxUnreadBump(conversationId)
+        const row = {
+          ...prev[idx],
+          unreadCount: bumpUnread ? prev[idx].unreadCount + 1 : prev[idx].unreadCount,
+          preview: trimmedPreview || prev[idx].preview,
+          updated_at,
+        }
+        return [row, ...prev.filter((c) => c.id !== conversationId)]
+      })
+    }
+
+    if (viewing) {
+      if (message && typeof message.id === 'string') {
+        appendStaffThreadMessageFromPayload(message)
+      } else {
+        void (async () => {
+          const { data, error } = await supabase
+            .from('messages')
+            .select(THREAD_MESSAGE_SELECT_BASE)
+            .eq('conversation_id', conversationId)
+            .order('created_at', { ascending: false })
+            .limit(8)
+          if (error || !data?.length) return
+          if (selectedConvoIdRef.current !== conversationId) return
+          setThreadMessages((prev) => {
+            const have = new Set(prev.map((m) => m.id))
+            const incoming = (data as ThreadMessage[])
+              .filter((m) => !have.has(m.id))
+              .reverse()
+            if (incoming.length === 0) return prev
+            return [...prev, ...incoming]
+          })
+        })()
+      }
+    } else if (!conv) {
+      // Unknown thread — fall back to light inbox refresh so it appears in the list.
+      const current = profileRef.current
+      if (current?.business_id) void refreshDashboardRef.current(current, { scope: 'inbox' })
+    }
   }
   const [threadMessages, setThreadMessages] = useState<ThreadMessage[]>([])
   const [threadLoading, setThreadLoading] = useState(false)
@@ -836,15 +1055,11 @@ export default function DashboardPage() {
 
   const syncInboxAttentionWithUnread = useCallback((list: ConvoListItem[], businessId: string) => {
     setInboxAttentionIds((prev) => {
-      let changed = false
-      const next = new Set(prev)
+      const next = new Set<string>()
       for (const c of list) {
-        if (c.unreadCount > 0 && !next.has(c.id)) {
-          next.add(c.id)
-          changed = true
-        }
+        if (c.unreadCount > 0) next.add(c.id)
       }
-      if (!changed) return prev
+      if (prev.size === next.size && [...next].every((id) => prev.has(id))) return prev
       saveInboxAttentionIds(businessId, next)
       return next
     })
@@ -1313,47 +1528,85 @@ export default function DashboardPage() {
           return
         }
 
-        const [{ data: likes }, { data: coms }] = await Promise.all([
-          supabase.from('reactions').select('announcement_id, user_id').in('announcement_id', ids).eq('reaction', 'like'),
-          supabase
-            .from('comments')
-            .select(
-              `
-              id,
-              announcement_id,
-              user_id,
-              parent_comment_id,
-              body,
-              created_at,
-              hidden_at,
-              profiles ( ${COMMENT_PROFILE_EMBED} )
-            `
-            )
-            .in('announcement_id', ids)
-            .is('deleted_at', null),
-        ])
-
-        const profileMap = new Map<string, BasicProfile>()
-        for (const c of coms || []) {
-          const row = c as CommentWithProfileEmbed
-          const emb = oneEmbed(row.profiles)
-          if (emb) profileMap.set(row.user_id, emb)
+        type ReactionRow = { announcement_id: string; user_id: string }
+        type CommentRowDb = {
+          id: string
+          announcement_id: string
+          user_id: string
+          parent_comment_id: string | null
+          body: string
+          created_at: string
+          hidden_at: string | null
         }
 
-        const likeUserIds = new Set<string>()
-        for (const r of likes || []) likeUserIds.add((r as { user_id: string }).user_id)
-        if (likeUserIds.size > 0) {
-          const likeIds = [...likeUserIds]
-          for (let i = 0; i < likeIds.length; i += PROFILE_ID_IN_CHUNK) {
-            const slice = likeIds.slice(i, i + PROFILE_ID_IN_CHUNK)
-            const { data: rows, error: pe } = await supabase
-              .from('profiles')
-              .select('id, username, first_name, last_name, avatar_url, role, business_role')
-              .in('id', slice)
-            if (pe) console.error('[loadMyAnnouncements] like profiles', pe)
-            for (const row of rows || []) {
-              profileMap.set(row.id, row as BasicProfile)
-            }
+        // Aggregated counts avoid PostgREST's ~1000-row cap (viral posts were starving newer ones).
+        const { counts: engagementCounts, error: countsErr } = await fetchStaffEngagementCounts(
+          supabase,
+          businessId,
+          ids
+        )
+        if (countsErr) {
+          console.warn('[loadMyAnnouncements] staff_post_engagement_counts', countsErr)
+        }
+
+        // Detail rows: paginate + chunk so lists are complete even when one post has 800+ comments.
+        const likesRes = await fetchAllForAnnouncementIds<ReactionRow>(ids, async (slice, from, to) => {
+          const res = await supabase
+            .from('reactions')
+            .select('announcement_id, user_id')
+            .in('announcement_id', slice)
+            .eq('reaction', 'like')
+            .order('announcement_id', { ascending: true })
+            .order('user_id', { ascending: true })
+            .range(from, to)
+          return res
+        })
+        if (likesRes.error) {
+          console.warn(
+            '[loadMyAnnouncements] reactions',
+            likesRes.error.message,
+            likesRes.error.code
+          )
+        }
+        const likes = likesRes.rows
+
+        const comsRes = await fetchAllForAnnouncementIds<CommentRowDb>(ids, async (slice, from, to) => {
+          const res = await supabase
+            .from('comments')
+            .select('id, announcement_id, user_id, parent_comment_id, body, created_at, hidden_at')
+            .in('announcement_id', slice)
+            .is('deleted_at', null)
+            .order('created_at', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to)
+          return res
+        })
+        if (comsRes.error) {
+          console.warn(
+            '[loadMyAnnouncements] comments',
+            comsRes.error.message,
+            comsRes.error.code
+          )
+        }
+        const coms = comsRes.rows
+
+        const profileMap = new Map<string, BasicProfile>()
+        const profileIds = new Set<string>()
+        for (const r of likes) profileIds.add(r.user_id)
+        for (const c of coms) profileIds.add(c.user_id)
+
+        const allProfileIds = [...profileIds]
+        for (let i = 0; i < allProfileIds.length; i += PROFILE_ID_IN_CHUNK) {
+          const slice = allProfileIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+          const { data: rows, error: pe } = await supabase
+            .from('profiles')
+            .select('id, username, first_name, last_name, avatar_url, role, business_role')
+            .in('id', slice)
+          if (pe) {
+            console.warn('[loadMyAnnouncements] profiles', pe.message, pe.code)
+          }
+          for (const row of rows || []) {
+            profileMap.set(row.id, row as BasicProfile)
           }
         }
 
@@ -1370,24 +1623,43 @@ export default function DashboardPage() {
             commentDetails: EngagementComment[]
           }
         > = {}
-        for (const id of ids) meta[id] = { likes: 0, comments: 0, likedBy: [], commentedBy: [], commentPreviews: [], commentDetails: [] }
-        for (const r of likes || []) {
-          const row = r as { announcement_id: string; user_id: string }
-          const aid = row.announcement_id
-          if (meta[aid]) {
-            meta[aid].likes += 1
-            const name = displayNameFor(row.user_id)
-            const avatar = profileMap.get(row.user_id)?.avatar_url ?? null
-            if (!meta[aid].likedBy.some((x) => x.name === name)) meta[aid].likedBy.push({ name, avatar })
+        for (const id of ids) {
+          const c = engagementCounts[id]
+          meta[id] = {
+            // Prefer SQL aggregates; fall back to paginated row tallies if RPC missing.
+            likes: c?.likes ?? 0,
+            comments: c?.comments ?? 0,
+            likedBy: [],
+            commentedBy: [],
+            commentPreviews: [],
+            commentDetails: [],
           }
         }
-        for (const c of coms || []) {
-          const row = c as CommentWithProfileEmbed
+
+        const useRowTallies = Boolean(countsErr)
+        if (useRowTallies) {
+          for (const id of ids) {
+            meta[id].likes = 0
+            meta[id].comments = 0
+          }
+        }
+
+        for (const row of likes) {
           const aid = row.announcement_id
-          const prof = oneEmbed(row.profiles) ?? profileMap.get(row.user_id) ?? null
-          if (prof && !profileMap.has(row.user_id)) profileMap.set(row.user_id, prof)
           if (meta[aid]) {
-            meta[aid].comments += 1
+            if (useRowTallies) meta[aid].likes += 1
+            const name = displayNameFor(row.user_id)
+            const avatar = profileMap.get(row.user_id)?.avatar_url ?? null
+            if (!meta[aid].likedBy.some((x) => x.name === name)) {
+              meta[aid].likedBy.push({ name, avatar })
+            }
+          }
+        }
+        for (const row of coms) {
+          const aid = row.announcement_id
+          const prof = profileMap.get(row.user_id) ?? null
+          if (meta[aid]) {
+            if (useRowTallies) meta[aid].comments += 1
             const name = displayNameFromProfile(prof)
             if (!meta[aid].commentedBy.includes(name)) meta[aid].commentedBy.push(name)
             meta[aid].commentPreviews.push({
@@ -1417,7 +1689,8 @@ export default function DashboardPage() {
         }
         setMyAnnouncementsMeta(meta)
       } catch (e) {
-        console.error(e)
+        const err = e as { message?: string }
+        console.warn('[loadMyAnnouncements]', err?.message || e)
         setMyAnnouncements([])
         setMyAnnouncementsMeta({})
       } finally {
@@ -1816,29 +2089,22 @@ export default function DashboardPage() {
 
     const bumpInboxOnCustomerMessage = (payload: { new: Record<string, unknown> }): boolean => {
       const msg = payload.new as {
+        id?: string
         conversation_id?: string
         sender_id?: string
         body?: string
         created_at?: string
+        image_url?: string | null
       }
       if (!msg.conversation_id || !msg.sender_id) return false
       const conv = convoListRef.current.find((c) => c.id === msg.conversation_id)
       if (!conv || msg.sender_id !== conv.customer_id) return false
-      if (isActivelyViewingInboxThread(msg.conversation_id)) return true
 
-      addInboxAttention(msg.conversation_id)
-      const preview = (msg.body ?? '').trim() || conv.preview
-      const updated_at = msg.created_at || new Date().toISOString()
-      setConvoList((prev) => {
-        const idx = prev.findIndex((c) => c.id === msg.conversation_id)
-        if (idx < 0) return prev
-        const row = {
-          ...prev[idx],
-          unreadCount: prev[idx].unreadCount + 1,
-          preview,
-          updated_at,
-        }
-        return [row, ...prev.filter((c) => c.id !== msg.conversation_id)]
+      applyFastCustomerInboundRef.current({
+        conversationId: msg.conversation_id,
+        preview: (msg.body ?? '').trim() || (msg.image_url ? '📷' : '') || conv.preview,
+        createdAt: msg.created_at,
+        message: msg as Record<string, unknown>,
       })
       return true
     }
@@ -2003,7 +2269,13 @@ export default function DashboardPage() {
 
     const channel = supabase
       .channel(`staff-dashboard-${businessId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations', filter: `business_id=eq.${businessId}` }, queueRefresh)
+      // Only new conversations — message sends also UPDATE conversations.updated_at and must not
+      // trigger a full inbox rebuild (that was causing multi-second lag).
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'conversations', filter: `business_id=eq.${businessId}` },
+        queueRefresh
+      )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_reports', filter: `business_id=eq.${businessId}` }, queueRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'follows', filter: `business_id=eq.${businessId}` }, queueRefresh)
       .on(
@@ -2027,9 +2299,33 @@ export default function DashboardPage() {
         }
       })
 
+    // Shared live bus with customer app — broadcast arrives before/without messages postgres_changes.
+    const liveChannel = supabase
+      .channel(`inbox-live-${businessId}`)
+      .on('broadcast', { event: 'customer_message' }, ({ payload }) => {
+        const row = payload as {
+          conversation_id?: string
+          sender_id?: string
+          body?: string
+          created_at?: string
+          image_url?: string | null
+        }
+        if (!row?.conversation_id || !row.sender_id) return
+        const conv = convoListRef.current.find((c) => c.id === row.conversation_id)
+        if (conv && row.sender_id !== conv.customer_id) return
+        applyFastCustomerInboundRef.current({
+          conversationId: row.conversation_id,
+          preview: (row.body ?? '').trim() || (row.image_url ? '📷' : 'Message'),
+          createdAt: row.created_at,
+          message: payload as Record<string, unknown>,
+        })
+      })
+      .subscribe()
+
     return () => {
       if (timer) window.clearTimeout(timer)
       void supabase.removeChannel(channel)
+      void supabase.removeChannel(liveChannel)
     }
   }, [supabase, refreshDashboard, profile?.business_id, profile?.id, addInboxAttention])
 
@@ -2041,13 +2337,17 @@ export default function DashboardPage() {
     staffThreadBroadcastReadyRef.current = false
     staffThreadChannelRef.current = null
 
+    const appendThreadMessageFromRealtime = (raw: Record<string, unknown>) => {
+      appendStaffThreadMessageFromPayload(raw)
+    }
+
     const channel = supabase
       .channel(`staff-thread-${cid}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` },
-        () => {
-          void reloadThreadMessages(cid, { markRead: false })
+        (payload) => {
+          appendThreadMessageFromRealtime(payload.new as Record<string, unknown>)
         }
       )
       .on(
@@ -2180,10 +2480,25 @@ export default function DashboardPage() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
         (payload) => {
-          const row = payload.new as { type?: string; read?: boolean }
+          const row = payload.new as {
+            type?: string
+            read?: boolean
+            body?: string
+            conversation_id?: string | null
+            created_at?: string
+          }
           if (row?.read) return
           if (row?.type === 'support_message' || row?.type === 'staff_alert') {
             setStaffNotifyUnread((n) => n + 1)
+          }
+          // Same fast path as desktop popups — update inbox/thread without waiting on messages realtime.
+          if (row?.type === 'support_message' && row.conversation_id) {
+            applyFastCustomerInboundRef.current({
+              conversationId: row.conversation_id,
+              preview: (row.body ?? '').trim() || 'Message',
+              createdAt: row.created_at,
+              message: null,
+            })
           }
         }
       )
@@ -3235,7 +3550,13 @@ export default function DashboardPage() {
       setReplyDraft('')
       setReplyTarget(null)
       clearReplyPendingImage()
-      clearInboxAttention(selectedConvoId)
+      // Unread clears only after catch-up + reply: mark remaining inbound read and drop triage.
+      const conv = convoListRef.current.find((c) => c.id === selectedConvoId)
+      if (conv?.customer_id) {
+        await markActiveThreadRead(selectedConvoId, conv.customer_id)
+      } else {
+        clearInboxAttention(selectedConvoId)
+      }
       setConvoList((prev) => patchConvoListAfterOutboundSend(prev, selectedConvoId, preview))
       void refreshDashboard(profileRef.current!, { scope: 'inbox' })
     } catch (e) {
@@ -3301,7 +3622,7 @@ export default function DashboardPage() {
         return next
       })
       setMemberComposeOpenId(null)
-      clearInboxAttention(conversationId)
+      await markActiveThreadRead(conversationId, customerId)
       setConvoList((prev) => patchConvoListAfterOutboundSend(prev, conversationId, preview))
       void refreshDashboard(profileRef.current!, { scope: 'inbox' })
     } catch (e) {
@@ -3768,10 +4089,19 @@ export default function DashboardPage() {
   const inboxTriageThreadCount = useMemo(() => {
     const ids = new Set<string>()
     for (const c of convoList) {
-      if (convoNeedsInboxTriage(c, inboxAttentionIds)) ids.add(c.id)
+      if (convoNeedsInboxTriage(c)) ids.add(c.id)
     }
     return ids.size
-  }, [convoList, inboxAttentionIds])
+  }, [convoList])
+
+  const inboxFilterDropdownLabels = useMemo(() => {
+    const preferred = ['active player', 'priority', 'vip', 'follow up']
+    return preferred
+      .map((name) =>
+        inboxLabelCatalog.find((l) => l.name.trim().toLowerCase() === name)
+      )
+      .filter((l): l is InboxLabelRow => Boolean(l))
+  }, [inboxLabelCatalog])
 
   const hasUsersData = useMemo(
     () =>
@@ -3841,19 +4171,19 @@ export default function DashboardPage() {
   const inboxDisplayList = useMemo(() => {
     if (!needsInboxLists) return convoList
     let list = filteredConvoList
-    if (inboxUnreadFilterOnly) list = list.filter((c) => convoNeedsInboxTriage(c, inboxAttentionIds))
+    if (inboxUnreadFilterOnly) list = list.filter((c) => convoNeedsInboxTriage(c))
     if (inboxThreadLabelFilterIds.length === 0) return list
     return list.filter((c) =>
       inboxThreadLabelFilterIds.some((lid) => c.labels.some((l) => l.id === lid))
     )
-  }, [needsInboxLists, filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxAttentionIds])
+  }, [needsInboxLists, filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly])
 
   /** Drop open thread when it falls outside the active inbox filter. */
   useEffect(() => {
     if ((inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly) || !selectedConvoId) return
     const stillVisible = inboxDisplayList.some((c) => c.id === selectedConvoId)
     if (!stillVisible) setSelectedConvoId(null)
-  }, [inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxDisplayList, selectedConvoId, inboxAttentionIds])
+  }, [inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxDisplayList, selectedConvoId])
 
   /** Active members matching inbox search who have no thread in results (often: follow only, no messages yet). */
   const inboxSearchMemberMatches = useMemo(() => {
@@ -4047,6 +4377,16 @@ export default function DashboardPage() {
     setInboxUnreadFilterOnly((v) => !v)
   }
 
+  function applyInboxUnreadFilter() {
+    setInboxThreadLabelFilterIds([])
+    setInboxUnreadFilterOnly(true)
+  }
+
+  function applyInboxLabelFilter(labelId: string) {
+    setInboxUnreadFilterOnly(false)
+    setInboxThreadLabelFilterIds([labelId])
+  }
+
   function clearInboxThreadFilters() {
     setInboxThreadLabelFilterIds([])
     setInboxUnreadFilterOnly(false)
@@ -4164,6 +4504,11 @@ export default function DashboardPage() {
           inboxTriageThreadCount={inboxTriageThreadCount}
           onSelect={switchTab}
           layout="sidebar"
+          inboxFilterLabels={inboxFilterDropdownLabels}
+          inboxUnreadFilterOnly={inboxUnreadFilterOnly}
+          inboxThreadLabelFilterIds={inboxThreadLabelFilterIds}
+          onInboxFilterUnread={applyInboxUnreadFilter}
+          onInboxFilterLabel={applyInboxLabelFilter}
         />
         <div className="shrink-0 mt-auto pt-3 border-t border-white/[0.06] px-1 space-y-2">
           <DesktopNotificationPrompt variant="staff" layout="sidebar" />
@@ -4234,7 +4579,7 @@ export default function DashboardPage() {
         </header>
 
         <div
-          className={`relay-staff-workspace flex-1 min-h-0 ${
+          className={`relay-staff-workspace relay-scrollbar-light flex-1 min-h-0 ${
             activeTab === 'inbox'
               ? 'max-lg:overflow-hidden max-lg:flex max-lg:flex-col lg:overflow-hidden lg:flex lg:flex-col'
               : 'overflow-y-auto'
@@ -4339,7 +4684,7 @@ export default function DashboardPage() {
                         </p>
                         <p className="text-[11px] text-[#8892b0] truncate max-w-[min(100%,240px)]">{item.preview}</p>
                         <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                          {item.unreadCount > 0 ? (
+                          {convoNeedsInboxTriage(item) ? (
                             <span
                               className="inline-flex rounded px-1 py-px text-[9px] font-semibold border"
                               style={inboxLabelChipStyle(INBOX_UNREAD_VIRTUAL_LABEL.color)}
@@ -4507,12 +4852,22 @@ export default function DashboardPage() {
                           ) : (
                             <>
                               {a.title.trim() ? (
-                                <p className="font-semibold text-white whitespace-pre-wrap">{a.title}</p>
+                                <ExpandablePostText
+                                  text={a.title}
+                                  collapsedLines={3}
+                                  isLight
+                                  className="mb-1 font-semibold text-slate-900"
+                                />
                               ) : null}
                               {a.body.trim() ? (
-                                <p className={`text-sm text-[#c4cbe6] whitespace-pre-wrap line-clamp-6 ${a.title.trim() ? 'mt-1' : ''}`}>
-                                  {a.body}
-                                </p>
+                                <ExpandablePostText
+                                  text={a.body}
+                                  collapsedLines={5}
+                                  isLight
+                                  className={`text-sm text-slate-700 leading-relaxed ${
+                                    a.title.trim() ? 'mt-1' : ''
+                                  }`}
+                                />
                               ) : null}
                             </>
                           )}
@@ -4525,13 +4880,12 @@ export default function DashboardPage() {
                         <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-sm">
                           <button
                             type="button"
-                            disabled={meta.likes === 0}
                             onClick={() =>
                               setEngagementOpen((prev) =>
                                 prev?.postId === a.id && prev.mode === 'likes' ? null : { postId: a.id, mode: 'likes' }
                               )
                             }
-                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors"
                           >
                             <ThumbsUp className="w-4 h-4 text-[#8d63ff]" />
                             {meta.likes} likes
@@ -4957,7 +5311,7 @@ export default function DashboardPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100 lg:max-h-none pt-1 pb-0.5">
+                  <div className="relay-scrollbar-light flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100 lg:max-h-none pt-1 pb-0.5">
                     {inboxUnreadFilterOnly ? (
                       <p className="px-3 py-2 text-[11px] text-slate-600 border-b border-slate-100">
                         {inboxDisplayList.length === 0
@@ -5042,7 +5396,7 @@ export default function DashboardPage() {
                     ) : (
                     inboxDisplayList.map((item) => {
                       const active = selectedConvoId === item.id
-                      const displayLabels = convoLabelsWithUnread(item, inboxAttentionIds)
+                      const displayLabels = convoLabelsWithUnread(item)
                       return (
                         <button
                           type="button"
@@ -5142,7 +5496,7 @@ export default function DashboardPage() {
                             </div>
                           </div>
                           <div className="flex items-center gap-0.5 shrink-0 relative">
-                            {selectedConvo && convoNeedsInboxTriage(selectedConvo, inboxAttentionIds) ? (
+                            {selectedConvo && convoNeedsInboxTriage(selectedConvo) ? (
                               <button
                                 type="button"
                                 onClick={() =>
@@ -5278,9 +5632,9 @@ export default function DashboardPage() {
                             ) : null}
                           </div>
                         </div>
-                        {convoLabelsWithUnread(selectedConvo, inboxAttentionIds).length > 0 ? (
+                        {convoLabelsWithUnread(selectedConvo).length > 0 ? (
                           <div className="flex flex-wrap gap-1.5 items-center pl-[42px]">
-                            {convoLabelsWithUnread(selectedConvo, inboxAttentionIds).map((l) =>
+                            {convoLabelsWithUnread(selectedConvo).map((l) =>
                               l.id === INBOX_UNREAD_VIRTUAL_LABEL.id ? (
                                 <span
                                   key={l.id}
@@ -5337,7 +5691,7 @@ export default function DashboardPage() {
                       <div
                         ref={threadScrollRef}
                         onScroll={threadChatScroll.onScroll}
-                        className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2"
+                        className="relay-scrollbar-light flex-1 min-h-0 overflow-y-auto p-3 space-y-2"
                       >
                         {threadLoading ? (
                           <div className="flex justify-center py-12">

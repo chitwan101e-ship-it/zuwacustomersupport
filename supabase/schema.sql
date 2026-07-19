@@ -516,6 +516,11 @@ alter table public.follows        enable row level security;
 alter table public.admin_reports  enable row level security;
 alter table public.moderation_suspension_events enable row level security;
 
+grant select, insert, update, delete on table public.reactions to authenticated;
+grant select on table public.reactions to anon;
+grant select, insert, update, delete on table public.comments to authenticated;
+grant select on table public.comments to anon;
+
 create policy "businesses_read"   on public.businesses for select using (true);
 create policy "businesses_insert" on public.businesses for insert with check (false);
 
@@ -571,7 +576,12 @@ create policy "announce_update"   on public.announcements for update
 create policy "announce_delete"   on public.announcements for delete using (public.is_business_member(business_id));
 
 create policy "reactions_read"    on public.reactions for select using (true);
-create policy "reactions_own"     on public.reactions for all    using (user_id = auth.uid());
+create policy "reactions_insert_own" on public.reactions for insert to authenticated
+  with check (user_id = auth.uid());
+create policy "reactions_update_own" on public.reactions for update to authenticated
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "reactions_delete_own" on public.reactions for delete to authenticated
+  using (user_id = auth.uid());
 
 create policy "comments_read"     on public.comments for select using (
   exists (
@@ -581,7 +591,12 @@ create policy "comments_read"     on public.comments for select using (
   )
   or (deleted_at is null and (hidden_at is null or user_id = auth.uid()))
 );
-create policy "comments_own"      on public.comments for all    using (user_id = auth.uid());
+create policy "comments_insert_own" on public.comments for insert to authenticated
+  with check (user_id = auth.uid());
+create policy "comments_update_own" on public.comments for update to authenticated
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "comments_delete_own" on public.comments for delete to authenticated
+  using (user_id = auth.uid());
 create policy "comments_staff_update" on public.comments for update using (
   exists (
     select 1 from public.announcements a
@@ -753,6 +768,117 @@ create trigger set_admin_reports_updated_at
 create trigger set_inbox_canned_replies_updated_at
   before update on public.inbox_canned_replies
   for each row execute function public.set_updated_at();
+
+-- Staff engagement (dashboard like/comment counts)
+-- Aggregates avoid PostgREST's ~1000-row response cap truncating viral-post engagement.
+create or replace function public.staff_post_engagement_counts(
+  p_business_id uuid,
+  p_announcement_ids uuid[]
+)
+returns table (
+  announcement_id uuid,
+  like_count bigint,
+  comment_count bigint
+)
+language plpgsql stable security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null or not public.is_business_member(p_business_id) then
+    raise exception 'not authorized';
+  end if;
+  if p_announcement_ids is null or cardinality(p_announcement_ids) = 0 then
+    return;
+  end if;
+  return query
+  select
+    a.id as announcement_id,
+    (
+      select count(*)::bigint
+      from public.reactions r
+      where r.announcement_id = a.id
+        and r.reaction = 'like'
+    ) as like_count,
+    (
+      select count(*)::bigint
+      from public.comments c
+      where c.announcement_id = a.id
+        and c.deleted_at is null
+    ) as comment_count
+  from public.announcements a
+  where a.business_id = p_business_id
+    and a.deleted_at is null
+    and a.id = any (p_announcement_ids);
+end;
+$$;
+
+create or replace function public.staff_post_reaction_rows(
+  p_business_id uuid,
+  p_announcement_ids uuid[]
+)
+returns table (announcement_id uuid, user_id uuid)
+language plpgsql stable security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null or not public.is_business_member(p_business_id) then
+    raise exception 'not authorized';
+  end if;
+  if p_announcement_ids is null or cardinality(p_announcement_ids) = 0 then
+    return;
+  end if;
+  return query
+  select r.announcement_id, r.user_id
+  from public.reactions r
+  inner join public.announcements a on a.id = r.announcement_id
+  where a.business_id = p_business_id
+    and a.deleted_at is null
+    and r.reaction = 'like'
+    and r.announcement_id = any (p_announcement_ids);
+end;
+$$;
+
+create or replace function public.staff_post_comment_rows(
+  p_business_id uuid,
+  p_announcement_ids uuid[]
+)
+returns table (
+  id uuid,
+  announcement_id uuid,
+  user_id uuid,
+  parent_comment_id uuid,
+  body text,
+  created_at timestamptz,
+  hidden_at timestamptz
+)
+language plpgsql stable security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null or not public.is_business_member(p_business_id) then
+    raise exception 'not authorized';
+  end if;
+  if p_announcement_ids is null or cardinality(p_announcement_ids) = 0 then
+    return;
+  end if;
+  return query
+  select c.id, c.announcement_id, c.user_id, c.parent_comment_id, c.body, c.created_at, c.hidden_at
+  from public.comments c
+  inner join public.announcements a on a.id = c.announcement_id
+  where a.business_id = p_business_id
+    and a.deleted_at is null
+    and c.deleted_at is null
+    and c.announcement_id = any (p_announcement_ids)
+  order by c.created_at asc;
+end;
+$$;
+
+revoke all on function public.staff_post_engagement_counts(uuid, uuid[]) from public;
+revoke all on function public.staff_post_reaction_rows(uuid, uuid[]) from public;
+revoke all on function public.staff_post_comment_rows(uuid, uuid[]) from public;
+grant execute on function public.staff_post_engagement_counts(uuid, uuid[]) to authenticated;
+grant execute on function public.staff_post_reaction_rows(uuid, uuid[]) to authenticated;
+grant execute on function public.staff_post_comment_rows(uuid, uuid[]) to authenticated;
 
 -- ────────────────────────────────────────────────────────────
 -- 13. REALTIME (manual, optional)

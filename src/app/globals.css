@@ -136,3 +136,91 @@ textarea {
     @apply text-slate-900;
   }
 }
+
+/* Thin themed scrollbars — hide the harsh default white Windows track */
+.relay-scrollbar-dark {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(141, 99, 255, 0.45) transparent;
+}
+
+.relay-scrollbar-dark::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.relay-scrollbar-dark::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.relay-scrollbar-dark::-webkit-scrollbar-thumb {
+  background: rgba(141, 99, 255, 0.35);
+  border-radius: 999px;
+}
+
+.relay-scrollbar-dark::-webkit-scrollbar-thumb:hover {
+  background: rgba(141, 99, 255, 0.55);
+}
+
+.relay-scrollbar-dark::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.relay-scrollbar-light {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.relay-scrollbar-light::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.relay-scrollbar-light::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.relay-scrollbar-light::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.relay-scrollbar-light::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.relay-scrollbar-light::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.relay-staff-workspace {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.relay-staff-workspace::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.relay-staff-workspace::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.relay-staff-workspace::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.relay-staff-workspace::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.relay-staff-workspace::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}

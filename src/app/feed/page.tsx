@@ -22,6 +22,7 @@ import {
 } from '@/lib/customerMessaging'
 import { markMessagesReadByIds } from '@/lib/markMessagesReadByIds'
 import { useMarkMessagesReadOnView } from '@/lib/useMarkMessagesReadOnView'
+import { fetchAllForAnnouncementIds } from '@/lib/postEngagement'
 import { pickPrimaryBusinessFromList } from '@/lib/signupApproval'
 import RelayLogo from '@/components/RelayLogo'
 import { CustomerMobileFooterNav } from '@/components/CustomerMobileFooterNav'
@@ -107,7 +108,7 @@ type CommentRow = {
   created_at: string
   user_id: string
   hidden_at?: string | null
-  profiles: ProfileEmbed | ProfileEmbed[] | null
+  profiles?: ProfileEmbed | ProfileEmbed[] | null
 }
 type ConversationRow = { id: string; business_id: string; customer_id: string; status: string }
 type MessageSenderEmbed = {
@@ -403,6 +404,8 @@ export default function FeedPage() {
   const openPrimarySupportChatRef = useRef<() => Promise<void>>(async () => {})
   const supportChatChannelRef = useRef<ReturnType<(typeof supabase)['channel']> | null>(null)
   const supportChatBroadcastReadyRef = useRef(false)
+  const inboxLiveChannelRef = useRef<ReturnType<(typeof supabase)['channel']> | null>(null)
+  const inboxLiveBroadcastReadyRef = useRef(false)
   const customerTypingSentRef = useRef(false)
   const customerTypingIdleTimerRef = useRef<number | null>(null)
   const peerTeamTypingClearTimerRef = useRef<number | null>(null)
@@ -460,28 +463,43 @@ export default function FeedPage() {
         return
       }
 
-      const { data: reacts } = await supabase
-        .from('reactions')
-        .select('announcement_id, user_id, reaction')
-        .in('announcement_id', ids)
-        .eq('reaction', 'like')
+      type ReactionRow = { announcement_id: string; user_id: string; reaction: string }
+      const reactsRes = await fetchAllForAnnouncementIds<ReactionRow>(ids, async (slice, from, to) => {
+        const res = await supabase
+          .from('reactions')
+          .select('announcement_id, user_id, reaction')
+          .in('announcement_id', slice)
+          .eq('reaction', 'like')
+          .order('announcement_id', { ascending: true })
+          .order('user_id', { ascending: true })
+          .range(from, to)
+        return res
+      })
 
-      const counts: Record<string, number> = {}
-      for (const r of reacts || []) {
-        const aid = (r as { announcement_id: string }).announcement_id
-        counts[aid] = (counts[aid] || 0) + 1
+      if (reactsRes.error) {
+        console.error(
+          '[loadAnnouncements] reactions',
+          reactsRes.error.message,
+          reactsRes.error.code
+        )
+      } else {
+        const counts: Record<string, number> = {}
+        for (const r of reactsRes.rows) {
+          counts[r.announcement_id] = (counts[r.announcement_id] || 0) + 1
+        }
+        setLikeCounts(counts)
+        setLikeRows(
+          reactsRes.rows
+            .filter((r) => r.user_id === uid)
+            .map((r) => ({ announcement_id: r.announcement_id }))
+        )
       }
-      setLikeCounts(counts)
 
-      const mine = (reacts || []).filter(
-        (r: { user_id: string }) => r.user_id === uid
-      ) as { announcement_id: string }[]
-      setLikeRows(mine.map((r) => ({ announcement_id: r.announcement_id })))
-
-      const { data: coms, error: comErr } = await supabase
-        .from('comments')
-        .select(
-          `
+      const comsRes = await fetchAllForAnnouncementIds<CommentRow>(ids, async (slice, from, to) => {
+        const res = await supabase
+          .from('comments')
+          .select(
+            `
           id,
           announcement_id,
           parent_comment_id,
@@ -491,19 +509,59 @@ export default function FeedPage() {
           hidden_at,
           profiles ( ${COMMENT_PROFILE_SELECT} )
         `
-        )
-        .in('announcement_id', ids)
-        .is('deleted_at', null)
-        .order('created_at', { ascending: true })
+          )
+          .in('announcement_id', slice)
+          .is('deleted_at', null)
+          .order('created_at', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to)
+        return res
+      })
 
-      if (comErr) {
-        console.error(comErr)
-        setCommentsByAnn({})
+      if (comsRes.error) {
+        console.warn(
+          '[loadAnnouncements] comments embed failed, retrying without profiles',
+          comsRes.error.message,
+          comsRes.error.code
+        )
+        const comsPlainRes = await fetchAllForAnnouncementIds<CommentRow>(
+          ids,
+          async (slice, from, to) => {
+            const res = await supabase
+              .from('comments')
+              .select(
+                'id, announcement_id, parent_comment_id, body, created_at, user_id, hidden_at'
+              )
+              .in('announcement_id', slice)
+              .is('deleted_at', null)
+              .order('created_at', { ascending: true })
+              .order('id', { ascending: true })
+              .range(from, to)
+            return res
+          }
+        )
+
+        if (comsPlainRes.error) {
+          console.warn(
+            '[loadAnnouncements] comments',
+            comsPlainRes.error.message,
+            comsPlainRes.error.code
+          )
+          setCommentsByAnn({})
+          return
+        }
+
+        const by: Record<string, CommentRow[]> = {}
+        for (const c of comsPlainRes.rows) {
+          if (!by[c.announcement_id]) by[c.announcement_id] = []
+          by[c.announcement_id].push(c)
+        }
+        setCommentsByAnn(by)
         return
       }
 
       const by: Record<string, CommentRow[]> = {}
-      for (const c of (coms || []) as CommentRow[]) {
+      for (const c of comsRes.rows) {
         if (!by[c.announcement_id]) by[c.announcement_id] = []
         by[c.announcement_id].push(c)
       }
@@ -718,13 +776,22 @@ export default function FeedPage() {
     setBusyAnn(announcementId)
     const has = likeRows.some((r) => r.announcement_id === announcementId)
     try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser()
+      if (authErr || !user) {
+        showToast(authErr?.message || 'Please sign in again to like posts.')
+        return
+      }
+      const uid = user.id
+
       if (has) {
         const { error } = await supabase
           .from('reactions')
           .delete()
           .eq('announcement_id', announcementId)
-          .eq('user_id', profile.id)
-          .eq('reaction', 'like')
+          .eq('user_id', uid)
         if (error) throw error
         setLikeRows((prev) => prev.filter((r) => r.announcement_id !== announcementId))
         setLikeCounts((prev) => ({
@@ -734,19 +801,49 @@ export default function FeedPage() {
       } else {
         const { error } = await supabase.from('reactions').insert({
           announcement_id: announcementId,
-          user_id: profile.id,
+          user_id: uid,
           reaction: 'like',
         })
-        if (error) throw error
-        setLikeRows((prev) => [...prev, { announcement_id: announcementId }])
+        if (error) {
+          // Stale UI / double-click: like already in DB — sync local state.
+          if (error.code === '23505') {
+            setLikeRows((prev) =>
+              prev.some((r) => r.announcement_id === announcementId)
+                ? prev
+                : [...prev, { announcement_id: announcementId }]
+            )
+            const { count } = await supabase
+              .from('reactions')
+              .select('*', { count: 'exact', head: true })
+              .eq('announcement_id', announcementId)
+              .eq('reaction', 'like')
+            if (typeof count === 'number') {
+              setLikeCounts((prev) => ({ ...prev, [announcementId]: count }))
+            } else {
+              setLikeCounts((prev) => ({
+                ...prev,
+                [announcementId]: Math.max(1, prev[announcementId] || 0),
+              }))
+            }
+            return
+          }
+          throw error
+        }
+        setLikeRows((prev) =>
+          prev.some((r) => r.announcement_id === announcementId)
+            ? prev
+            : [...prev, { announcement_id: announcementId }]
+        )
         setLikeCounts((prev) => ({
           ...prev,
           [announcementId]: (prev[announcementId] || 0) + 1,
         }))
       }
     } catch (e) {
-      console.error(e)
-      showToast('Could not update like. Try again.')
+      const err = e as { message?: string; code?: string; details?: string; hint?: string }
+      const detail = [err?.message, err?.code, err?.details, err?.hint].filter(Boolean).join(' · ')
+      console.warn(`[toggleLike] ${detail || 'unknown error'}`)
+      showToast(err?.message ? `Could not update like: ${err.message}` : 'Could not update like. Try again.')
     } finally {
       setBusyAnn(null)
     }
@@ -758,11 +855,20 @@ export default function FeedPage() {
     if (!text) return
     setBusyAnn(`c-${announcementId}`)
     try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser()
+      if (authErr || !user) {
+        showToast(authErr?.message || 'Please sign in again to comment.')
+        return
+      }
+
       const { data, error } = await supabase
         .from('comments')
         .insert({
           announcement_id: announcementId,
-          user_id: profile.id,
+          user_id: user.id,
           body: text,
         })
         .select(
@@ -773,21 +879,35 @@ export default function FeedPage() {
           body,
           created_at,
           user_id,
-          profiles ( ${COMMENT_PROFILE_SELECT} )
+          hidden_at
         `
         )
         .single()
 
       if (error) throw error
-      const row = data as CommentRow
+
+      const row: CommentRow = {
+        ...(data as CommentRow),
+        profiles: {
+          username: profile.username,
+          first_name: profile.first_name || profile.username,
+          last_name: '',
+          avatar_url: profile.avatar_url,
+          role: 'customer',
+          business_role: null,
+        },
+      }
       setCommentsByAnn((prev) => ({
         ...prev,
         [announcementId]: [...(prev[announcementId] || []), row],
       }))
       setCommentDraft((d) => ({ ...d, [announcementId]: '' }))
+      setOpenComments((o) => ({ ...o, [announcementId]: true }))
     } catch (e) {
-      console.error(e)
-      showToast('Could not post comment. Try again.')
+      const err = e as { message?: string; code?: string; details?: string; hint?: string }
+      const detail = [err?.message, err?.code, err?.details, err?.hint].filter(Boolean).join(' · ')
+      console.warn(`[submitComment] ${detail || 'unknown error'}`)
+      showToast(err?.message ? `Could not post comment: ${err.message}` : 'Could not post comment. Try again.')
     } finally {
       setBusyAnn(null)
     }
@@ -881,29 +1001,40 @@ export default function FeedPage() {
     if (!text) return
     setBusyAnn(`cr-${announcementId}`)
     try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser()
+      if (authErr || !user) {
+        showToast(authErr?.message || 'Please sign in again to reply.')
+        return
+      }
+
       const { data, error } = await supabase
         .from('comments')
         .insert({
           announcement_id: announcementId,
-          user_id: profile.id,
+          user_id: user.id,
           body: text,
           parent_comment_id: parentCommentId,
         })
         .select(
-          `
-          id,
-          announcement_id,
-          parent_comment_id,
-          body,
-          created_at,
-          user_id,
-          profiles ( ${COMMENT_PROFILE_SELECT} )
-        `
+          'id, announcement_id, parent_comment_id, body, created_at, user_id, hidden_at'
         )
         .single()
 
       if (error) throw error
-      const row = data as CommentRow
+      const row: CommentRow = {
+        ...(data as CommentRow),
+        profiles: {
+          username: profile.username,
+          first_name: profile.first_name || profile.username,
+          last_name: '',
+          avatar_url: profile.avatar_url,
+          role: 'customer',
+          business_role: null,
+        },
+      }
       setCommentsByAnn((prev) => ({
         ...prev,
         [announcementId]: [...(prev[announcementId] || []), row],
@@ -911,8 +1042,10 @@ export default function FeedPage() {
       setReplyThreadDraft('')
       setReplyThreadTarget(null)
     } catch (e) {
-      console.error(e)
-      showToast('Could not post reply. Try again.')
+      const err = e as { message?: string; code?: string; details?: string; hint?: string }
+      const detail = [err?.message, err?.code, err?.details, err?.hint].filter(Boolean).join(' · ')
+      console.warn(`[submitCommentReply] ${detail || 'unknown error'}`)
+      showToast(err?.message ? `Could not post reply: ${err.message}` : 'Could not post reply. Try again.')
     } finally {
       setBusyAnn(null)
     }
@@ -1260,13 +1393,47 @@ export default function FeedPage() {
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` },
-        () => {
+        (payload) => {
           if (!isActivelyViewingCustomerChat(cid)) {
             const uid = profile?.id
             if (uid) void refreshMessagingUI(uid)
             return
           }
-          void loadConversationMessages(cid, { markRead: false })
+          const raw = payload.new as Record<string, unknown>
+          const id = typeof raw.id === 'string' ? raw.id : null
+          if (!id) return
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === id)) return prev
+            const replyToId =
+              typeof raw.reply_to_message_id === 'string' ? raw.reply_to_message_id : null
+            let reply_to: MessageRow['reply_to'] = null
+            if (replyToId) {
+              const parent = prev.find((m) => m.id === replyToId)
+              if (parent) {
+                reply_to = {
+                  id: parent.id,
+                  sender_id: parent.sender_id,
+                  body: parent.body,
+                  image_url: parent.image_url ?? null,
+                  profiles: parent.profiles ?? null,
+                }
+              }
+            }
+            const incoming: MessageRow = {
+              id,
+              conversation_id: cid,
+              sender_id: String(raw.sender_id ?? ''),
+              body: String(raw.body ?? ''),
+              created_at: String(raw.created_at ?? new Date().toISOString()),
+              image_url: (raw.image_url as string | null | undefined) ?? null,
+              read: (raw.read as boolean | null | undefined) ?? null,
+              read_at: (raw.read_at as string | null | undefined) ?? null,
+              reply_to_message_id: replyToId,
+              reply_to,
+              profiles: null,
+            }
+            return [...prev, incoming]
+          })
         }
       )
       .on(
@@ -1336,6 +1503,31 @@ export default function FeedPage() {
       void supabase.removeChannel(channel)
     }
   }, [supabase, conversation?.id, loadConversationMessages, profile?.id])
+
+  /** Shared bus with staff dashboard so inbound bubbles appear as fast as desktop notifications. */
+  useEffect(() => {
+    if (!conversation?.business_id) return
+    const bid = conversation.business_id
+    let stopped = false
+    inboxLiveBroadcastReadyRef.current = false
+    inboxLiveChannelRef.current = null
+
+    const channel = supabase
+      .channel(`inbox-live-${bid}`)
+      .subscribe((status) => {
+        if (stopped) return
+        inboxLiveBroadcastReadyRef.current = status === 'SUBSCRIBED'
+      })
+
+    inboxLiveChannelRef.current = channel
+
+    return () => {
+      stopped = true
+      inboxLiveBroadcastReadyRef.current = false
+      inboxLiveChannelRef.current = null
+      void supabase.removeChannel(channel)
+    }
+  }, [supabase, conversation?.business_id])
 
   /** Emit typing while the customer has text or an attachment in the composer. */
   useEffect(() => {
@@ -1632,6 +1824,25 @@ export default function FeedPage() {
       setSupportDraft('')
       clearPendingAttachment()
       setReplyTarget(null)
+
+      const live = inboxLiveChannelRef.current
+      if (live && inboxLiveBroadcastReadyRef.current) {
+        void live.send({
+          type: 'broadcast',
+          event: 'customer_message',
+          payload: {
+            id: row.id,
+            conversation_id: row.conversation_id,
+            sender_id: row.sender_id,
+            body: row.body,
+            created_at: row.created_at,
+            image_url: row.image_url ?? null,
+            read: row.read ?? null,
+            read_at: row.read_at ?? null,
+            reply_to_message_id: row.reply_to_message_id ?? null,
+          },
+        })
+      }
 
       let notifyPreview = text.trim().slice(0, 160)
       if (!notifyPreview) notifyPreview = imageUrl ? '📷 Message' : 'Message'
@@ -2165,15 +2376,28 @@ export default function FeedPage() {
                     </div>
                   ) : null}
 
-                  {count > 0 && (
-                    <div className="px-4 pt-3 flex items-center gap-2 text-sm text-[#b8c0dc]">
-                      <span
-                        className="inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-[10px]"
-                        style={{ backgroundColor: fbBlue }}
-                      >
-                        <ThumbsUp className="w-3 h-3" />
-                      </span>
-                      <span>{count}</span>
+                  {(count > 0 || comments.length > 0) && (
+                    <div className="px-4 pt-3 flex items-center gap-3 text-sm text-[#b8c0dc]">
+                      {count > 0 ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span
+                            className="inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-[10px]"
+                            style={{ backgroundColor: fbBlue }}
+                          >
+                            <ThumbsUp className="w-3 h-3" />
+                          </span>
+                          <span>{count}</span>
+                        </span>
+                      ) : null}
+                      {comments.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => setOpenComments((o) => ({ ...o, [a.id]: true }))}
+                          className="hover:underline"
+                        >
+                          {comments.length} comment{comments.length === 1 ? '' : 's'}
+                        </button>
+                      ) : null}
                     </div>
                   )}
 
