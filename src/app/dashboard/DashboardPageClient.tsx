@@ -651,7 +651,7 @@ const DashboardNavButtons = memo(function DashboardNavButtons({
                     >
                       <span
                         className="h-1.5 w-1.5 rounded-full shrink-0"
-                        style={{ backgroundColor: INBOX_UNREAD_VIRTUAL_LABEL.color }}
+                        style={{ backgroundColor: INBOX_UNREAD_VIRTUAL_LABEL.color ?? undefined }}
                         aria-hidden
                       />
                       <span className="truncate">
