@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { sendSingleCustomerNotificationEmail } from '@/lib/sendBulkCustomerNotificationEmails'
+import { ensureUnreadReminderStreak } from '@/lib/unreadMessageReminders'
 
 /**
  * Inserts the in-app "support_reply" notification for the customer after staff sends a message.
@@ -92,6 +93,9 @@ export async function POST(req: NextRequest) {
       ctaLabel: 'Open message',
       brandName,
     })
+
+    // Start (or keep) the unread reminder ladder — does not reset if already active.
+    await ensureUnreadReminderStreak(admin, conversationId, preview)
 
     return NextResponse.json({ ok: true, email: emailStatus })
   } catch (e) {

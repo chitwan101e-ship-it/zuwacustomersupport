@@ -54,6 +54,7 @@ import {
   THREAD_MESSAGE_SELECT,
   THREAD_MESSAGE_SELECT_LEGACY,
   THREAD_MESSAGE_SELECT_BASE,
+  fetchLatestConversationMessages,
   hydrateReplyEmbeds,
   isReplyToSchemaError,
   oneMessageEmbed as oneReplyEmbed,
@@ -915,6 +916,7 @@ export default function DashboardPage() {
   const replyImageInputRef = useRef<HTMLInputElement>(null)
   const threadScrollRef = useRef<HTMLDivElement>(null)
   const threadEndRef = useRef<HTMLDivElement>(null)
+  const mobileThreadShellRef = useRef<HTMLDivElement>(null)
   const staffThreadChannelRef = useRef<ReturnType<(typeof supabase)['channel']> | null>(null)
   const staffThreadBroadcastReadyRef = useRef(false)
   const staffTypingSentRef = useRef(false)
@@ -1992,6 +1994,57 @@ export default function DashboardPage() {
     setInboxContactOpen(false)
   }, [selectedConvoId])
 
+  /** Pin the open inbox thread to the visual viewport on phones (iOS keyboard + address bar). */
+  useEffect(() => {
+    const open = activeTab === 'inbox' && Boolean(selectedConvoId)
+    if (!open) return
+
+    const shell = mobileThreadShellRef.current
+    const vv = window.visualViewport
+    const mq = window.matchMedia('(max-width: 1023px)')
+
+    function syncMobileThreadViewport() {
+      if (!shell || !mq.matches) {
+        if (shell) {
+          shell.style.height = ''
+          shell.style.top = ''
+          shell.style.transform = ''
+        }
+        return
+      }
+      if (!vv) {
+        shell.style.height = '100dvh'
+        shell.style.top = '0px'
+        shell.style.transform = ''
+        return
+      }
+      shell.style.height = `${Math.round(vv.height)}px`
+      shell.style.top = `${Math.round(vv.offsetTop)}px`
+      shell.style.transform = ''
+    }
+
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    syncMobileThreadViewport()
+    vv?.addEventListener('resize', syncMobileThreadViewport)
+    vv?.addEventListener('scroll', syncMobileThreadViewport)
+    mq.addEventListener('change', syncMobileThreadViewport)
+    window.addEventListener('orientationchange', syncMobileThreadViewport)
+
+    return () => {
+      document.body.style.overflow = prevOverflow
+      vv?.removeEventListener('resize', syncMobileThreadViewport)
+      vv?.removeEventListener('scroll', syncMobileThreadViewport)
+      mq.removeEventListener('change', syncMobileThreadViewport)
+      window.removeEventListener('orientationchange', syncMobileThreadViewport)
+      if (shell) {
+        shell.style.height = ''
+        shell.style.top = ''
+        shell.style.transform = ''
+      }
+    }
+  }, [activeTab, selectedConvoId])
+
   useEffect(() => {
     if (!inboxLabelsPopoverOpen) return
     function onDoc(e: MouseEvent) {
@@ -2671,13 +2724,27 @@ export default function DashboardPage() {
           }
 
           try {
+            // Exact username/email lookup (optional). Partial name matches already come from members above.
             const res = await fetch('/api/staff/search-customers', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ identifier: inboxSearchQuery.trim() }),
             })
-            const j = (await res.json().catch(() => ({}))) as { customer?: { id: string } }
+            const j = (await res.json().catch(() => ({}))) as { customer?: { id: string } | null }
             if (res.ok && j.customer?.id) customerIdsToTry.add(j.customer.id)
+
+            // Also try fuzzy notify search so first-name queries (e.g. "curtis") find older threads.
+            const fuzzy = await fetch(
+              `/api/staff/search-customers?q=${encodeURIComponent(inboxSearchQuery.trim())}`
+            )
+            const fj = (await fuzzy.json().catch(() => ({}))) as {
+              results?: { id: string }[]
+            }
+            if (fuzzy.ok) {
+              for (const row of fj.results ?? []) {
+                if (row?.id) customerIdsToTry.add(row.id)
+              }
+            }
           } catch {
             /* optional */
           }
@@ -3299,30 +3366,18 @@ export default function DashboardPage() {
       if (convoErr) throw convoErr
       const customerId = convoMeta?.customer_id as string | undefined
 
-      async function fetchMessages(select: string) {
-        const { data, error } = await supabase
-          .from('messages')
-          .select(select)
-          .eq('conversation_id', conversationId)
-          .order('created_at', { ascending: true })
-        return { data: (data || []) as unknown as ThreadMessage[], error }
-      }
-
-      async function fetchWithReplyFallback() {
-        let result = await fetchMessages(THREAD_MESSAGE_SELECT)
-        if (result.error && isReplyToSchemaError(result.error.message)) {
-          result = await fetchMessages(THREAD_MESSAGE_SELECT_LEGACY)
-        }
-        if (result.error && isReplyToSchemaError(result.error.message)) {
-          result = await fetchMessages(THREAD_MESSAGE_SELECT_BASE)
-        }
-        if (!result.error) {
-          result = { ...result, data: hydrateReplyEmbeds(result.data) }
-        }
-        return result
-      }
-
-      const { data, error } = await fetchWithReplyFallback()
+      // Newest page first — ascending unpaginated selects hit PostgREST's ~1000-row
+      // cap and hide recent messages while inbox previews (RPC) still look correct.
+      const { data, error } = await fetchLatestConversationMessages<ThreadMessage>(
+        supabase,
+        conversationId,
+        {
+          full: THREAD_MESSAGE_SELECT,
+          legacy: THREAD_MESSAGE_SELECT_LEGACY,
+          base: THREAD_MESSAGE_SELECT_BASE,
+        },
+        { profileKind: 'staff' }
+      )
       if (error) throw error
       setThreadMessages(data)
 
@@ -4448,7 +4503,13 @@ export default function DashboardPage() {
   const headerSub = headerSubParts.join(' · ')
 
   return (
-    <div className="min-h-screen lg:h-screen lg:overflow-hidden text-[14px] leading-snug antialiased bg-[#0a0f1e] lg:grid lg:grid-cols-[220px_1fr]">
+    <div
+      className={`text-[14px] leading-snug antialiased bg-[#0a0f1e] lg:grid lg:grid-cols-[220px_1fr] lg:h-screen lg:overflow-hidden ${
+        activeTab === 'inbox' && inboxMobileThreadOpen
+          ? 'max-lg:h-dvh max-lg:max-h-dvh max-lg:overflow-hidden'
+          : 'min-h-screen'
+      }`}
+    >
       <aside className="hidden lg:flex lg:h-full lg:min-h-0 flex-col border-r border-white/[0.08] bg-[rgba(8,13,28,0.95)] py-3 px-2.5 gap-0.5 overflow-hidden text-white">
         <div className="admin-sidebar-top px-2 pb-3">
           <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[#4e5a7a] mb-2">Staff Portal</p>
@@ -5464,24 +5525,26 @@ export default function DashboardPage() {
                 </aside>
 
                 <div
+                  ref={mobileThreadShellRef}
                   className={
                     inboxMobileThreadOpen
-                      ? 'flex flex-col flex-1 min-h-0 relative max-lg:overflow-hidden lg:min-h-0 lg:max-h-none lg:h-full lg:overflow-hidden'
+                      ? 'flex flex-col flex-1 min-h-0 relative max-lg:fixed max-lg:inset-x-0 max-lg:top-0 max-lg:z-40 max-lg:h-dvh max-lg:bg-white max-lg:overflow-hidden lg:min-h-0 lg:max-h-none lg:h-full lg:overflow-hidden'
                       : 'hidden lg:flex lg:flex-col lg:min-h-0 lg:max-h-none lg:h-full lg:overflow-hidden relative'
                   }
                 >
                   {selectedConvo ? (
                     <>
-                      <div className="px-3 py-2.5 border-b border-slate-200 shrink-0 space-y-2">
+                      <div className="px-3 py-2.5 border-b border-slate-200 shrink-0 space-y-2 max-lg:sticky max-lg:top-0 max-lg:z-20 max-lg:bg-white max-lg:pt-[max(0.5rem,env(safe-area-inset-top))]">
                         <div className="flex items-center gap-2 justify-between">
                           <div className="flex items-center gap-2.5 min-w-0">
                             <button
                               type="button"
                               onClick={closeInboxThread}
-                              className="lg:hidden shrink-0 p-2 -ml-1 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100"
+                              className="lg:hidden shrink-0 inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2 text-slate-700 hover:text-slate-900 hover:bg-slate-100"
                               aria-label="Back to all threads"
                             >
                               <ArrowLeft className="w-5 h-5" />
+                              <span className="text-[13px] font-semibold">Back</span>
                             </button>
                             <div className="w-8 h-8 rounded-full bg-[#d12f2f] overflow-hidden flex items-center justify-center text-[11px] font-bold text-white shrink-0">
                               {selectedConvo.customerAvatar ? (
@@ -5633,7 +5696,7 @@ export default function DashboardPage() {
                           </div>
                         </div>
                         {convoLabelsWithUnread(selectedConvo).length > 0 ? (
-                          <div className="flex flex-wrap gap-1.5 items-center pl-[42px]">
+                          <div className="flex flex-wrap gap-1.5 items-center max-lg:pl-0 lg:pl-[42px]">
                             {convoLabelsWithUnread(selectedConvo).map((l) =>
                               l.id === INBOX_UNREAD_VIRTUAL_LABEL.id ? (
                                 <span
@@ -5660,7 +5723,7 @@ export default function DashboardPage() {
                             )}
                           </div>
                         ) : (
-                          <p className="text-[10px] text-slate-500 pl-[42px]">No labels — use the tag icon to add some.</p>
+                          <p className="text-[10px] text-slate-500 max-lg:hidden lg:pl-[42px]">No labels — use the tag icon to add some.</p>
                         )}
                       </div>
                       {inboxContactOpen ? (
@@ -5687,11 +5750,11 @@ export default function DashboardPage() {
                           </div>
                         </div>
                       ) : null}
-                      <div className="relative flex-1 min-h-0 flex flex-col">
+                      <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
                       <div
                         ref={threadScrollRef}
                         onScroll={threadChatScroll.onScroll}
-                        className="relay-scrollbar-light flex-1 min-h-0 overflow-y-auto p-3 space-y-2"
+                        className="relay-scrollbar-light flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 space-y-2"
                       >
                         {threadLoading ? (
                           <div className="flex justify-center py-12">
@@ -5834,7 +5897,7 @@ export default function DashboardPage() {
                         onClick={() => threadChatScroll.jumpToLatest(scrollThreadToLatest)}
                       />
                       </div>
-                      <div className="p-2 border-t border-slate-200 space-y-1.5 shrink-0 bg-white">
+                      <div className="p-2 border-t border-slate-200 space-y-1.5 shrink-0 bg-white max-lg:pb-[max(0.5rem,env(safe-area-inset-bottom))]">
                         {peerCustomerTyping ? (
                           <p className="text-xs text-[#7d86a8]" aria-live="polite">
                             {selectedConvo.customerName} is typing…

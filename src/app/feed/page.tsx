@@ -11,6 +11,7 @@ import {
   CUSTOMER_MESSAGE_SELECT,
   CUSTOMER_MESSAGE_SELECT_LEGACY,
   CUSTOMER_MESSAGE_SELECT_BASE,
+  fetchLatestConversationMessages,
   hydrateReplyEmbeds,
   isReplyToSchemaError,
   oneMessageEmbed as oneReplyEmbed,
@@ -1056,27 +1057,12 @@ export default function FeedPage() {
       const seq = ++messagesLoadSeqRef.current
       const shouldMarkRead = options?.markRead === true
 
-      async function fetchMessages(select: string) {
-        const { data, error } = await supabase
-          .from('messages')
-          .select(select)
-          .eq('conversation_id', conversationId)
-          .order('created_at', { ascending: true })
-        return { data: (data || []) as unknown as MessageRow[], error }
-      }
-
       async function fetchWithReplyFallback() {
-        let result = await fetchMessages(CUSTOMER_MESSAGE_SELECT)
-        if (result.error && isReplyToSchemaError(result.error.message)) {
-          result = await fetchMessages(CUSTOMER_MESSAGE_SELECT_LEGACY)
-        }
-        if (result.error && isReplyToSchemaError(result.error.message)) {
-          result = await fetchMessages(CUSTOMER_MESSAGE_SELECT_BASE)
-        }
-        if (!result.error) {
-          result = { ...result, data: hydrateReplyEmbeds(result.data) }
-        }
-        return result
+        return fetchLatestConversationMessages<MessageRow>(supabase, conversationId, {
+          full: CUSTOMER_MESSAGE_SELECT,
+          legacy: CUSTOMER_MESSAGE_SELECT_LEGACY,
+          base: CUSTOMER_MESSAGE_SELECT_BASE,
+        }, { profileKind: 'customer' })
       }
 
       const { data: msgs, error: mErr } = await fetchWithReplyFallback()

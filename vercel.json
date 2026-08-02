@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/unread-message-reminders",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

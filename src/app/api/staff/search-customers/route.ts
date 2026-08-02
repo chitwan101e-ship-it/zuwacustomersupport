@@ -66,7 +66,9 @@ export async function POST(req: NextRequest) {
 
     const customer = await resolveCustomerRecipient(auth.admin, identifier)
     if (!customer) {
-      return NextResponse.json({ error: 'No customer found with that username or email.' }, { status: 404 })
+      // Soft miss — callers treat this as "no exact match", not a broken route.
+      // Returning 404 made the browser console look like a production outage on name searches.
+      return NextResponse.json({ customer: null })
     }
 
     return NextResponse.json({ customer })

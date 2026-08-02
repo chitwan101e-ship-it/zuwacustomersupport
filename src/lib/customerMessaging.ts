@@ -162,31 +162,28 @@ export type ReplyTargetMessage = {
 
 const CUSTOMER_REPLY_PROFILE = 'username, first_name, last_name, role, business_role, avatar_url'
 
-const CUSTOMER_REPLY_EMBED = `id, sender_id, body, image_url, profiles ( ${CUSTOMER_REPLY_PROFILE} )`
-
 const STAFF_REPLY_PROFILE = 'username, first_name, last_name, business_role'
 
-const STAFF_REPLY_EMBED = `id, sender_id, body, image_url, profiles ( ${STAFF_REPLY_PROFILE} )`
-
-/** Customer chat rows with optional quoted parent. */
+/**
+ * Do not embed `reply_to:messages!…` — that self-join returns HTTP 400 on this
+ * Supabase project (relationship / schema-cache mismatch). Quoted replies are
+ * filled client-side via hydrateReplyEmbeds (+ a small parent-id fetch).
+ */
 export const CUSTOMER_MESSAGE_SELECT =
-  `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, reply_to_message_id, profiles ( ${CUSTOMER_REPLY_PROFILE} ), reply_to:messages!messages_reply_to_message_id_fkey ( ${CUSTOMER_REPLY_EMBED} )` as const
+  `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, reply_to_message_id, profiles ( ${CUSTOMER_REPLY_PROFILE} )` as const
 
-/** Staff inbox thread rows with optional quoted parent. */
 export const THREAD_MESSAGE_SELECT =
-  `id, sender_id, body, created_at, image_url, read, read_at, reply_to_message_id, profiles ( ${STAFF_REPLY_PROFILE} ), reply_to:messages!messages_reply_to_message_id_fkey ( ${STAFF_REPLY_EMBED} )` as const
-
-/** Fallback when reply embed join fails or migration 030 is not applied yet. */
-export const THREAD_MESSAGE_SELECT_LEGACY =
   `id, sender_id, body, created_at, image_url, read, read_at, reply_to_message_id, profiles ( ${STAFF_REPLY_PROFILE} )` as const
+
+/** @deprecated Same as THREAD_MESSAGE_SELECT — kept for call sites that still import it. */
+export const THREAD_MESSAGE_SELECT_LEGACY = THREAD_MESSAGE_SELECT
 
 /** Absolute fallback when reply_to_message_id column does not exist yet. */
 export const THREAD_MESSAGE_SELECT_BASE =
   `id, sender_id, body, created_at, image_url, read, read_at, profiles ( ${STAFF_REPLY_PROFILE} )` as const
 
-/** Fallback when reply embed join fails or migration 030 is not applied yet. */
-export const CUSTOMER_MESSAGE_SELECT_LEGACY =
-  `id, conversation_id, sender_id, body, created_at, image_url, read, read_at, reply_to_message_id, profiles ( ${CUSTOMER_REPLY_PROFILE} )` as const
+/** @deprecated Same as CUSTOMER_MESSAGE_SELECT — kept for call sites that still import it. */
+export const CUSTOMER_MESSAGE_SELECT_LEGACY = CUSTOMER_MESSAGE_SELECT
 
 /** Absolute fallback when reply_to_message_id column does not exist yet. */
 export const CUSTOMER_MESSAGE_SELECT_BASE =
@@ -194,6 +191,98 @@ export const CUSTOMER_MESSAGE_SELECT_BASE =
 
 export function isReplyToSchemaError(message: string): boolean {
   return /reply_to|reply_to_message_id|42703|42P01|does not exist|schema cache|PGRST/i.test(message)
+}
+
+/**
+ * PostgREST silently returns at most ~1000 rows per request.
+ * Ordering oldest-first therefore drops the newest messages in long threads
+ * (list previews still look correct because they use a distinct-on RPC).
+ * Always load the newest page, then reverse for chronological chat UI.
+ */
+export const THREAD_MESSAGE_PAGE_SIZE = 1000
+
+const REPLY_PARENT_SELECT_STAFF =
+  `id, sender_id, body, image_url, profiles ( ${STAFF_REPLY_PROFILE} )` as const
+const REPLY_PARENT_SELECT_CUSTOMER =
+  `id, sender_id, body, image_url, profiles ( ${CUSTOMER_REPLY_PROFILE} )` as const
+
+/** Load quoted parents that sit outside the newest message page. */
+async function fetchMissingReplyParents<T extends CustomerMessageRow>(
+  client: SupabaseBrowserClient,
+  rows: T[],
+  profileKind: 'staff' | 'customer'
+): Promise<T[]> {
+  const have = new Set(rows.map((r) => r.id))
+  const missingIds = [
+    ...new Set(
+      rows
+        .map((m) => m.reply_to_message_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0 && !have.has(id))
+    ),
+  ]
+  if (missingIds.length === 0) return hydrateReplyEmbeds(rows)
+
+  const select = profileKind === 'staff' ? REPLY_PARENT_SELECT_STAFF : REPLY_PARENT_SELECT_CUSTOMER
+  const { data, error } = await client.from('messages').select(select).in('id', missingIds)
+  if (error || !data?.length) return hydrateReplyEmbeds(rows)
+
+  const parents = new Map(
+    (data as MessageReplyEmbed[]).map((p) => [
+      p.id,
+      {
+        id: p.id,
+        sender_id: p.sender_id,
+        body: p.body,
+        image_url: p.image_url ?? null,
+        profiles: p.profiles ?? null,
+      } satisfies MessageReplyEmbed,
+    ])
+  )
+
+  return rows.map((m) => {
+    if (oneMessageEmbed(m.reply_to)) return m
+    const parentId = m.reply_to_message_id
+    if (!parentId) return m
+    const parent = parents.get(parentId)
+    if (!parent) return m
+    return { ...m, reply_to: parent }
+  })
+}
+
+export async function fetchLatestConversationMessages<T extends CustomerMessageRow>(
+  client: SupabaseBrowserClient,
+  conversationId: string,
+  selects: { full: string; legacy: string; base: string },
+  opts?: { limit?: number; profileKind?: 'staff' | 'customer' }
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const limit = opts?.limit ?? THREAD_MESSAGE_PAGE_SIZE
+  const profileKind = opts?.profileKind ?? 'staff'
+
+  async function fetchPage(select: string) {
+    const { data, error } = await client
+      .from('messages')
+      .select(select)
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    const rows = ((data || []) as unknown as T[]).slice().reverse()
+    return { data: rows, error }
+  }
+
+  // Prefer selects without the broken reply_to embed (full === legacy after fix).
+  let result = await fetchPage(selects.full)
+  if (result.error && isReplyToSchemaError(result.error.message)) {
+    result = await fetchPage(selects.legacy)
+  }
+  if (result.error && isReplyToSchemaError(result.error.message)) {
+    result = await fetchPage(selects.base)
+  }
+  if (!result.error) {
+    const withInPage = hydrateReplyEmbeds(result.data)
+    const withParents = await fetchMissingReplyParents(client, withInPage, profileKind)
+    result = { ...result, data: withParents }
+  }
+  return result
 }
 
 export type CustomerMessageRow = {
