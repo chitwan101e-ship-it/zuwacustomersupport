@@ -763,6 +763,8 @@ export default function DashboardPage() {
   const [selectedConvoId, setSelectedConvoId] = useState<string | null>(null)
   const selectedConvoIdRef = useRef<string | null>(null)
   selectedConvoIdRef.current = selectedConvoId
+  /** Keep the open thread usable if it temporarily drops out of the filtered/search list. */
+  const [selectedConvoHold, setSelectedConvoHold] = useState<ConvoListItem | null>(null)
   /** Dedupes unread +1 when notify + messages realtime both fire for the same send. */
   const inboxUnreadClaimAtRef = useRef(new Map<string, number>())
   const applyFastCustomerInboundRef = useRef<
@@ -2750,6 +2752,11 @@ export default function DashboardPage() {
           }
 
           const extras: ConvoListItem[] = []
+          const defById = Object.fromEntries(inboxLabelCatalog.map((d) => [d.id, d])) as Record<
+            string,
+            InboxLabelRow
+          >
+
           for (const customerId of customerIdsToTry) {
             const { data: convo, error: convoErr } = await supabase
               .from('conversations')
@@ -2773,6 +2780,21 @@ export default function DashboardPage() {
               .limit(1)
               .maybeSingle()
 
+            const { data: labelAssigns } = await supabase
+              .from('conversation_inbox_labels')
+              .select('label_id')
+              .eq('conversation_id', convo.id as string)
+
+            const labels: InboxLabelRow[] = []
+            for (const row of labelAssigns ?? []) {
+              const d = defById[(row as { label_id: string }).label_id]
+              if (d) labels.push(d)
+            }
+            labels.sort((a, b) => {
+              if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+              return a.name.localeCompare(b.name)
+            })
+
             const pr = prof as {
               first_name?: string | null
               last_name?: string | null
@@ -2793,7 +2815,7 @@ export default function DashboardPage() {
               preview: (msg?.body ?? '').trim() || 'No messages yet',
               updated_at: (convo.updated_at as string) || msg?.created_at || new Date().toISOString(),
               unreadCount: 0,
-              labels: [],
+              labels,
             })
             loadedConvoIds.add(convo.id as string)
           }
@@ -2808,7 +2830,7 @@ export default function DashboardPage() {
     }, 350)
 
     return () => window.clearTimeout(timer)
-  }, [activeTab, inboxSearchQuery, profile?.business_id, convoList, activeMembers, suspendedMembers, supabase])
+  }, [activeTab, inboxSearchQuery, profile?.business_id, convoList, activeMembers, suspendedMembers, inboxLabelCatalog, supabase])
 
   /** Load every thread with the selected inbox label (not only the recent-thread cap). */
   useEffect(() => {
@@ -3120,30 +3142,63 @@ export default function DashboardPage() {
     })
   }
 
+  function patchConversationLabels(
+    convId: string,
+    updater: (labels: InboxLabelRow[]) => InboxLabelRow[]
+  ) {
+    const patch = (prev: ConvoListItem[]) =>
+      prev.map((c) => (c.id === convId ? { ...c, labels: updater(c.labels) } : c))
+    setConvoList(patch)
+    setInboxSearchExtraConvos(patch)
+    setInboxLabelFilterExtraConvos(patch)
+    setSelectedConvoHold((prev) =>
+      prev && prev.id === convId ? { ...prev, labels: updater(prev.labels) } : prev
+    )
+  }
+
   async function applyInboxLabelOnThread(labelId: string, assign: boolean, defOverride?: InboxLabelRow) {
     const convId = selectedConvoIdRef.current
     if (!convId) return
     const def = defOverride ?? inboxLabelCatalog.find((d) => d.id === labelId)
     if (assign && !def) return
+    if (inboxLabelRowBusy === labelId) return
     setInboxLabelRowBusy(labelId)
+
+    const prevSnapshot =
+      convoListRef.current.find((c) => c.id === convId)?.labels ??
+      inboxSearchExtraConvos.find((c) => c.id === convId)?.labels ??
+      inboxLabelFilterExtraConvos.find((c) => c.id === convId)?.labels ??
+      (selectedConvoHold?.id === convId ? selectedConvoHold.labels : null) ??
+      []
+
+    // Optimistic UI across all inbox list sources (main + search/filter extras).
+    if (assign && def) {
+      patchConversationLabels(convId, (labels) => {
+        if (labels.some((l) => l.id === labelId)) return labels
+        return [...labels, def].sort((a, b) => {
+          if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
+          return a.name.localeCompare(b.name)
+        })
+      })
+    } else if (!assign) {
+      patchConversationLabels(convId, (labels) => labels.filter((l) => l.id !== labelId))
+    }
+
     try {
       if (assign) {
         const { error } = await supabase.from('conversation_inbox_labels').insert({
           conversation_id: convId,
           label_id: labelId,
         })
-        if (error) throw error
-        setConvoList((prev) =>
-          prev.map((c) => {
-            if (c.id !== convId || !def) return c
-            if (c.labels.some((l) => l.id === labelId)) return c
-            const next = [...c.labels, def].sort((a, b) => {
-              if (a.is_system !== b.is_system) return a.is_system ? -1 : 1
-              return a.name.localeCompare(b.name)
-            })
-            return { ...c, labels: next }
-          })
-        )
+        if (error) {
+          const code = (error as { code?: string }).code
+          const status = (error as { status?: number }).status
+          const already =
+            code === '23505' ||
+            status === 409 ||
+            /duplicate|conflict|unique|already exists/i.test(error.message || '')
+          if (!already) throw error
+        }
       } else {
         const { error } = await supabase
           .from('conversation_inbox_labels')
@@ -3151,14 +3206,12 @@ export default function DashboardPage() {
           .eq('conversation_id', convId)
           .eq('label_id', labelId)
         if (error) throw error
-        setConvoList((prev) =>
-          prev.map((c) => (c.id !== convId ? c : { ...c, labels: c.labels.filter((l) => l.id !== labelId) }))
-        )
       }
     } catch (e) {
+      // Roll back optimistic labels on this thread only (avoid full refresh blanking mobile).
+      patchConversationLabels(convId, () => prevSnapshot)
+      console.error('[applyInboxLabelOnThread]', e)
       alert(e instanceof Error ? e.message : 'Could not update label')
-      const cur = profileRef.current
-      if (cur?.business_id) void refreshDashboard(cur, { scope: 'inbox' })
     } finally {
       setInboxLabelRowBusy(null)
     }
@@ -3400,7 +3453,12 @@ export default function DashboardPage() {
     setReplyDraft('')
     setReplyTarget(null)
     clearReplyPendingImage()
-    const conv = convoListRef.current.find((c) => c.id === conversationId)
+    const conv =
+      convoListRef.current.find((c) => c.id === conversationId) ||
+      inboxSearchExtraConvos.find((c) => c.id === conversationId) ||
+      inboxLabelFilterExtraConvos.find((c) => c.id === conversationId) ||
+      null
+    if (conv) setSelectedConvoHold(conv)
     if (conv && conv.unreadCount > 0) addInboxAttention(conversationId)
     await reloadThreadMessages(conversationId, { markRead: false, showLoading: true })
   }
@@ -3410,6 +3468,7 @@ export default function DashboardPage() {
     setInboxContactOpen(false)
     setCannedPopoverOpen(false)
     setSelectedConvoId(null)
+    setSelectedConvoHold(null)
     setReplyTarget(null)
     clearReplyPendingImage()
     setThreadMessages([])
@@ -4237,8 +4296,18 @@ export default function DashboardPage() {
   useEffect(() => {
     if ((inboxThreadLabelFilterIds.length === 0 && !inboxUnreadFilterOnly) || !selectedConvoId) return
     const stillVisible = inboxDisplayList.some((c) => c.id === selectedConvoId)
-    if (!stillVisible) setSelectedConvoId(null)
+    if (!stillVisible) {
+      setSelectedConvoId(null)
+      setSelectedConvoHold(null)
+    }
   }, [inboxThreadLabelFilterIds, inboxUnreadFilterOnly, inboxDisplayList, selectedConvoId])
+
+  /** Keep pinned thread metadata fresh while it remains in any inbox list. */
+  useEffect(() => {
+    if (!selectedConvoId) return
+    const found = convoListForInbox.find((c) => c.id === selectedConvoId)
+    if (found) setSelectedConvoHold(found)
+  }, [selectedConvoId, convoListForInbox])
 
   /** Active members matching inbox search who have no thread in results (often: follow only, no messages yet). */
   const inboxSearchMemberMatches = useMemo(() => {
@@ -4494,7 +4563,10 @@ export default function DashboardPage() {
   const isAdmin = profile.business_role === 'admin'
   const mobileGridClass =
     navItems.length > 6 ? 'grid-cols-7' : navItems.length > 5 ? 'grid-cols-6' : 'grid-cols-5'
-  const selectedConvo = convoListForInbox.find((c) => c.id === selectedConvoId) || null
+  const selectedConvoFromList = convoListForInbox.find((c) => c.id === selectedConvoId) || null
+  const selectedConvo =
+    selectedConvoFromList ||
+    (selectedConvoHold && selectedConvoHold.id === selectedConvoId ? selectedConvoHold : null)
   const inboxMobileThreadOpen = Boolean(selectedConvoId)
   const activeNav = navItems.find((n) => n.id === activeTab)
   const headerTitle = activeNav?.label ?? 'Dashboard'
@@ -6119,6 +6191,18 @@ export default function DashboardPage() {
                         </p>
                       </div>
                     </>
+                  ) : selectedConvoId ? (
+                    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-5 text-center bg-white">
+                      <p className="text-sm text-[#7d86a8]">This thread is still opening. Go back and try again.</p>
+                      <button
+                        type="button"
+                        onClick={closeInboxThread}
+                        className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] font-semibold text-slate-700"
+                      >
+                        <ArrowLeft className="w-4 h-4" />
+                        Back to inbox
+                      </button>
+                    </div>
                   ) : (
                     <div className="hidden lg:flex h-full items-center justify-center px-5 text-center text-[#7d86a8] text-sm">
                       Select a conversation from the list to open thread details.

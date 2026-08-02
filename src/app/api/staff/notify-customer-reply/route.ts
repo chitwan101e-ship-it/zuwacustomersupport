@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
-import { sendSingleCustomerNotificationEmail } from '@/lib/sendBulkCustomerNotificationEmails'
 import { ensureUnreadReminderStreak } from '@/lib/unreadMessageReminders'
 
 /**
  * Inserts the in-app "support_reply" notification for the customer after staff sends a message.
- * Uses the service role so delivery does not depend on DB trigger + RLS interaction (which often
- * blocks trigger-time inserts on Supabase while the staff message insert still succeeds).
+ * Email is NOT sent here — unread reminder emails go out later (15m / 3h / 24h) via cron
+ * only if the customer still has not read the message.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -80,24 +79,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: insErr.message }, { status: 500 })
     }
 
-    const customerId = convo.customer_id as string
-    const { data: biz } = await admin.from('businesses').select('name').eq('id', bid).maybeSingle()
-    const brandName = (biz as { name?: string } | null)?.name?.trim() || 'Relay'
-
-    const emailStatus = await sendSingleCustomerNotificationEmail(admin, {
-      userId: customerId,
-      subject: 'New reply from the team',
-      title: 'New reply from the team',
-      body: preview,
-      linkPath: '/feed?openChat=1',
-      ctaLabel: 'Open message',
-      brandName,
-    })
-
-    // Start (or keep) the unread reminder ladder — does not reset if already active.
+    // Start (or keep) unread reminder ladder — emails only if still unread at 15m / 3h / 24h.
     await ensureUnreadReminderStreak(admin, conversationId, preview)
 
-    return NextResponse.json({ ok: true, email: emailStatus })
+    return NextResponse.json({ ok: true, email: 'deferred_unread_reminders' })
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error'
     return NextResponse.json({ error: msg }, { status: 500 })
