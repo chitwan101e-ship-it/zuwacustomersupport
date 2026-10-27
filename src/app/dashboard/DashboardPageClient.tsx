@@ -87,6 +87,7 @@ import {
   loadInboxAttentionIds,
   saveInboxAttentionIds,
 } from '@/lib/inboxAttention'
+import { draftListLabel, omitRecordKey, readChatDraftMap, writeChatDraft } from '@/lib/chatDrafts'
 import { markMessagesReadByIds } from '@/lib/markMessagesReadByIds'
 import { useMarkMessagesReadOnView } from '@/lib/useMarkMessagesReadOnView'
 import {
@@ -300,6 +301,12 @@ function formatModerationError(e: unknown, action: string): string {
   if (err?.message) return `${action} failed: ${err.message}`
   return `${action} failed. Try again.`
 }
+
+/** Newest comments stay visible; older ones sit behind "View more". */
+const COMMENT_PREVIEW_COUNT = 2
+const COMMENT_PAGE_SIZE = 6
+const REPLY_PREVIEW_COUNT = 2
+const REPLY_PAGE_SIZE = 5
 
 function engagementCommentsByParent(list: EngagementComment[]) {
   const m = new Map<string | null, EngagementComment[]>()
@@ -878,10 +885,24 @@ export default function DashboardPage() {
   }
   const [threadMessages, setThreadMessages] = useState<ThreadMessage[]>([])
   const [threadLoading, setThreadLoading] = useState(false)
-  const [replyDraft, setReplyDraft] = useState('')
+  /** Unsent reply text, keyed by conversation id. Survives switching threads. */
+  const [replyDraftByConvo, setReplyDraftByConvo] = useState<Record<string, string>>({})
+  const replyDraftByConvoRef = useRef<Record<string, string>>({})
+  replyDraftByConvoRef.current = replyDraftByConvo
+  const [replyImageByConvo, setReplyImageByConvo] = useState<
+    Record<string, { blob: Blob; previewUrl: string }>
+  >({})
+  const replyImageByConvoRef = useRef(replyImageByConvo)
+  replyImageByConvoRef.current = replyImageByConvo
+  const [replyTargetByConvo, setReplyTargetByConvo] = useState<Record<string, ReplyTargetMessage>>({})
   const [replyBusy, setReplyBusy] = useState(false)
-  const [replyPendingImage, setReplyPendingImage] = useState<{ blob: Blob; previewUrl: string } | null>(null)
-  const [replyTarget, setReplyTarget] = useState<ReplyTargetMessage | null>(null)
+  /** True only after the staff member edits the open composer, so a restored draft is not "typing". */
+  const staffComposerDirtyRef = useRef(false)
+  const staffTypingSnapshotRef = useRef<{ convoId: string; snapshot: string } | null>(null)
+  const staffDraftsHydratedRef = useRef<string | null>(null)
+  const replyDraft = selectedConvoId ? (replyDraftByConvo[selectedConvoId] ?? '') : ''
+  const replyPendingImage = selectedConvoId ? (replyImageByConvo[selectedConvoId] ?? null) : null
+  const replyTarget = selectedConvoId ? (replyTargetByConvo[selectedConvoId] ?? null) : null
 
   const [pendingCustomers, setPendingCustomers] = useState<PendingCustomer[]>([])
   const [pendingSignupCount, setPendingSignupCount] = useState(0)
@@ -942,6 +963,8 @@ export default function DashboardPage() {
   >({})
   const [myAnnouncementsLoading, setMyAnnouncementsLoading] = useState(false)
   const [engagementOpen, setEngagementOpen] = useState<{ postId: string; mode: 'likes' | 'comments' } | null>(null)
+  const [commentVisibleCount, setCommentVisibleCount] = useState<Record<string, number>>({})
+  const [replyVisibleCount, setReplyVisibleCount] = useState<Record<string, number>>({})
   const [staffCommentDrafts, setStaffCommentDrafts] = useState<Record<string, string>>({})
   const [staffReplyThreadTarget, setStaffReplyThreadTarget] = useState<{ postId: string; parentId: string } | null>(
     null
@@ -1881,12 +1904,48 @@ export default function DashboardPage() {
       if (error) throw error
       setStaffReplyThreadDraft('')
       setStaffReplyThreadTarget(null)
+      setReplyVisibleCount((prev) => ({
+        ...prev,
+        [`${postId}:${parentCommentId}`]: 100000,
+      }))
       await loadMyAnnouncements(p.business_id)
     } catch (e) {
       console.error(e)
       alert(e instanceof Error ? e.message : 'Could not post reply. Run migration 008_comments_threading.sql if replies fail.')
     } finally {
       setStaffReplyBusyPostId(null)
+    }
+  }
+
+  function togglePostComments(postId: string) {
+    const opening = !(engagementOpen?.postId === postId && engagementOpen.mode === 'comments')
+    setEngagementOpen(opening ? { postId, mode: 'comments' } : null)
+    if (!opening) {
+      setStaffReplyThreadTarget((prev) => (prev?.postId === postId ? null : prev))
+      setCommentVisibleCount((prev) => {
+        if (prev[postId] == null) return prev
+        const next = { ...prev }
+        delete next[postId]
+        return next
+      })
+      setReplyVisibleCount((prev) => {
+        const prefix = `${postId}:`
+        let changed = false
+        const next: Record<string, number> = {}
+        for (const [key, value] of Object.entries(prev)) {
+          if (key.startsWith(prefix)) {
+            changed = true
+            continue
+          }
+          next[key] = value
+        }
+        return changed ? next : prev
+      })
+    }
+    if (opening) {
+      requestAnimationFrame(() => {
+        document.getElementById(`staff-comment-${postId}`)?.focus()
+      })
     }
   }
 
@@ -2102,10 +2161,9 @@ export default function DashboardPage() {
     if (!selectedConvoIdRef.current) return
     const frame = window.requestAnimationFrame(() => {
       startTransition(() => {
+        staffComposerDirtyRef.current = false
         setSelectedConvoId(null)
         setThreadMessages([])
-        setReplyTarget(null)
-        clearReplyPendingImage()
       })
     })
     return () => window.cancelAnimationFrame(frame)
@@ -2473,7 +2531,27 @@ export default function DashboardPage() {
   }, [supabase, selectedConvoId, profile?.id])
 
   useEffect(() => {
-    if (!selectedConvoId || !profile?.id) return
+    if (!profile?.id || staffDraftsHydratedRef.current === profile.id) return
+    staffDraftsHydratedRef.current = profile.id
+    const saved = readChatDraftMap(profile.id, 'staff')
+    setReplyDraftByConvo((prev) => {
+      const merged = { ...saved, ...prev }
+      replyDraftByConvoRef.current = merged
+      return merged
+    })
+  }, [profile?.id])
+
+  useEffect(() => {
+    if (!selectedConvoId || !profile?.id) {
+      staffTypingSnapshotRef.current = null
+      return
+    }
+    const snapshot = `${replyDraft}\0${replyPendingImage ? '1' : '0'}`
+    const prev = staffTypingSnapshotRef.current
+    const switched = prev?.convoId !== selectedConvoId
+    staffTypingSnapshotRef.current = { convoId: selectedConvoId, snapshot }
+    if (switched || !staffComposerDirtyRef.current) return
+
     const hasComposerContent = Boolean(replyDraft.trim()) || Boolean(replyPendingImage)
     const ch = staffThreadChannelRef.current
     const myId = profile.id
@@ -3135,11 +3213,39 @@ export default function DashboardPage() {
     }
   }
 
-  function clearReplyPendingImage() {
-    setReplyPendingImage((prev) => {
-      if (prev) URL.revokeObjectURL(prev.previewUrl)
-      return null
+  function setReplyDraftFor(conversationId: string, next: string | ((prev: string) => string)) {
+    const current = replyDraftByConvoRef.current[conversationId] ?? ''
+    const value = typeof next === 'function' ? next(current) : next
+    if (current === value) return
+    const userId = profileRef.current?.id
+    if (userId) writeChatDraft(userId, 'staff', conversationId, value)
+    replyDraftByConvoRef.current = value
+      ? { ...replyDraftByConvoRef.current, [conversationId]: value }
+      : omitRecordKey(replyDraftByConvoRef.current, conversationId)
+    setReplyDraftByConvo(replyDraftByConvoRef.current)
+  }
+
+  function setReplyImageFor(conversationId: string, image: { blob: Blob; previewUrl: string } | null) {
+    const cur = replyImageByConvoRef.current[conversationId]
+    if (cur && cur.previewUrl !== image?.previewUrl) URL.revokeObjectURL(cur.previewUrl)
+    replyImageByConvoRef.current = image
+      ? { ...replyImageByConvoRef.current, [conversationId]: image }
+      : omitRecordKey(replyImageByConvoRef.current, conversationId)
+    setReplyImageByConvo(replyImageByConvoRef.current)
+  }
+
+  function setReplyTargetFor(conversationId: string, target: ReplyTargetMessage | null) {
+    setReplyTargetByConvo((prev) => {
+      if (!target) return omitRecordKey(prev, conversationId)
+      return { ...prev, [conversationId]: target }
     })
+  }
+
+  function clearReplyPendingImage() {
+    const id = selectedConvoIdRef.current
+    if (!id) return
+    staffComposerDirtyRef.current = true
+    setReplyImageFor(id, null)
   }
 
   function patchConversationLabels(
@@ -3289,7 +3395,8 @@ export default function DashboardPage() {
       customerUsername: conv.customerUsername,
       businessName: bizName,
     })
-    setReplyDraft((d) => mergeCannedIntoDraft(d, expanded))
+    staffComposerDirtyRef.current = true
+    setReplyDraftFor(convId, (d) => mergeCannedIntoDraft(d, expanded))
     setCannedPopoverOpen(false)
     setCannedPickerQuery('')
   }
@@ -3448,11 +3555,9 @@ export default function DashboardPage() {
   async function openThread(conversationId: string) {
     setInboxLabelsPopoverOpen(false)
     setCannedPopoverOpen(false)
+    staffComposerDirtyRef.current = false
     setSelectedConvoId(conversationId)
     setThreadLoading(true)
-    setReplyDraft('')
-    setReplyTarget(null)
-    clearReplyPendingImage()
     const conv =
       convoListRef.current.find((c) => c.id === conversationId) ||
       inboxSearchExtraConvos.find((c) => c.id === conversationId) ||
@@ -3467,10 +3572,9 @@ export default function DashboardPage() {
     setInboxLabelsPopoverOpen(false)
     setInboxContactOpen(false)
     setCannedPopoverOpen(false)
+    staffComposerDirtyRef.current = false
     setSelectedConvoId(null)
     setSelectedConvoHold(null)
-    setReplyTarget(null)
-    clearReplyPendingImage()
     setThreadMessages([])
   }
 
@@ -3494,10 +3598,13 @@ export default function DashboardPage() {
     try {
       const blob = await downscaleImageFileToJpeg(f, { maxDim: 1280, quality: 0.85 })
       const previewUrl = URL.createObjectURL(blob)
-      setReplyPendingImage((prev) => {
-        if (prev) URL.revokeObjectURL(prev.previewUrl)
-        return { blob, previewUrl }
-      })
+      const convoId = selectedConvoIdRef.current
+      if (!convoId) {
+        URL.revokeObjectURL(previewUrl)
+        return
+      }
+      staffComposerDirtyRef.current = true
+      setReplyImageFor(convoId, { blob, previewUrl })
     } catch (err) {
       console.error(err)
       alert(err instanceof Error ? err.message : 'Could not process the image.')
@@ -3661,9 +3768,10 @@ export default function DashboardPage() {
       })
       if (!msg) return
       const preview = (msg.body ?? '').trim() || (msg.image_url ? '📷' : 'Reply')
-      setReplyDraft('')
-      setReplyTarget(null)
-      clearReplyPendingImage()
+      if (selectedConvoIdRef.current === selectedConvoId) staffComposerDirtyRef.current = false
+      setReplyDraftFor(selectedConvoId, '')
+      setReplyTargetFor(selectedConvoId, null)
+      setReplyImageFor(selectedConvoId, null)
       // Unread clears only after catch-up + reply: mark remaining inbound read and drop triage.
       const conv = convoListRef.current.find((c) => c.id === selectedConvoId)
       if (conv?.customer_id) {
@@ -4815,7 +4923,18 @@ export default function DashboardPage() {
                         >
                           {item.customerName}
                         </p>
-                        <p className="text-[11px] text-[#8892b0] truncate max-w-[min(100%,240px)]">{item.preview}</p>
+                        <p className="text-[11px] text-[#8892b0] truncate max-w-[min(100%,240px)]">
+                          {draftListLabel(replyDraftByConvo[item.id], Boolean(replyImageByConvo[item.id])) ? (
+                            <>
+                              <span className="font-semibold" style={{ color: '#e11d48' }}>
+                                Draft:{' '}
+                              </span>
+                              {draftListLabel(replyDraftByConvo[item.id], Boolean(replyImageByConvo[item.id]))}
+                            </>
+                          ) : (
+                            item.preview
+                          )}
+                        </p>
                         <div className="flex flex-wrap items-center gap-1 mt-0.5">
                           {convoNeedsInboxTriage(item) ? (
                             <span
@@ -4943,6 +5062,7 @@ export default function DashboardPage() {
                               ) : null}
                             </div>
                             <ContentModerationMenu
+                              tone="light"
                               isHidden={Boolean(a.hidden_at)}
                               busy={postModerationBusyId === a.id}
                               onEdit={() => beginEditPost(a)}
@@ -5010,7 +5130,7 @@ export default function DashboardPage() {
                             <FeedPostImage imageUrl={a.image_url} alt="" rounded="xl" />
                           </div>
                         ) : null}
-                        <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-sm">
+                        <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-slate-200 text-sm">
                           <button
                             type="button"
                             onClick={() =>
@@ -5018,80 +5138,121 @@ export default function DashboardPage() {
                                 prev?.postId === a.id && prev.mode === 'likes' ? null : { postId: a.id, mode: 'likes' }
                               )
                             }
-                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors"
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
                           >
                             <ThumbsUp className="w-4 h-4 text-[#8d63ff]" />
                             {meta.likes} likes
                           </button>
-                          <button
-                            type="button"
-                            aria-expanded={engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'}
-                            onClick={() => {
-                              const opening = !(engagementOpen?.postId === a.id && engagementOpen.mode === 'comments')
-                              setEngagementOpen(
-                                opening ? { postId: a.id, mode: 'comments' } : null
-                              )
-                              if (!opening) {
-                                setStaffReplyThreadTarget((prev) => (prev?.postId === a.id ? null : prev))
-                              }
-                              if (opening) {
-                                requestAnimationFrame(() => {
-                                  document.getElementById(`staff-comment-${a.id}`)?.focus()
-                                })
-                              }
-                            }}
-                            className={`inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 cursor-pointer transition-colors ${
+                          <div
+                            className={`inline-flex items-center rounded-lg -mx-1.5 ${
                               engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
-                                ? 'text-white bg-[#8d63ff]/15'
-                                : 'text-[#c4cbe6] hover:text-white hover:bg-white/[0.06]'
+                                ? 'bg-[#8d63ff]/10 text-[#6f54ff]'
+                                : 'text-slate-600'
                             }`}
                           >
-                            <RelayChatBubbleIcon className="text-[#8d63ff]" size={16} strokeWidth={2} />
-                            {meta.comments} comments
-                          </button>
+                            <button
+                              type="button"
+                              aria-expanded={engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'}
+                              onClick={() => togglePostComments(a.id)}
+                              className={`inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 cursor-pointer transition-colors ${
+                                engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
+                                  ? 'text-[#6f54ff]'
+                                  : 'hover:text-slate-900 hover:bg-slate-100'
+                              }`}
+                            >
+                              <RelayChatBubbleIcon className="text-[#8d63ff]" size={16} strokeWidth={2} />
+                              {meta.comments} comments
+                            </button>
+                            <button
+                              type="button"
+                              aria-expanded={engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'}
+                              aria-label={
+                                engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
+                                  ? 'Collapse comments'
+                                  : 'Expand comments'
+                              }
+                              onClick={() => togglePostComments(a.id)}
+                              className={`inline-flex items-center justify-center rounded-lg p-1 cursor-pointer transition-colors ${
+                                engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
+                                  ? 'text-[#6f54ff] hover:bg-[#8d63ff]/15'
+                                  : 'hover:text-slate-900 hover:bg-slate-100'
+                              }`}
+                            >
+                              <ChevronDown
+                                className={`h-4 w-4 transition-transform ${
+                                  engagementOpen?.postId === a.id && engagementOpen.mode === 'comments'
+                                    ? 'rotate-180'
+                                    : ''
+                                }`}
+                              />
+                            </button>
+                          </div>
                           <button
                             type="button"
                             onClick={() => void shareStaffAnnouncement(a)}
-                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-[#c4cbe6] hover:text-white hover:bg-white/[0.06] transition-colors ml-auto"
+                            className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 -mx-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors ml-auto"
                           >
                             <Share2 className="w-4 h-4 text-[#8d63ff]" />
                             Share link
                           </button>
                         </div>
                         {engagementOpen?.postId === a.id ? (
-                          <div className="px-4 pb-4 border-t border-white/10">
+                          <div className="px-4 pb-4 border-t border-slate-200">
                             <div className="pt-3">
                               {engagementOpen.mode === 'likes' ? (
                                 <>
-                                  <p className="text-sm font-semibold text-white mb-2">People who liked this post</p>
+                                  <p className="text-sm font-semibold text-slate-900 mb-2">People who liked this post</p>
                                   {meta.likedBy.length === 0 ? (
-                                    <p className="text-sm text-[#7d86a8]">No likes yet.</p>
+                                    <p className="text-sm text-slate-500">No likes yet.</p>
                                   ) : (
                                     <ul className="space-y-2">
                                       {meta.likedBy.map((u, idx) => (
-                                        <li key={`${u.name}-${idx}`} className="flex items-center gap-3 rounded-xl border border-white/10 bg-[#131d3d] px-3 py-2.5">
+                                        <li key={`${u.name}-${idx}`} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
                                           {u.avatar ? (
-                                            <img src={u.avatar} alt={`${u.name} avatar`} className="w-9 h-9 rounded-full object-cover border border-white/10" />
+                                            <img src={u.avatar} alt={`${u.name} avatar`} className="w-9 h-9 rounded-full object-cover border border-slate-200" />
                                           ) : (
-                                            <div className="w-9 h-9 rounded-full bg-[#202b51] text-[11px] font-bold text-[#d8def3] border border-white/10 flex items-center justify-center">
+                                            <div className="w-9 h-9 rounded-full bg-slate-200 text-[11px] font-bold text-slate-700 border border-slate-200 flex items-center justify-center">
                                               {u.name.slice(0, 2).toUpperCase()}
                                             </div>
                                           )}
-                                          <p className="text-sm text-white font-medium">{u.name}</p>
+                                          <p className="text-sm text-slate-900 font-medium">{u.name}</p>
                                         </li>
                                       ))}
                                     </ul>
                                   )}
                                 </>
                               ) : (
-                                <div className="bg-[#091028] border border-white/10 rounded-2xl px-3 py-3 space-y-3">
+                                <div className="bg-slate-50 border border-slate-200 rounded-2xl px-3 py-3 space-y-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-sm font-semibold text-slate-800">Comments</p>
+                                    <button
+                                      type="button"
+                                      aria-expanded
+                                      aria-label="Collapse comments"
+                                      onClick={() => togglePostComments(a.id)}
+                                      className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1 text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                                    >
+                                      <ChevronDown className="h-4 w-4 rotate-180" />
+                                    </button>
+                                  </div>
                                   {meta.commentDetails.length === 0 ? (
-                                    <p className="text-sm text-[#7d86a8] text-center py-2">No comments yet.</p>
+                                    <p className="text-sm text-slate-500 text-center py-2">No comments yet.</p>
                                   ) : (
                                     (() => {
                                       const cBy = engagementCommentsByParent(meta.commentDetails)
+                                      const roots = [...(cBy.get(null) || [])].sort(
+                                        (left, right) => +new Date(left.created_at) - +new Date(right.created_at)
+                                      )
+                                      const rootLimit = commentVisibleCount[a.id] ?? COMMENT_PREVIEW_COUNT
+                                      const hiddenRootCount = Math.max(0, roots.length - rootLimit)
+                                      const shownRoots = roots.slice(hiddenRootCount)
+                                      const nextRootBatch = Math.min(COMMENT_PAGE_SIZE, hiddenRootCount)
                                       function renderEngagementComment(c: EngagementComment): ReactNode {
                                         const kids = cBy.get(c.id) || []
+                                        const replyKey = `${a.id}:${c.id}`
+                                        const replyShown = replyVisibleCount[replyKey] ?? 0
+                                        const hiddenReplyCount = Math.max(0, kids.length - replyShown)
+                                        const nextReplyBatch = Math.min(REPLY_PAGE_SIZE, hiddenReplyCount)
                                         const isReplying =
                                           staffReplyThreadTarget?.postId === a.id &&
                                           staffReplyThreadTarget?.parentId === c.id
@@ -5101,29 +5262,30 @@ export default function DashboardPage() {
                                               <img
                                                 src={c.userAvatar}
                                                 alt={`${c.userName} avatar`}
-                                                className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                                className="w-8 h-8 rounded-full object-cover border border-slate-200 shrink-0"
                                               />
                                             ) : (
-                                              <div className="w-8 h-8 rounded-full bg-[#606770] text-xs font-bold text-white border border-white/10 flex items-center justify-center shrink-0">
+                                              <div className="w-8 h-8 rounded-full bg-slate-400 text-xs font-bold !text-white border border-slate-200 flex items-center justify-center shrink-0">
                                                 {c.userName.slice(0, 2).toUpperCase()}
                                               </div>
                                             )}
                                             <div className="min-w-0 flex-1">
                                               <div
-                                                className={`max-w-full rounded-2xl px-3 py-2 border bg-[#131d3d] border-white/10 ${
+                                                className={`max-w-full rounded-2xl px-3 py-2 border bg-white border-slate-200 ${
                                                   c.hidden_at ? 'opacity-70' : ''
                                                 }`}
                                               >
                                                 <div className="flex items-start justify-between gap-2">
                                                   <div className="min-w-0">
-                                                    <span className="font-semibold text-white">{c.userName}</span>
+                                                    <span className="font-semibold text-slate-900">{c.userName}</span>
                                                     {c.hidden_at ? (
-                                                      <span className="ml-2 text-[10px] font-semibold uppercase text-amber-200">
+                                                      <span className="ml-2 text-[10px] font-semibold uppercase text-amber-700">
                                                         Hidden
                                                       </span>
                                                     ) : null}
                                                   </div>
                                                   <ContentModerationMenu
+                                                    tone="light"
                                                     isHidden={Boolean(c.hidden_at)}
                                                     busy={commentModerationBusyId === c.id}
                                                     onEdit={() => beginEditComment(c)}
@@ -5144,25 +5306,25 @@ export default function DashboardPage() {
                                                         type="button"
                                                         disabled={commentModerationBusyId === c.id || !editCommentBody.trim()}
                                                         onClick={() => void saveEditComment()}
-                                                        className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
+                                                        className="rounded-lg bg-gradient-to-r from-[#6f54ff] to-[#5a7ff6] px-2.5 py-1.5 text-xs font-semibold !text-white disabled:opacity-40"
                                                       >
                                                         Save
                                                       </button>
                                                       <button
                                                         type="button"
                                                         onClick={() => setEditingCommentId(null)}
-                                                        className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-[#c4cbe6]"
+                                                        className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600"
                                                       >
                                                         Cancel
                                                       </button>
                                                     </div>
                                                   </div>
                                                 ) : (
-                                                  <p className="mt-0.5 text-[#d4dbf0] break-words whitespace-pre-wrap">{c.body}</p>
+                                                  <p className="mt-0.5 text-slate-700 break-words whitespace-pre-wrap">{c.body}</p>
                                                 )}
                                               </div>
                                               <div className="mt-1 ml-1 flex flex-wrap items-center gap-2">
-                                                <p className="text-[11px] text-[#7d86a8]">{timeAgo(c.created_at)}</p>
+                                                <p className="text-[11px] text-slate-500">{timeAgo(c.created_at)}</p>
                                                 <button
                                                   type="button"
                                                   onClick={() => {
@@ -5173,7 +5335,7 @@ export default function DashboardPage() {
                                                     )
                                                     setStaffReplyThreadDraft('')
                                                   }}
-                                                  className="text-[11px] font-semibold text-[#8d63ff]"
+                                                  className="text-[11px] font-semibold text-[#6f54ff]"
                                                 >
                                                   Reply
                                                 </button>
@@ -5184,18 +5346,18 @@ export default function DashboardPage() {
                                                     <img
                                                       src={profile.avatar_url}
                                                       alt="Your avatar"
-                                                      className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                                      className="w-8 h-8 rounded-full object-cover border border-slate-200 shrink-0"
                                                     />
                                                   ) : (
-                                                    <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
+                                                    <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold !text-white flex items-center justify-center shrink-0">
                                                       {(profile?.username || 'JB').slice(0, 2).toUpperCase()}
                                                     </div>
                                                   )}
-                                                  <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
+                                                  <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-white border-slate-200">
                                                     <textarea
                                                       rows={1}
                                                       autoFocus
-                                                      className="flex-1 min-w-0 bg-transparent text-sm py-2 text-white placeholder:text-[#8e99bd] focus:outline-none resize-none min-h-[40px] max-h-28"
+                                                      className="flex-1 min-w-0 bg-transparent text-sm py-2 text-slate-800 placeholder:text-slate-400 focus:outline-none resize-none min-h-[40px] max-h-28"
                                                       placeholder={`Reply to ${c.userName}…`}
                                                       value={staffReplyThreadDraft}
                                                       onChange={(e) => setStaffReplyThreadDraft(e.target.value)}
@@ -5212,7 +5374,7 @@ export default function DashboardPage() {
                                                         staffReplyBusyPostId === a.id || !staffReplyThreadDraft.trim()
                                                       }
                                                       onClick={() => void submitStaffCommentReply(a.id, c.id)}
-                                                      className="p-2 rounded-full text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
+                                                      className="p-2 rounded-full !text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
                                                       aria-label="Send reply"
                                                     >
                                                       {staffReplyBusyPostId === a.id ? (
@@ -5225,18 +5387,80 @@ export default function DashboardPage() {
                                                 </div>
                                               ) : null}
                                               {kids.length > 0 ? (
-                                                <ul className="mt-2 space-y-2 border-l border-white/10 pl-2 ml-1">
-                                                  {kids.map((k) => renderEngagementComment(k))}
-                                                </ul>
+                                                <div className="mt-1 ml-1">
+                                                  {replyShown === 0 ? (
+                                                    <button
+                                                      type="button"
+                                                      aria-expanded={false}
+                                                      onClick={() =>
+                                                        setReplyVisibleCount((prev) => ({
+                                                          ...prev,
+                                                          [replyKey]: Math.min(REPLY_PREVIEW_COUNT, kids.length),
+                                                        }))
+                                                      }
+                                                      className="text-[12px] font-semibold text-slate-500 hover:text-slate-800 hover:underline"
+                                                    >
+                                                      View {kids.length} repl{kids.length === 1 ? 'y' : 'ies'}
+                                                    </button>
+                                                  ) : (
+                                                    <>
+                                                      <ul className="mt-1 space-y-2 border-l border-slate-200 pl-2 ml-1">
+                                                        {kids.slice(0, replyShown).map((k) => renderEngagementComment(k))}
+                                                      </ul>
+                                                      <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                                                        {hiddenReplyCount > 0 ? (
+                                                          <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                              setReplyVisibleCount((prev) => ({
+                                                                ...prev,
+                                                                [replyKey]: (prev[replyKey] ?? 0) + REPLY_PAGE_SIZE,
+                                                              }))
+                                                            }
+                                                            className="text-[12px] font-semibold text-slate-500 hover:text-slate-800 hover:underline"
+                                                          >
+                                                            View {nextReplyBatch} more repl{nextReplyBatch === 1 ? 'y' : 'ies'}
+                                                          </button>
+                                                        ) : null}
+                                                        <button
+                                                          type="button"
+                                                          aria-expanded
+                                                          onClick={() =>
+                                                            setReplyVisibleCount((prev) => ({ ...prev, [replyKey]: 0 }))
+                                                          }
+                                                          className="text-[12px] font-semibold text-slate-500 hover:text-slate-800 hover:underline"
+                                                        >
+                                                          Hide repl{kids.length === 1 ? 'y' : 'ies'}
+                                                        </button>
+                                                      </div>
+                                                    </>
+                                                  )}
+                                                </div>
                                               ) : null}
                                             </div>
                                           </li>
                                         )
                                       }
                                       return (
-                                        <ul className="space-y-3">
-                                          {(cBy.get(null) || []).map((c) => renderEngagementComment(c))}
-                                        </ul>
+                                        <div className="space-y-3">
+                                          {hiddenRootCount > 0 ? (
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setCommentVisibleCount((prev) => ({
+                                                  ...prev,
+                                                  [a.id]: (prev[a.id] ?? COMMENT_PREVIEW_COUNT) + COMMENT_PAGE_SIZE,
+                                                }))
+                                              }
+                                              className="text-[13px] font-semibold text-slate-500 hover:text-slate-800 hover:underline"
+                                            >
+                                              View {nextRootBatch} more comment{nextRootBatch === 1 ? '' : 's'}
+                                            </button>
+                                          ) : null}
+                                          <ul className="space-y-3">
+                                            {shownRoots.map((c) => renderEngagementComment(c))}
+                                          </ul>
+                                        </div>
                                       )
                                     })()
                                   )}
@@ -5245,18 +5469,18 @@ export default function DashboardPage() {
                                       <img
                                         src={profile.avatar_url}
                                         alt="Your avatar"
-                                        className="w-8 h-8 rounded-full object-cover border border-white/10 shrink-0"
+                                        className="w-8 h-8 rounded-full object-cover border border-slate-200 shrink-0"
                                       />
                                     ) : (
-                                      <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold text-white flex items-center justify-center shrink-0">
+                                      <div className="w-8 h-8 rounded-full bg-[#8d63ff] text-xs font-bold !text-white flex items-center justify-center shrink-0">
                                         {(profile?.username || 'JB').slice(0, 2).toUpperCase()}
                                       </div>
                                     )}
-                                    <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-[#0f1a38] border-white/10">
+                                    <div className="flex flex-1 min-w-0 gap-2 items-end rounded-2xl px-3 py-1.5 border bg-white border-slate-200">
                                       <textarea
                                         id={`staff-comment-${a.id}`}
                                         rows={1}
-                                        className="flex-1 min-w-0 bg-transparent text-sm py-2 text-white placeholder:text-[#8e99bd] focus:outline-none resize-none min-h-[40px] max-h-28"
+                                        className="flex-1 min-w-0 bg-transparent text-sm py-2 text-slate-800 placeholder:text-slate-400 focus:outline-none resize-none min-h-[40px] max-h-28"
                                         placeholder="Write a comment…"
                                         value={staffCommentDrafts[a.id] || ''}
                                         onChange={(e) =>
@@ -5275,7 +5499,7 @@ export default function DashboardPage() {
                                           staffReplyBusyPostId === a.id || !(staffCommentDrafts[a.id] || '').trim()
                                         }
                                         onClick={() => void submitStaffComment(a.id)}
-                                        className="p-2 rounded-full text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
+                                        className="p-2 rounded-full !text-white shrink-0 disabled:opacity-50 bg-[#8d63ff]"
                                         aria-label="Send comment"
                                       >
                                         {staffReplyBusyPostId === a.id ? (
@@ -5567,10 +5791,23 @@ export default function DashboardPage() {
                             <p className="text-[11px] text-[#8892b0] truncate">@{item.customerUsername}</p>
                             <p
                               className={`text-[11px] truncate mt-0.5 max-w-[min(100%,220px)] ${
-                                item.unreadCount > 0 ? 'text-[#c4cbe6] font-medium' : 'text-[#8892b0]'
+                                draftListLabel(replyDraftByConvo[item.id], Boolean(replyImageByConvo[item.id]))
+                                  ? 'text-[#8892b0]'
+                                  : item.unreadCount > 0
+                                    ? 'text-[#c4cbe6] font-medium'
+                                    : 'text-[#8892b0]'
                               }`}
                             >
-                              {item.preview}
+                              {draftListLabel(replyDraftByConvo[item.id], Boolean(replyImageByConvo[item.id])) ? (
+                                <>
+                                  <span className="font-semibold" style={{ color: '#e11d48' }}>
+                                    Draft:{' '}
+                                  </span>
+                                  {draftListLabel(replyDraftByConvo[item.id], Boolean(replyImageByConvo[item.id]))}
+                                </>
+                              ) : (
+                                item.preview
+                              )}
                             </p>
                             {displayLabels.length > 0 ? (
                               <div className="flex flex-wrap gap-1 mt-1.5 max-w-[min(100%,220px)]">
@@ -5947,7 +6184,9 @@ export default function DashboardPage() {
                                   {!isFromTeam ? (
                                     <button
                                       type="button"
-                                      onClick={() => setReplyTarget(m)}
+                                      onClick={() => {
+                                        if (selectedConvoId) setReplyTargetFor(selectedConvoId, m)
+                                      }}
                                       className="font-semibold text-[#8d63ff] hover:text-[#a78bff] hover:underline"
                                     >
                                       Reply
@@ -6012,7 +6251,9 @@ export default function DashboardPage() {
                               }
                             )}
                             previewText={replyPreviewText(replyTarget.body, replyTarget.image_url)}
-                            onCancel={() => setReplyTarget(null)}
+                            onCancel={() => {
+                              if (selectedConvoId) setReplyTargetFor(selectedConvoId, null)
+                            }}
                           />
                         ) : null}
                         <div className="flex gap-2 items-end">
@@ -6164,11 +6405,16 @@ export default function DashboardPage() {
                             ) : null}
                           </div>
                           <textarea
+                            key={selectedConvoId ?? 'none'}
                             rows={1}
                             className="flex-1 min-w-0 border border-slate-200 bg-white rounded-xl px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-[#6f54ff] resize-none min-h-[42px] max-h-32 placeholder:text-slate-500"
                             placeholder="Reply or add a caption…"
                             value={replyDraft}
-                            onChange={(e) => setReplyDraft(e.target.value)}
+                            onChange={(e) => {
+                              if (!selectedConvoId) return
+                              staffComposerDirtyRef.current = true
+                              setReplyDraftFor(selectedConvoId, e.target.value)
+                            }}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault()
