@@ -4445,12 +4445,16 @@ export default function DashboardPage() {
   const inboxDisplayList = useMemo(() => {
     if (!needsInboxLists) return convoList
     let list = filteredConvoList
-    if (inboxUnreadFilterOnly) list = list.filter((c) => convoNeedsInboxTriage(c))
+    if (inboxUnreadFilterOnly) {
+      // Keep the open thread in the list after its messages are marked read.
+      // Otherwise the filter drops it and the thread panel closes immediately.
+      list = list.filter((c) => convoNeedsInboxTriage(c) || c.id === selectedConvoId)
+    }
     if (inboxThreadLabelFilterIds.length === 0) return list
     return list.filter((c) =>
       inboxThreadLabelFilterIds.some((lid) => c.labels.some((l) => l.id === lid))
     )
-  }, [needsInboxLists, filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly])
+  }, [needsInboxLists, filteredConvoList, inboxThreadLabelFilterIds, inboxUnreadFilterOnly, selectedConvoId])
 
   /** Drop open thread when it falls outside the active inbox filter. */
   useEffect(() => {
