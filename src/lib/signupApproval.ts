@@ -24,10 +24,8 @@ export function pickPrimaryBusinessFromList(list: BusinessRow[]): { id: string; 
     process.env.NEXT_PUBLIC_PRIMARY_SUPPORT_BUSINESS_SLUG?.trim()
   if (envSlug) {
     const normalized = envSlug.toLowerCase().replace(/_/g, '-')
-    const fromEnv = list.find((b) => {
-      const slug = b.slug.toLowerCase()
-      return slug === normalized || slug === normalized.replace(/-/g, '')
-    })
+    // Exact slug only. Stripping hyphens made juwa-bros match the empty juwabros company.
+    const fromEnv = list.find((b) => b.slug.toLowerCase().replace(/_/g, '-') === normalized)
     if (fromEnv) return { id: fromEnv.id, name: fromEnv.name }
   }
 

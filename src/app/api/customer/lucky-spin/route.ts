@@ -71,9 +71,28 @@ async function resolveBusinessId(
   if (bizErr) throw new Error(bizErr.message)
 
   const list = (businesses ?? []) as { id: string; name: string; slug: string }[]
+  if (list.length === 0) return null
+
+  const { data: staffRows, error: staffErr } = await admin
+    .from('profiles')
+    .select('business_id')
+    .eq('role', 'business')
+    .is('deleted_at', null)
+    .in(
+      'business_id',
+      list.map((business) => business.id)
+    )
+  if (staffErr) throw new Error(staffErr.message)
+
+  const staffedIds = new Set(
+    (staffRows ?? [])
+      .map((row) => (row as { business_id: string | null }).business_id)
+      .filter((id): id is string => Boolean(id))
+  )
+  const staffed = list.filter((business) => staffedIds.has(business.id))
   const followedIds = new Set((follows ?? []).map((row) => (row as { business_id: string }).business_id))
-  const followed = list.filter((business) => followedIds.has(business.id))
-  const picked = pickPrimaryBusinessFromList(followed.length > 0 ? followed : list)
+  const followedStaffed = staffed.filter((business) => followedIds.has(business.id))
+  const picked = pickPrimaryBusinessFromList(followedStaffed.length > 0 ? followedStaffed : staffed)
   return picked?.id ?? null
 }
 
