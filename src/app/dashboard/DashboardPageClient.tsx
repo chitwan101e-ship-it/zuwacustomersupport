@@ -1016,6 +1016,16 @@ export default function DashboardPage() {
   const [activeMemberLookupBusy, setActiveMemberLookupBusy] = useState(false)
   const [dashRefreshing, setDashRefreshing] = useState(false)
   const [inboxLoading, setInboxLoading] = useState(false)
+  const [inboxHasMore, setInboxHasMore] = useState(false)
+  const [inboxMoreBusy, setInboxMoreBusy] = useState(false)
+  const inboxPoolRef = useRef<{
+    ranked: { id: string; customer_id: string; updated_at: string }[]
+    previews: Record<string, { body: string; created_at: string }>
+    shown: number
+    fetchedThrough: number
+    exhausted: boolean
+  }>({ ranked: [], previews: {}, shown: 0, fetchedThrough: 0, exhausted: true })
+  const inboxMoreBusyRef = useRef(false)
   const [usersLoading, setUsersLoading] = useState(false)
   const [usersRefreshing, setUsersRefreshing] = useState(false)
   const [inboxContactOpen, setInboxContactOpen] = useState(false)
@@ -1283,17 +1293,45 @@ export default function DashboardPage() {
             supabase,
             convoRows.map((c) => c.id)
           )
-          convoRows = rankConversationsByLatestMessage(
-            convoRows,
-            activityPreviews,
-            INBOX_LIST_DEFAULT_MAX
+          const fetchedCount = convoRows.length
+          const ranked = rankConversationsByLatestMessage(convoRows, activityPreviews, fetchedCount)
+          const visible = ranked.slice(0, INBOX_LIST_DEFAULT_MAX)
+          inboxPoolRef.current = {
+            ranked,
+            previews: activityPreviews,
+            shown: visible.length,
+            fetchedThrough: fetchedCount,
+            exhausted: fetchedCount < INBOX_ACTIVITY_CANDIDATE_MAX,
+          }
+          convoRows = visible
+          setInboxHasMore(
+            visible.length < ranked.length || fetchedCount >= INBOX_ACTIVITY_CANDIDATE_MAX
           )
         } catch (previewErr) {
           const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
           errs.push(`messages: ${msg}`)
           convoRows = convoRows.slice(0, INBOX_LIST_DEFAULT_MAX)
           activityPreviews = null
+          inboxPoolRef.current = {
+            ranked: [],
+            previews: {},
+            shown: convoRows.length,
+            fetchedThrough: 0,
+            exhausted: true,
+          }
+          setInboxHasMore(false)
         }
+      }
+
+      if (wantInbox && convoRows.length === 0) {
+        inboxPoolRef.current = {
+          ranked: [],
+          previews: {},
+          shown: 0,
+          fetchedThrough: 0,
+          exhausted: true,
+        }
+        setInboxHasMore(false)
       }
 
       if (pendingRes.error) errs.push(`pending: ${pendingRes.error}`)
@@ -1523,6 +1561,120 @@ export default function DashboardPage() {
   )
 
   refreshDashboardRef.current = refreshDashboard
+
+  const loadMoreInboxThreads = useCallback(async () => {
+    const bid = profileRef.current?.business_id
+    if (!bid || inboxMoreBusyRef.current) return
+    inboxMoreBusyRef.current = true
+    setInboxMoreBusy(true)
+    try {
+      let pool = inboxPoolRef.current
+      if (pool.shown >= pool.ranked.length && !pool.exhausted) {
+        const nextRows = await fetchAllBusinessConversations(supabase, bid, {
+          maxRows: INBOX_ACTIVITY_CANDIDATE_MAX,
+          from: pool.fetchedThrough,
+        })
+        const known = new Set(pool.ranked.map((row) => row.id))
+        const fresh = nextRows.filter((row) => !known.has(row.id))
+        const previews = fresh.length > 0 ? await fetchInboxPreviews(supabase, fresh.map((row) => row.id)) : {}
+        const rankedFresh = rankConversationsByLatestMessage(fresh, previews, fresh.length)
+        pool = {
+          ranked: [...pool.ranked, ...rankedFresh],
+          previews: { ...pool.previews, ...previews },
+          shown: pool.shown,
+          fetchedThrough: pool.fetchedThrough + nextRows.length,
+          exhausted: nextRows.length < INBOX_ACTIVITY_CANDIDATE_MAX,
+        }
+        inboxPoolRef.current = pool
+      }
+
+      const slice = pool.ranked.slice(pool.shown, pool.shown + INBOX_LIST_DEFAULT_MAX)
+      if (slice.length === 0) {
+        setInboxHasMore(false)
+        return
+      }
+
+      const customerIds = [...new Set(slice.map((row) => row.customer_id))]
+      const profileById: Record<
+        string,
+        { first_name: string; last_name: string; username: string; avatar_url?: string | null }
+      > = {}
+      for (let i = 0; i < customerIds.length; i += PROFILE_ID_IN_CHUNK) {
+        const part = customerIds.slice(i, i + PROFILE_ID_IN_CHUNK)
+        const { data: profs, error: pe } = await supabase
+          .from('profiles')
+          .select('id, first_name, last_name, username, avatar_url')
+          .in('id', part)
+        if (pe) throw pe
+        for (const row of profs || []) {
+          const r = row as {
+            id: string
+            first_name: string
+            last_name: string
+            username: string
+            avatar_url?: string | null
+          }
+          profileById[r.id] = r
+        }
+      }
+
+      const unreadByConvo = await fetchInboxUnreadCounts(supabase, slice)
+      const defById = Object.fromEntries(inboxLabelCatalog.map((d) => [d.id, d])) as Record<string, InboxLabelRow>
+      const labelsByConvo: Record<string, InboxLabelRow[]> = {}
+      const convIds = slice.map((row) => row.id)
+      for (let i = 0; i < convIds.length; i += INBOX_QUERY_CHUNK) {
+        const part = convIds.slice(i, i + INBOX_QUERY_CHUNK)
+        const { data: assignRows, error: assignErr } = await supabase
+          .from('conversation_inbox_labels')
+          .select('conversation_id, label_id')
+          .in('conversation_id', part)
+        if (assignErr) throw assignErr
+        for (const row of assignRows || []) {
+          const r = row as { conversation_id: string; label_id: string }
+          const label = defById[r.label_id]
+          if (!label) continue
+          if (!labelsByConvo[r.conversation_id]) labelsByConvo[r.conversation_id] = []
+          labelsByConvo[r.conversation_id].push(label)
+        }
+      }
+
+      const items: ConvoListItem[] = slice.map((row) => {
+        const pr = profileById[row.customer_id]
+        const pv = pool.previews[row.id]
+        const name = pr ? `${pr.first_name ?? ''} ${pr.last_name ?? ''}`.trim() || pr.username : 'Customer'
+        return {
+          id: row.id,
+          customer_id: row.customer_id,
+          customerName: name,
+          customerUsername: pr?.username ?? '…',
+          customerAvatar: pr?.avatar_url ?? null,
+          preview: pv?.body || 'No messages yet',
+          updated_at: inboxActivityAt(row.updated_at, pv),
+          unreadCount: unreadByConvo[row.id] || 0,
+          labels: labelsByConvo[row.id] || [],
+        }
+      })
+
+      pool.shown += slice.length
+      inboxPoolRef.current = pool
+      setConvoList((prev) => {
+        const seen = new Set(prev.map((c) => c.id))
+        const next = [...prev]
+        for (const item of items) {
+          if (!seen.has(item.id)) next.push(item)
+        }
+        return next
+      })
+      syncInboxAttentionWithUnread([...convoListRef.current, ...items], bid)
+      setInboxHasMore(pool.shown < pool.ranked.length || !pool.exhausted)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not load more threads'
+      setLoadError((prev) => (prev ? `${prev} · ` : '') + msg)
+    } finally {
+      inboxMoreBusyRef.current = false
+      setInboxMoreBusy(false)
+    }
+  }, [supabase, inboxLabelCatalog, syncInboxAttentionWithUnread])
 
   useEffect(() => {
     const bid = profile?.business_id
@@ -5612,7 +5764,9 @@ export default function DashboardPage() {
                       : `${inboxDisplayList.length} thread${inboxDisplayList.length === 1 ? '' : 's'} with this label`
                     : inboxSearchQuery.trim() || inboxUnreadFilterOnly
                       ? `${inboxDisplayList.length} of ${convoListMerged.length} threads`
-                      : `${convoListMerged.length} threads`}
+                      : inboxHasMore
+                        ? `${convoListMerged.length} shown`
+                        : `${convoListMerged.length} threads`}
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -5893,6 +6047,18 @@ export default function DashboardPage() {
                       )
                     })
                     )}
+                    {inboxHasMore && inboxThreadLabelFilterIds.length === 0 ? (
+                      <div className="p-2.5">
+                        <button
+                          type="button"
+                          onClick={() => void loadMoreInboxThreads()}
+                          disabled={inboxMoreBusy}
+                          className="w-full rounded-xl border border-violet-200 bg-violet-50 px-3 py-2.5 text-[13px] font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50"
+                        >
+                          {inboxMoreBusy ? 'Loading more threads…' : 'Load more threads'}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </aside>
 

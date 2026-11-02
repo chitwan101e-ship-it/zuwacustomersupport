@@ -48,11 +48,11 @@ export function rankConversationsByLatestMessage<T extends { id: string; updated
 export async function fetchAllBusinessConversations(
   client: SupabaseClient,
   businessId: string,
-  opts?: { maxRows?: number }
+  opts?: { maxRows?: number; from?: number }
 ): Promise<BusinessConversationRow[]> {
   const maxRows = opts?.maxRows
   const rows: BusinessConversationRow[] = []
-  let from = 0
+  let from = Math.max(0, opts?.from ?? 0)
   while (true) {
     const pageSize =
       maxRows != null ? Math.min(CONVO_LIST_PAGE_SIZE, maxRows - rows.length) : CONVO_LIST_PAGE_SIZE
