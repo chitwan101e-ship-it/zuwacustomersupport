@@ -19,26 +19,31 @@ type BusinessRow = { id: string; name: string; slug: string }
 export function pickPrimaryBusinessFromList(list: BusinessRow[]): { id: string; name: string } | null {
   if (list.length === 0) return null
 
+  const slugOf = (slug: string) => slug.toLowerCase().replace(/_/g, '-')
+  const realJuwa = list.find((b) => slugOf(b.slug) === 'juwa-bros')
+  // The duplicate company has the same display name and no agents. Never pick it when the real one is here.
+  const pool = realJuwa ? list.filter((b) => slugOf(b.slug) !== 'juwabros') : list
+
   const envSlug =
     process.env.PRIMARY_SUPPORT_BUSINESS_SLUG?.trim() ||
     process.env.NEXT_PUBLIC_PRIMARY_SUPPORT_BUSINESS_SLUG?.trim()
   if (envSlug) {
     const normalized = envSlug.toLowerCase().replace(/_/g, '-')
     // Exact slug only. Stripping hyphens made juwa-bros match the empty juwabros company.
-    const fromEnv = list.find((b) => b.slug.toLowerCase().replace(/_/g, '-') === normalized)
+    const fromEnv = pool.find((b) => slugOf(b.slug) === normalized)
     if (fromEnv) return { id: fromEnv.id, name: fromEnv.name }
   }
 
   const slugHints = ['juwa-bros', 'juwabros', 'jbcoms', 'support', 'relay', 'admin', 'help']
   for (const s of slugHints) {
-    const hit = list.find((b) => b.slug.toLowerCase().replace(/_/g, '-') === s)
+    const hit = pool.find((b) => slugOf(b.slug) === s)
     if (hit) return { id: hit.id, name: hit.name }
   }
 
-  const byName = list.find((b) => /juwa|support|helpdesk|help\s*desk|relay\s*support/i.test(b.name))
+  const byName = pool.find((b) => /juwa|support|helpdesk|help\s*desk|relay\s*support/i.test(b.name))
   if (byName) return { id: byName.id, name: byName.name }
 
-  const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name))
+  const sorted = [...pool].sort((a, b) => a.name.localeCompare(b.name))
   return { id: sorted[0].id, name: sorted[0].name }
 }
 

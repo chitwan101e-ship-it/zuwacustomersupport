@@ -353,15 +353,28 @@ function businessListScore(b: BusinessRow, previews: Map<string, ChatPreview>): 
   return score
 }
 
-/** One row per display name — keeps the thread that actually has messages / unread. */
+function businessSlug(slug: string) {
+  return slug.toLowerCase().replace(/_/g, '-')
+}
+
+/** One row per display name. The real Juwa Bros team wins over the empty duplicate. */
 function dedupeBusinessesByName(rows: BusinessRow[], previews: Map<string, ChatPreview>): BusinessRow[] {
   const byName = new Map<string, BusinessRow>()
   for (const b of rows) {
     const key = b.name.trim().toLowerCase()
     const existing = byName.get(key)
-    if (!existing || businessListScore(b, previews) > businessListScore(existing, previews)) {
+    if (!existing) {
       byName.set(key, b)
+      continue
     }
+    const bSlug = businessSlug(b.slug)
+    const existingSlug = businessSlug(existing.slug)
+    if (bSlug === 'juwa-bros' && existingSlug === 'juwabros') {
+      byName.set(key, b)
+      continue
+    }
+    if (existingSlug === 'juwa-bros' && bSlug === 'juwabros') continue
+    if (businessListScore(b, previews) > businessListScore(existing, previews)) byName.set(key, b)
   }
   return Array.from(byName.values())
 }
@@ -1278,7 +1291,15 @@ export default function FeedPage() {
     void openPrimarySupportChat()
   }
 
+  function canonicalSupportBusinessId(businessId: string): string {
+    const chosen = businesses.find((b) => b.id === businessId)
+    if (!chosen || businessSlug(chosen.slug) !== 'juwabros') return businessId
+    const real = businesses.find((b) => businessSlug(b.slug) === 'juwa-bros')
+    return real?.id ?? businessId
+  }
+
   async function openThreadForBusiness(businessId: string) {
+    businessId = canonicalSupportBusinessId(businessId)
     if (!profile || !businessId) return
     const switchingBusiness = supportBizId !== businessId
     customerComposerDirtyRef.current = false
