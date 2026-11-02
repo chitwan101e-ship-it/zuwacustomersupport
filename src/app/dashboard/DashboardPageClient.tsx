@@ -81,8 +81,11 @@ import {
   fetchInboxPreviews,
   fetchInboxPreviewsLegacy,
   fetchInboxUnreadCounts,
+  inboxActivityAt,
+  INBOX_ACTIVITY_CANDIDATE_MAX,
   INBOX_LIST_DEFAULT_MAX,
   INBOX_QUERY_CHUNK,
+  rankConversationsByLatestMessage,
 } from '@/lib/staffInbox'
 import { isAutoApproveSignupsEnabled } from '@/lib/signupApproval'
 import {
@@ -1233,7 +1236,7 @@ export default function DashboardPage() {
       let convoRows: { id: string; customer_id: string; updated_at: string }[] = []
 
       const convoPromise = wantInbox
-        ? fetchAllBusinessConversations(supabase, bid, { maxRows: INBOX_LIST_DEFAULT_MAX })
+        ? fetchAllBusinessConversations(supabase, bid, { maxRows: INBOX_ACTIVITY_CANDIDATE_MAX })
             .then((rows) => ({ rows }))
             .catch((convErr) => {
               const msg = convErr instanceof Error ? convErr.message : 'Failed to load conversations'
@@ -1272,6 +1275,26 @@ export default function DashboardPage() {
       const errs: string[] = []
       if ('error' in convoRes && convoRes.error) errs.push(`conversations: ${convoRes.error}`)
       else if (wantInbox) convoRows = convoRes.rows
+
+      let activityPreviews: Record<string, { body: string; created_at: string }> | null = null
+      if (wantInbox && convoRows.length > 0) {
+        try {
+          activityPreviews = await fetchInboxPreviews(
+            supabase,
+            convoRows.map((c) => c.id)
+          )
+          convoRows = rankConversationsByLatestMessage(
+            convoRows,
+            activityPreviews,
+            INBOX_LIST_DEFAULT_MAX
+          )
+        } catch (previewErr) {
+          const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
+          errs.push(`messages: ${msg}`)
+          convoRows = convoRows.slice(0, INBOX_LIST_DEFAULT_MAX)
+          activityPreviews = null
+        }
+      }
 
       if (pendingRes.error) errs.push(`pending: ${pendingRes.error}`)
       if (reportRes.error) errs.push(`reports: ${reportRes.error.message}`)
@@ -1354,11 +1377,13 @@ export default function DashboardPage() {
         const [profileById, previewByConvo, unreadByConvo, defResult] = await Promise.all([
           loadConvoProfiles(),
           convIds.length > 0
-            ? fetchInboxPreviews(supabase, convIds).catch((previewErr) => {
-                const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
-                setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${msg}`)
-                return {} as Record<string, { body: string; created_at: string }>
-              })
+            ? activityPreviews
+              ? Promise.resolve(activityPreviews)
+              : fetchInboxPreviews(supabase, convIds).catch((previewErr) => {
+                  const msg = previewErr instanceof Error ? previewErr.message : 'messages preview failed'
+                  setLoadError((prev) => (prev ? `${prev} · ` : '') + `messages: ${msg}`)
+                  return {} as Record<string, { body: string; created_at: string }>
+                })
             : Promise.resolve({} as Record<string, { body: string; created_at: string }>),
           convIds.length > 0
             ? fetchInboxUnreadCounts(supabase, convoRows).catch((ue) => {
@@ -1433,7 +1458,7 @@ export default function DashboardPage() {
               customerUsername: pr?.username ?? '…',
               customerAvatar: pr?.avatar_url ?? null,
               preview: pv?.body || 'No messages yet',
-              updated_at: row.updated_at,
+              updated_at: inboxActivityAt(row.updated_at, pv),
               unreadCount: unreadByConvo[row.id] || 0,
               labels: labelsByConvo[row.id] || [],
             }
@@ -2901,7 +2926,7 @@ export default function DashboardPage() {
               customerUsername: pr?.username ?? '…',
               customerAvatar: pr?.avatar_url ?? null,
               preview: (msg?.body ?? '').trim() || 'No messages yet',
-              updated_at: (convo.updated_at as string) || msg?.created_at || new Date().toISOString(),
+              updated_at: msg?.created_at || (convo.updated_at as string) || new Date().toISOString(),
               unreadCount: 0,
               labels,
             })
@@ -3058,7 +3083,7 @@ export default function DashboardPage() {
             customerUsername: pr?.username ?? '…',
             customerAvatar: pr?.avatar_url ?? null,
             preview: pv?.body || 'No messages yet',
-            updated_at: row.updated_at,
+            updated_at: inboxActivityAt(row.updated_at, pv),
             unreadCount: unreadByConvo[row.id] || 0,
             labels: labelsByConvo[row.id] || [],
           }

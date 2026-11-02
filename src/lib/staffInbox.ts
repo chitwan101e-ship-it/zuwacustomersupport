@@ -14,6 +14,36 @@ export type BusinessConversationRow = {
 /** Cap inbox list size on staff dashboard (most recent threads). */
 export const INBOX_LIST_DEFAULT_MAX = 300
 
+/**
+ * Rows read before the cap is applied. A conversation update refreshes updated_at
+ * even when no new message was sent, so the newest stamps are not always the
+ * newest chats. This window is wide enough to see past that and still keep the
+ * visible list at INBOX_LIST_DEFAULT_MAX.
+ */
+export const INBOX_ACTIVITY_CANDIDATE_MAX = 2000
+
+export function inboxActivityAt(
+  updatedAt: string,
+  preview?: { created_at?: string | null } | null
+): string {
+  return preview?.created_at || updatedAt
+}
+
+/** Order by the latest message, then keep the visible cap. */
+export function rankConversationsByLatestMessage<T extends { id: string; updated_at: string }>(
+  rows: T[],
+  previews: Record<string, { created_at?: string | null }>,
+  limit = INBOX_LIST_DEFAULT_MAX
+): T[] {
+  return [...rows]
+    .sort((a, b) =>
+      inboxActivityAt(b.updated_at, previews[b.id]).localeCompare(
+        inboxActivityAt(a.updated_at, previews[a.id])
+      )
+    )
+    .slice(0, limit)
+}
+
 /** Load support threads for a business (paginated, optional cap). */
 export async function fetchAllBusinessConversations(
   client: SupabaseClient,
