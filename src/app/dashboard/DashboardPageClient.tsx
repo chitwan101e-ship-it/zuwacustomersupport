@@ -4344,7 +4344,7 @@ export default function DashboardPage() {
   }, [convoList])
 
   const inboxFilterDropdownLabels = useMemo(() => {
-    const preferred = ['duplicate unread', 'active player', 'priority', 'vip', 'follow up']
+    const preferred = ['active player', 'priority', 'vip', 'follow up']
     return preferred
       .map((name) =>
         inboxLabelCatalog.find((l) => l.name.trim().toLowerCase() === name)
