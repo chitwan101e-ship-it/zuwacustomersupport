@@ -59,7 +59,8 @@ export async function lookupCustomerEmail(
 }
 
 /**
- * Sends the same notification email to many customers (feed post, announcement, alert, update).
+ * Sends the same notification email to many customers (announcement, alert, update).
+ * The subject already includes the title, so the title is not repeated in the body.
  * Failures on individual sends are logged; the batch continues.
  */
 export async function sendBulkCustomerNotificationEmails(
@@ -67,7 +68,6 @@ export async function sendBulkCustomerNotificationEmails(
   opts: {
     userIds: string[]
     subject: string
-    title: string
     body: string
     linkPath: string
     ctaLabel?: string
@@ -87,7 +87,6 @@ export async function sendBulkCustomerNotificationEmails(
   const linkUrl = `${getPublicSiteUrl()}${linkPath}`
   const html = renderCustomerNotificationEmailHtml({
     brandName,
-    title: opts.title,
     body: opts.body,
     ctaLabel,
     linkUrl,

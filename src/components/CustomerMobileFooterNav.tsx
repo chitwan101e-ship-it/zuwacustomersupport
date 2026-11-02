@@ -17,6 +17,8 @@ type Props = {
   onChatClick: () => void
   /** Highlight Chat tab when the messages panel is open (feed only). */
   chatActive?: boolean
+  /** Gold chrome on the customer lobby, matching the lucky spin. */
+  tone?: 'violet' | 'gold'
 }
 
 export function CustomerMobileFooterNav({
@@ -25,6 +27,7 @@ export function CustomerMobileFooterNav({
   isLight = false,
   onChatClick,
   chatActive = false,
+  tone = 'violet',
 }: Props) {
   const pathname = usePathname()
   const router = useRouter()
@@ -87,43 +90,74 @@ export function CustomerMobileFooterNav({
   const alertsActive = pathname.startsWith('/notifications')
   const profileActive = pathname.startsWith('/profile')
 
-  const muted = isLight ? 'text-slate-500' : 'text-[#8892b0]'
-  const accent = isLight ? 'text-violet-600' : 'text-[#8d63ff]'
+  const gold = tone === 'gold' && !isLight
+  const muted = isLight ? 'text-slate-500' : gold ? 'text-[#9a8668]' : 'text-[#8892b0]'
+  const accent = isLight ? 'text-violet-700' : gold ? 'text-[#f8e7b4]' : 'text-[#c4b5fd]'
+  const badgeRing = isLight ? 'ring-white' : gold ? 'ring-[#16111f]' : 'ring-[#090e20]'
+  const activeWash = isLight ? 'bg-violet-100' : gold ? 'bg-[#f0c86a]/20' : 'bg-[#8d63ff]/20'
 
   function goChatFromOtherPage() {
     router.push('/feed?openChat=1')
   }
 
+  function tabClass(active: boolean) {
+    return clsx(
+      'relative flex min-h-12 min-w-0 flex-1 flex-col items-center justify-center gap-1 py-1.5',
+      active ? accent : muted
+    )
+  }
+
+  function iconWell(active: boolean) {
+    return clsx(
+      'relative flex h-7 w-11 items-center justify-center rounded-full transition-colors',
+      active && activeWash
+    )
+  }
+
+  function labelClass() {
+    return 'max-w-full truncate px-0.5 text-[10px] font-semibold leading-none tracking-[0.01em]'
+  }
+
+  function CountBadge({ count }: { count: number }) {
+    if (count <= 0) return null
+    return (
+      <span
+        className={clsx(
+          'absolute -right-2 -top-1 flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-[#ff3b5c] px-1 text-[8px] font-bold leading-none text-white ring-2',
+          badgeRing
+        )}
+      >
+        {count > 99 ? '99+' : count}
+      </span>
+    )
+  }
+
   const navWrap = clsx(
-    'relay-footer-bar fixed bottom-0 left-0 right-0 z-30 flex border-t backdrop-blur-[16px] min-[900px]:hidden',
-    isLight ? 'border-slate-200 bg-white/96' : 'border-white/[0.08] bg-[#090e20]/96'
+    'relay-footer-bar fixed bottom-0 left-0 right-0 z-30 flex border-t px-1 backdrop-blur-xl min-[900px]:hidden',
+    isLight
+      ? 'border-slate-200 bg-white/96'
+      : gold
+        ? 'border-[#e7c373]/40 bg-[#16111f]/95 shadow-[0_-12px_28px_rgba(0,0,0,0.45)]'
+        : 'border-white/[0.08] bg-[#090e20]/96'
   )
 
   return (
     <nav
       className={navWrap}
-      style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 6px)', paddingTop: '6px' }}
+      style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 6px)' }}
       aria-label="Primary"
     >
-      <Link
-        href="/feed"
-        className={clsx(
-          'relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold',
-          feedActive ? accent : muted
-        )}
-      >
-        <Home className="h-[22px] w-[22px]" strokeWidth={2} />
-        Feed
+      <Link href="/feed" className={tabClass(feedActive)} aria-current={feedActive ? 'page' : undefined}>
+        <span className={iconWell(feedActive)}>
+          <Home className="h-[22px] w-[22px]" strokeWidth={feedActive ? 2.4 : 1.75} />
+        </span>
+        <span className={labelClass()}>Feed</span>
       </Link>
-      <Link
-        href="/rules"
-        className={clsx(
-          'relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold',
-          rulesActive ? accent : muted
-        )}
-      >
-        <Scale className="h-[22px] w-[22px]" strokeWidth={2} />
-        Rules
+      <Link href="/rules" className={tabClass(rulesActive)} aria-current={rulesActive ? 'page' : undefined}>
+        <span className={iconWell(rulesActive)}>
+          <Scale className="h-[22px] w-[22px]" strokeWidth={rulesActive ? 2.4 : 1.75} />
+        </span>
+        <span className={labelClass()}>Rules</span>
       </Link>
       <button
         type="button"
@@ -131,53 +165,37 @@ export function CustomerMobileFooterNav({
           if (pathname === '/feed') onChatClick()
           else void goChatFromOtherPage()
         }}
-        className="relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold"
+        className={tabClass(chatActive)}
         aria-label={hasChatUnread ? `Chat, ${chatUnread} unread from team` : 'Chat'}
+        aria-current={chatActive ? 'page' : undefined}
       >
-        <MessageCircle
-          className={clsx(
-            'h-[22px] w-[22px]',
-            hasChatUnread ? 'text-[#ff3b5c]' : chatActive ? accent : muted
-          )}
-          strokeWidth={hasChatUnread ? 2.25 : 2}
-        />
-        {hasChatUnread ? (
-          <span
-            className={clsx(
-              'absolute top-0.5 right-[calc(50%-1.125rem)] h-2 w-2 rounded-full bg-[#ff3b5c] ring-2',
-              isLight ? 'ring-white' : 'ring-[#090e20]'
-            )}
-          />
-        ) : null}
-        <span className={clsx(chatActive ? accent : muted)}>Chat</span>
+        <span className={iconWell(chatActive)}>
+          <MessageCircle className="h-[22px] w-[22px]" strokeWidth={chatActive ? 2.4 : 1.75} />
+          <CountBadge count={chatUnread} />
+        </span>
+        <span className={labelClass()}>Chat</span>
       </button>
       <Link
         href="/notifications"
-        className={clsx(
-          'relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold',
-          alertsActive ? accent : muted
-        )}
+        className={tabClass(alertsActive)}
+        aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
+        aria-current={alertsActive ? 'page' : undefined}
       >
-        <Bell className="h-[22px] w-[22px]" strokeWidth={2} />
-        {unread > 0 ? (
-          <span
-            className={clsx(
-              'absolute top-0.5 right-[calc(50%-1.125rem)] h-2 w-2 rounded-full bg-[#ff3b5c] ring-2',
-              isLight ? 'ring-white' : 'ring-[#090e20]'
-            )}
-          />
-        ) : null}
-        Alerts
+        <span className={iconWell(alertsActive)}>
+          <Bell className="h-[22px] w-[22px]" strokeWidth={alertsActive ? 2.4 : 1.75} />
+          <CountBadge count={unread} />
+        </span>
+        <span className={labelClass()}>Alerts</span>
       </Link>
       <Link
         href="/profile"
-        className={clsx(
-          'flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold',
-          profileActive ? accent : muted
-        )}
+        className={tabClass(profileActive)}
+        aria-current={profileActive ? 'page' : undefined}
       >
-        <User className="h-[22px] w-[22px]" strokeWidth={2} />
-        Profile
+        <span className={iconWell(profileActive)}>
+          <User className="h-[22px] w-[22px]" strokeWidth={profileActive ? 2.4 : 1.75} />
+        </span>
+        <span className={labelClass()}>Profile</span>
       </Link>
     </nav>
   )

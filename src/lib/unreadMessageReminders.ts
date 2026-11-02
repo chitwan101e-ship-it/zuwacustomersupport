@@ -258,7 +258,7 @@ export async function processDueUnreadReminders(
       type: 'support_reply_reminder',
       title: copy.title,
       body: preview.slice(0, 160),
-      link: '/feed',
+      link: '/feed?openChat=1',
       conversation_id: row.conversation_id,
     })
     if (nErr) console.warn('[unread-reminder] notification insert:', nErr.message)

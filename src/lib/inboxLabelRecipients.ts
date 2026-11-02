@@ -101,3 +101,37 @@ export async function getApprovedCustomerIdsForInboxLabelPresets(
   }
   return [...approved]
 }
+
+function isActivePlayerLabel(def: { preset_key: string | null; name: string }): boolean {
+  if (def.preset_key?.trim().toLowerCase() === 'active_player') return true
+  return def.name.trim().toLowerCase() === 'active player'
+}
+
+/** True when staff has the Active player label on any of this customer's threads. */
+export async function customerHasActivePlayerLabel(
+  admin: SupabaseClient,
+  customerId: string
+): Promise<boolean> {
+  const { data: convos, error: convoErr } = await admin
+    .from('conversations')
+    .select('id')
+    .eq('customer_id', customerId)
+  if (convoErr) throw new Error(convoErr.message)
+  const conversationIds = (convos ?? []).map((row) => (row as { id: string }).id)
+  if (conversationIds.length === 0) return false
+
+  const { data: assignments, error: assignErr } = await admin
+    .from('conversation_inbox_labels')
+    .select('label_id')
+    .in('conversation_id', conversationIds)
+  if (assignErr) throw new Error(assignErr.message)
+  const labelIds = [...new Set((assignments ?? []).map((row) => (row as { label_id: string }).label_id))]
+  if (labelIds.length === 0) return false
+
+  const { data: defs, error: defErr } = await admin
+    .from('inbox_label_definitions')
+    .select('preset_key, name')
+    .in('id', labelIds)
+  if (defErr) throw new Error(defErr.message)
+  return (defs ?? []).some((row) => isActivePlayerLabel(row as { preset_key: string | null; name: string }))
+}

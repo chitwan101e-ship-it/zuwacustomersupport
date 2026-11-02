@@ -47,8 +47,8 @@ type QuoteProps = {
 }
 
 const QUOTE_BAR: Record<QuoteVariant, string> = {
-  'customer-mine': 'bg-white/70',
-  'customer-other': 'bg-[#8d63ff]',
+  'customer-mine': 'bg-[#8a5a12]',
+  'customer-other': 'bg-[#e7b84a]',
   'staff-out': 'bg-white/60',
   'staff-in': 'bg-[#6f54ff]',
 }
@@ -61,15 +61,15 @@ const QUOTE_BG: Record<QuoteVariant, string> = {
 }
 
 const QUOTE_AUTHOR: Record<QuoteVariant, string> = {
-  'customer-mine': 'text-white/90',
-  'customer-other': 'text-[#c4b8ff]',
+  'customer-mine': 'text-[#3a2508]',
+  'customer-other': 'text-[#f0c86a]',
   'staff-out': 'text-white/90',
   'staff-in': 'text-slate-700',
 }
 
 const QUOTE_BODY: Record<QuoteVariant, string> = {
-  'customer-mine': 'text-white/75',
-  'customer-other': 'text-[#b8c0dc]',
+  'customer-mine': 'text-[#5c3d12]',
+  'customer-other': 'text-[#e4d8f0]',
   'staff-out': 'text-white/75',
   'staff-in': 'text-slate-600',
 }
@@ -104,26 +104,34 @@ type ReplyBarProps = {
   previewText: string
   onCancel: () => void
   className?: string
+  tone?: 'light' | 'gold'
 }
 
 /** Composer strip while replying to a specific message. */
-export function ReplyTargetBar({ authorLabel, previewText, onCancel, className }: ReplyBarProps) {
+export function ReplyTargetBar({ authorLabel, previewText, onCancel, className, tone = 'light' }: ReplyBarProps) {
+  const gold = tone === 'gold'
   return (
     <div
       className={clsx(
-        'flex items-stretch gap-2 rounded-xl border border-violet-200 bg-violet-50 px-2.5 py-2',
+        'flex items-stretch gap-2 rounded-xl border px-2.5 py-2',
+        gold ? 'border-[#e1b55d]/40 bg-[#2a2110]' : 'border-violet-200 bg-violet-50',
         className
       )}
     >
-      <span className="w-0.5 shrink-0 rounded-full bg-violet-500 self-stretch" aria-hidden />
+      <span className={clsx('w-0.5 shrink-0 rounded-full self-stretch', gold ? 'bg-[#e7b84a]' : 'bg-violet-500')} aria-hidden />
       <div className="min-w-0 flex-1">
-        <p className="text-[11px] font-semibold text-violet-800 truncate">Replying to {authorLabel}</p>
-        <p className="text-[12px] text-slate-600 truncate">{previewText}</p>
+        <p className={clsx('text-[11px] font-semibold truncate', gold ? 'text-[#f0c86a]' : 'text-violet-800')}>
+          Replying to {authorLabel}
+        </p>
+        <p className={clsx('text-[12px] truncate', gold ? 'text-[#e4d8f0]' : 'text-slate-600')}>{previewText}</p>
       </div>
       <button
         type="button"
         onClick={onCancel}
-        className="shrink-0 p-1 rounded-full text-slate-500 hover:text-slate-800 hover:bg-slate-100"
+        className={clsx(
+          'shrink-0 p-1 rounded-full',
+          gold ? 'text-[#cbb89a] hover:text-[#fff6e8] hover:bg-white/10' : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
+        )}
         aria-label="Cancel reply"
       >
         <X className="w-4 h-4" />

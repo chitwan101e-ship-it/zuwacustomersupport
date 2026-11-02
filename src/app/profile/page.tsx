@@ -162,24 +162,28 @@ export default function ProfilePage() {
 
   if (loading || !profile) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#050814]">
-        <Loader2 className="w-8 h-8 animate-spin text-[#8d63ff]" />
+      <div className="relay-customer-dark relay-lobby min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-[#e7b84a]" />
       </div>
     )
   }
+
+  const customerChrome = profile.role === 'customer'
 
   const displayName = `${profile.first_name} ${profile.last_name}`.trim() || profile.username
   const initials =
     (profile.first_name?.[0] || profile.username?.[0] || '?').toUpperCase() +
     (profile.last_name?.[0] || '').toUpperCase()
   const isPlayful = appearance === 'playful'
-  const pageBg = isPlayful
-    ? 'bg-[radial-gradient(circle_at_top,_#2b1d63_0%,_#100e2a_40%,_#070713_100%)] text-white'
-    : 'bg-[radial-gradient(circle_at_top,_#1c2757_0%,_#070a18_42%,_#050814_100%)] text-white'
-  const cardBg = 'bg-[#0b1020]/95 border-white/10'
-  const mutedText = 'text-[#7f8bad]'
-  const titleText = 'text-white font-semibold'
-  const bodyText = 'text-[#c4cbe6]'
+  const pageBg = customerChrome
+    ? 'relay-lobby text-[#fff8ee]'
+    : isPlayful
+      ? 'bg-[radial-gradient(circle_at_top,_#2b1d63_0%,_#100e2a_40%,_#070713_100%)] text-white'
+      : 'bg-[radial-gradient(circle_at_top,_#1c2757_0%,_#070a18_42%,_#050814_100%)] text-white'
+  const cardBg = customerChrome ? 'bg-[#1a1428]/95 border-[#e1b55d]/32' : 'bg-[#0b1020]/95 border-white/10'
+  const mutedText = customerChrome ? 'text-[#cbb89a]' : 'text-[#7f8bad]'
+  const titleText = customerChrome ? 'text-[#fff6e8] font-semibold' : 'text-white font-semibold'
+  const bodyText = customerChrome ? 'text-[#e4d8f0]' : 'text-[#c4cbe6]'
 
   const appearanceOptions = [
     { id: 'dark' as const, label: 'Dark', icon: Moon, hint: 'Default Relay' },
@@ -187,17 +191,17 @@ export default function ProfilePage() {
   ]
 
   return (
-    <div className={`min-h-screen text-[14px] leading-snug ${pageBg}`}>
-      <header className="px-4 pt-3 pb-2 flex items-center gap-2 border-b border-white/[0.08] bg-[#0b1020]/40 backdrop-blur-sm">
+    <div className={`relay-customer-dark min-h-screen text-[14px] leading-snug ${pageBg}`}>
+      <header className={`px-4 pt-3 pb-2 flex items-center gap-2 border-b backdrop-blur-sm ${customerChrome ? 'border-[#edc06e]/25 bg-[#120e1c]/75' : 'border-white/[0.08] bg-[#0b1020]/40'}`}>
         <button
           type="button"
           onClick={() => router.push('/feed')}
           className="p-2 rounded-full hover:bg-white/10"
           aria-label="Back"
         >
-          <ArrowLeft className="w-5 h-5 text-[#b8c0dc]" />
+          <ArrowLeft className={`w-5 h-5 ${customerChrome ? 'text-[#f9d587]' : 'text-[#b8c0dc]'}`} />
         </button>
-        <h1 className="text-lg font-bold tracking-tight text-white">Profile</h1>
+        <h1 className={customerChrome ? 'relay-gold-type text-lg font-semibold tracking-tight' : 'text-lg font-bold tracking-tight text-white'}>Profile</h1>
       </header>
 
       <main
@@ -210,7 +214,7 @@ export default function ProfilePage() {
               <img
                 src={profile.avatar_url}
                 alt={`${displayName} profile`}
-                className="w-16 h-16 rounded-full object-cover border border-white/10 bg-[#11172a]"
+                className={`w-16 h-16 rounded-full object-cover bg-[#11172a] ${customerChrome ? 'border border-[#f0c86a]/55' : 'border border-white/10'}`}
               />
             ) : (
               <div className="w-16 h-16 rounded-full bg-[#d12f2f] text-white text-lg font-bold flex items-center justify-center border border-white/10">
@@ -247,32 +251,44 @@ export default function ProfilePage() {
         </div>
 
         <section className={`mt-5 border rounded-2xl p-4 ${cardBg}`}>
-          <p className={`${mutedText} text-[10px] font-bold uppercase tracking-[0.15em] mb-3`}>Appearance</p>
-          <div className="grid grid-cols-2 gap-2">
-            {appearanceOptions.map(({ id, label, icon: Icon, hint }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setAppearance(id)}
-                className={`rounded-xl border px-2 py-2.5 text-center transition-all ${
-                  appearance === id
-                    ? 'border-[#8d63ff] bg-[#1a2040] text-[#8d63ff]'
-                    : 'border-white/10 bg-[#11172a] text-[#7f8bad] hover:border-white/20'
-                }`}
-              >
-                <Icon className="w-4 h-4 mx-auto mb-1" />
-                <span className="text-[12px] font-semibold">{label}</span>
-                <span className="mt-0.5 block text-[10px] opacity-75 leading-tight">{hint}</span>
-              </button>
-            ))}
-          </div>
-          <p className={`mt-2.5 text-[11px] ${mutedText}`}>Saved on this device and used on the home screen.</p>
+          <p className={`${customerChrome ? 'text-[#e7c373]' : mutedText} text-[10px] font-bold uppercase tracking-[0.16em] mb-3`}>Appearance</p>
+          {customerChrome ? (
+            <div className="rounded-xl border border-[#e7b84a] bg-[#d79c22]/15 px-3 py-2.5 text-center text-[#f0c86a]">
+              <Sparkles className="w-4 h-4 mx-auto mb-1" />
+              <span className="text-[12px] font-semibold">Rewards</span>
+              <span className="mt-0.5 block text-[10px] opacity-75 leading-tight">Gold on plum</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              {appearanceOptions.map(({ id, label, icon: Icon, hint }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setAppearance(id)}
+                  className={`rounded-xl border px-2 py-2.5 text-center transition-all ${
+                    appearance === id
+                      ? 'border-[#8d63ff] bg-[#1a2040] text-[#8d63ff]'
+                      : 'border-white/10 bg-[#11172a] text-[#7f8bad] hover:border-white/20'
+                  }`}
+                >
+                  <Icon className="w-4 h-4 mx-auto mb-1" />
+                  <span className="text-[12px] font-semibold">{label}</span>
+                  <span className="mt-0.5 block text-[10px] opacity-75 leading-tight">{hint}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className={`mt-2.5 text-[11px] ${mutedText}`}>
+            {customerChrome
+              ? 'Home, chat, rules, and notifications use this look.'
+              : 'Saved on this device and used on the home screen.'}
+          </p>
         </section>
 
         <section className={`mt-4 border rounded-2xl p-4 ${cardBg}`}>
-          <p className={`${mutedText} text-[10px] font-bold uppercase tracking-[0.15em] mb-3`}>Account</p>
+          <p className={`${customerChrome ? 'text-[#e7c373]' : mutedText} text-[10px] font-bold uppercase tracking-[0.16em] mb-3`}>Account</p>
           <div className="space-y-2.5 text-[13px]">
-            <div className="flex items-center justify-between border-b border-white/10 pb-2">
+            <div className={`flex items-center justify-between border-b pb-2 ${customerChrome ? 'border-[#e1b55d]/20' : 'border-white/10'}`}>
               <span className={mutedText}>Member since</span>
               <span className={`font-medium ${bodyText}`}>
                 {new Date(profile.created_at).toLocaleDateString(undefined, {
@@ -282,7 +298,7 @@ export default function ProfilePage() {
                 })}
               </span>
             </div>
-            <div className="flex items-center justify-between border-b border-white/10 pb-2">
+            <div className={`flex items-center justify-between border-b pb-2 ${customerChrome ? 'border-[#e1b55d]/20' : 'border-white/10'}`}>
               <span className={mutedText}>Status</span>
               <span className={`font-medium ${bodyText}`}>Approved</span>
             </div>
@@ -296,7 +312,9 @@ export default function ProfilePage() {
         <button
           type="button"
           onClick={() => void signOut()}
-          className="w-full mt-6 py-2.5 rounded-xl text-[13px] font-semibold text-[#7f8bad] hover:text-white hover:bg-white/5 transition-colors"
+          className={`w-full mt-6 py-2.5 rounded-xl text-[13px] font-semibold transition-colors ${
+            customerChrome ? 'text-[#e7c373] hover:text-[#fff6e8] hover:bg-white/5' : 'text-[#7f8bad] hover:text-white hover:bg-white/5'
+          }`}
         >
           Sign out
         </button>
@@ -305,6 +323,7 @@ export default function ProfilePage() {
       {profile.role === 'customer' ? (
         <CustomerMobileFooterNav
           isLight={false}
+          tone="gold"
           onChatClick={() => router.push('/feed?openChat=1')}
         />
       ) : null}

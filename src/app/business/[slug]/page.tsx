@@ -139,26 +139,26 @@ export default function PublicBusinessPage() {
 
   if (!slug) {
     return (
-      <div className="min-h-screen bg-[#050814] text-white flex items-center justify-center">
-        <p className="text-[#7f8bad]">Invalid link.</p>
+      <div className="relay-lobby min-h-screen text-[#fff8ee] flex items-center justify-center">
+        <p className="text-[#cbb89a]">Invalid link.</p>
       </div>
     )
   }
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#050814]">
-        <Loader2 className="w-8 h-8 animate-spin text-[#8d63ff]" />
+      <div className="relay-lobby min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-[#e7b84a]" />
       </div>
     )
   }
 
   if (error || !biz) {
     return (
-      <div className="min-h-screen bg-[#050814] text-white px-4 py-10">
+      <div className="relay-lobby min-h-screen text-[#fff8ee] px-4 py-10">
         <div className="max-w-lg mx-auto text-center">
           <p className="text-[#f87171] mb-4">{error || 'Not found.'}</p>
-          <Link href="/feed" className="text-[#8d63ff] hover:underline">
+          <Link href="/feed" className="text-[#f0c86a] hover:underline">
             Back to feed
           </Link>
         </div>
@@ -167,8 +167,8 @@ export default function PublicBusinessPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#1c2757_0%,_#070a18_42%,_#050814_100%)] text-white">
-      <header className="sticky top-0 z-20 border-b border-white/10 bg-[#0b1020]/90 backdrop-blur-xl">
+    <div className="relay-lobby min-h-screen text-[#fff8ee]">
+      <header className="sticky top-0 z-20 border-b border-[#edc06e]/25 bg-[#120e1c]/85 backdrop-blur-xl">
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
           <button
             type="button"
@@ -176,10 +176,10 @@ export default function PublicBusinessPage() {
             className="p-2 rounded-full hover:bg-white/10"
             aria-label="Back"
           >
-            <ArrowLeft className="w-5 h-5 text-[#b8c0dc]" />
+            <ArrowLeft className="w-5 h-5 text-[#f9d587]" />
           </button>
-          <RelayLogo theme="dark" size="sm" showWordmark={false} />
-          <Link href="/feed" className="ml-auto text-sm font-semibold text-[#8d63ff] hover:underline">
+          <RelayLogo theme="dark" size="sm" accent="gold" showWordmark={false} />
+          <Link href="/feed" className="ml-auto text-sm font-semibold tracking-wide text-[#f0c86a] hover:underline">
             Open app
           </Link>
         </div>
@@ -190,20 +190,20 @@ export default function PublicBusinessPage() {
           <div
             className={clsx(
               'w-20 h-20 rounded-2xl flex items-center justify-center shrink-0 border border-white/10',
-              biz.logo_url ? 'p-0 overflow-hidden bg-black/20' : 'bg-gradient-to-br from-[#7c5af6] to-[#3d5cff]'
+              biz.logo_url ? 'p-0 overflow-hidden bg-black/20' : 'bg-gradient-to-b from-[#fff6d4] to-[#c9922e]'
             )}
           >
             {biz.logo_url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={biz.logo_url} alt="" className="w-full h-full object-cover" />
             ) : (
-              <Building2 className="w-10 h-10 text-white" />
+              <Building2 className="w-10 h-10 text-[#3a2508]" />
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h1 className="text-3xl font-extrabold tracking-tight">{biz.name}</h1>
-            <p className="text-[#8d63ff] text-sm mt-1">@{biz.slug}</p>
-            {biz.description ? <p className="text-[#b8c0dc] mt-3 leading-relaxed">{biz.description}</p> : null}
+            <h1 className="relay-gold-type text-3xl font-extrabold tracking-tight">{biz.name}</h1>
+            <p className="text-[#e7c373] text-sm mt-1 tracking-wide">@{biz.slug}</p>
+            {biz.description ? <p className="text-[#e4d8f0] mt-3 leading-relaxed">{biz.description}</p> : null}
 
             <div className="mt-5 flex flex-wrap gap-2">
               {isCustomer ? (
@@ -214,8 +214,8 @@ export default function PublicBusinessPage() {
                   className={clsx(
                     'inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-colors',
                     following
-                      ? 'bg-white/10 text-white border border-white/20 hover:bg-white/15'
-                      : 'bg-[#8d63ff] text-white hover:bg-[#7a4fe6]'
+                      ? 'bg-white/10 text-[#fff6e8] border border-[#e1b55d]/35 hover:bg-white/15'
+                      : 'bg-gradient-to-b from-[#fff6d4] to-[#c9922e] text-[#3a2508]'
                   )}
                 >
                   {followBusy ? (
@@ -233,7 +233,7 @@ export default function PublicBusinessPage() {
               ) : (
                 <Link
                   href="/signup"
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm bg-[#8d63ff] text-white hover:bg-[#7a4fe6]"
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm bg-gradient-to-b from-[#fff6d4] to-[#c9922e] text-[#3a2508]"
                 >
                   <UserPlus className="w-4 h-4" /> Sign up to follow
                 </Link>
@@ -243,19 +243,19 @@ export default function PublicBusinessPage() {
         </div>
 
         <section className="mt-12">
-          <h2 className="text-lg font-bold text-white mb-4">Announcements</h2>
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#e7c373] mb-4">Announcements</h2>
           {announcements.length === 0 ? (
-            <p className="text-[#7f8bad] text-sm">No posts yet.</p>
+            <p className="text-[#cbb89a] text-sm">No posts yet.</p>
           ) : (
             <ul className="space-y-4">
               {announcements.map((a) => (
                 <li
                   key={a.id}
-                  className="rounded-2xl border border-white/10 bg-[#0e1734]/80 p-4 shadow-[0_20px_55px_-35px_rgba(37,58,134,0.9)]"
+                  className="rounded-2xl border border-[#e1b55d]/32 bg-[#1a1428]/95 p-4"
                 >
-                  <p className="text-xs text-[#7f8bad] mb-2">{timeAgo(a.created_at)}</p>
-                  <p className="font-semibold text-white text-lg">{a.title}</p>
-                  <p className="text-[#d4dbf0] mt-2 whitespace-pre-wrap leading-relaxed">{a.body}</p>
+                  <p className="text-xs text-[#cbb89a] mb-2">{timeAgo(a.created_at)}</p>
+                  <p className="font-semibold text-[#fff6e8] text-lg">{a.title}</p>
+                  <p className="text-[#e4d8f0] mt-2 whitespace-pre-wrap leading-relaxed">{a.body}</p>
                   {a.image_url ? (
                     <div className="mt-3">
                       <FeedPostImage imageUrl={a.image_url} alt="" rounded="xl" />

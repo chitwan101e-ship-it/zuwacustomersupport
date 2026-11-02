@@ -8,16 +8,20 @@
 
 export function renderCustomerNotificationEmailHtml(opts: {
   brandName: string
-  title: string
+  /** Shown as a heading above the body. Omit when the subject already carries this text. */
+  title?: string
   body: string
   ctaLabel: string
   linkUrl: string
 }): string {
   const { brandName, title, body, ctaLabel, linkUrl } = opts
+  const heading = title?.trim()
+    ? `<p style="color: #111; font-size: 16px; font-weight: 600; margin-bottom: 12px;">${escapeHtml(title.trim())}</p>`
+    : ''
   return `
     <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
       <h1 style="font-size: 24px; color: #1a56e8; margin-bottom: 8px;">${escapeHtml(brandName)}</h1>
-      <p style="color: #111; font-size: 16px; font-weight: 600; margin-bottom: 12px;">${escapeHtml(title)}</p>
+      ${heading}
       <p style="color: #444; margin-bottom: 24px; line-height: 1.5; white-space: pre-wrap;">${escapeHtml(body)}</p>
       <p style="margin-bottom: 24px;">
         <a href="${linkUrl}" style="display: inline-block; background: #5b21b6; color: #fff; text-decoration: none; padding: 12px 20px; border-radius: 10px; font-weight: 600;">${escapeHtml(ctaLabel)}</a>

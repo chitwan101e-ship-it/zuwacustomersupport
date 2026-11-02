@@ -18,7 +18,6 @@ export async function POST(req: NextRequest) {
       userIds?: string[]
       labelPresetKeys?: string[]
       subject?: string
-      title?: string
       body?: string
       linkPath?: string
       ctaLabel?: string
@@ -26,16 +25,15 @@ export async function POST(req: NextRequest) {
     }
 
     const subject = typeof body.subject === 'string' ? body.subject.trim() : ''
-    const title = typeof body.title === 'string' ? body.title.trim() : ''
     const messageBody = typeof body.body === 'string' ? body.body.trim() : ''
     const linkPath = typeof body.linkPath === 'string' ? body.linkPath.trim() : ''
     const labelPresetKeys = Array.isArray(body.labelPresetKeys)
       ? body.labelPresetKeys.filter((k) => typeof k === 'string' && k.trim())
       : []
 
-    if (!subject || !title || !messageBody || !linkPath) {
+    if (!subject || !messageBody || !linkPath) {
       return NextResponse.json(
-        { error: 'subject, title, body, and linkPath are required.' },
+        { error: 'subject, body, and linkPath are required.' },
         { status: 400 }
       )
     }
@@ -91,7 +89,6 @@ export async function POST(req: NextRequest) {
     const result = await sendBulkCustomerNotificationEmails(admin, {
       userIds,
       subject,
-      title,
       body: messageBody,
       linkPath,
       ctaLabel: body.ctaLabel,

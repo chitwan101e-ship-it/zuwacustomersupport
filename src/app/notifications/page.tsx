@@ -28,6 +28,28 @@ function timeAgo(iso: string) {
   return new Date(iso).toLocaleDateString()
 }
 
+function notificationKind(type: string): 'Post' | 'Reply' | 'Account' {
+  if (type === 'support_reply' || type === 'support_reply_reminder' || type === 'support_message') return 'Reply'
+  if (type === 'account_approved' || type.includes('account') || type.includes('suspend')) return 'Account'
+  return 'Post'
+}
+
+function notificationDestination(n: NotificationRow): string | null {
+  if (n.type === 'support_reply' || n.type === 'support_reply_reminder' || n.type === 'support_message') {
+    return '/feed?openChat=1'
+  }
+  const link = (n.link || '').trim()
+  if (!link || link === '/notifications' || link.startsWith('/notifications?')) return null
+  return link
+}
+
+function dayBucket(iso: string): 'Today' | 'Earlier' {
+  const created = new Date(iso)
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  return created >= start ? 'Today' : 'Earlier'
+}
+
 export default function NotificationsPage() {
   const router = useRouter()
   const supabase = useMemo(() => createClient(), [])
@@ -36,6 +58,7 @@ export default function NotificationsPage() {
   const [items, setItems] = useState<NotificationRow[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [listRefreshing, setListRefreshing] = useState(false)
+  const [listFilter, setListFilter] = useState<'all' | 'unread'>('all')
   const [portalRole, setPortalRole] = useState<'customer' | 'business' | null>(null)
   const userIdRef = useRef<string | null>(null)
 
@@ -193,6 +216,12 @@ export default function NotificationsPage() {
     }
   }
 
+  async function openNotification(n: NotificationRow) {
+    if (!n.read) await markOne(n.id)
+    const href = notificationDestination(n)
+    if (href) router.push(href)
+  }
+
   async function markOne(id: string) {
     setBusy(id)
     try {
@@ -239,33 +268,46 @@ export default function NotificationsPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#050814]">
-        <Loader2 className="w-8 h-8 animate-spin text-[#8d63ff]" />
+      <div className="relay-customer-dark relay-lobby min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-[#e7b84a]" />
       </div>
     )
   }
 
+  const customerChrome = portalRole !== 'business'
+
   const unreadCount = items.filter((n) => !n.read).length
   const homeHref = portalRole === 'business' ? '/dashboard' : '/feed'
+  const visibleItems = listFilter === 'unread' ? items.filter((n) => !n.read) : items
+  const grouped = (['Today', 'Earlier'] as const)
+    .map((label) => ({
+      label,
+      rows: visibleItems.filter((n) => dayBucket(n.created_at) === label),
+    }))
+    .filter((group) => group.rows.length > 0)
 
   return (
-    <div className="min-h-screen bg-[#050814] pb-28 text-white">
-      <header className="sticky top-0 z-40 bg-[#0b1020]/95 border-b border-white/10 backdrop-blur">
-        <div className="max-w-3xl mx-auto px-3 sm:px-4 h-14 flex items-center gap-3">
+    <div className={`relay-customer-dark min-h-screen pb-28 ${customerChrome ? 'relay-lobby text-[#fff8ee]' : 'bg-[#070b16] text-white'}`}>
+      <header className={`sticky top-0 z-40 border-b ${customerChrome ? 'border-[#edc06e]/25 bg-[#120e1c]/80 backdrop-blur-md' : 'border-white/[0.08] bg-[#070b16]'}`}>
+        <div className="max-w-3xl mx-auto px-3 sm:px-4 h-14 flex items-center gap-2">
           <button
             type="button"
             onClick={() => router.push(homeHref)}
             className="p-2 rounded-full hover:bg-white/10"
             aria-label="Back"
           >
-            <ArrowLeft className="w-5 h-5 text-[#b8c0dc]" />
+            <ArrowLeft className={`w-5 h-5 ${customerChrome ? 'text-[#f9d587]' : 'text-[#b8c0dc]'}`} />
           </button>
-          <Bell className="w-5 h-5 text-[#8d63ff]" />
-          <h1 className="font-semibold text-white">Notifications</h1>
-          <span className="text-xs text-[#7f8bad] ml-1 hidden sm:inline">{unreadCount} unread</span>
+          <h1 className={customerChrome ? 'relay-gold-type text-lg font-semibold tracking-tight' : 'font-semibold text-white'}>Notifications</h1>
+          {unreadCount > 0 ? (
+            <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[#ff3b5c] text-white text-[10px] font-bold flex items-center justify-center">
+              {unreadCount > 99 ? '99+' : unreadCount}
+            </span>
+          ) : null}
           <div className="ml-auto flex items-center gap-1">
             <CustomerRefreshButton
               variant="plain"
+              tone={customerChrome ? 'gold' : 'violet'}
               busy={listRefreshing}
               onRefresh={refreshList}
               aria-label="Refresh notifications"
@@ -274,7 +316,7 @@ export default function NotificationsPage() {
               type="button"
               onClick={() => void markAll()}
               disabled={busy === 'all' || unreadCount === 0}
-              className="text-sm font-medium text-[#8d63ff] disabled:opacity-40 px-2 py-1"
+              className={`text-sm font-medium disabled:opacity-40 px-2 py-1 ${customerChrome ? 'text-[#f0c86a]' : 'text-[#c4b5fd]'}`}
             >
               {busy === 'all' ? 'Marking...' : 'Mark all read'}
             </button>
@@ -283,52 +325,115 @@ export default function NotificationsPage() {
       </header>
 
       <main className="max-w-3xl mx-auto p-4">
-        {items.length === 0 ? (
-          <div className="bg-[#0b1020]/95 rounded-xl border border-white/10 p-10 text-center text-[#8f99b8]">
-            No notifications yet.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {items.map((n) => (
-              <article
-                key={n.id}
-                className={`bg-[#0b1020]/95 rounded-xl border p-4 transition ${
-                  n.read ? 'border-white/10' : 'border-[#8d63ff]/40 shadow-[0_0_0_1px_rgba(141,99,255,0.1)]'
+        <div className="mb-4 flex gap-2">
+          {(['all', 'unread'] as const).map((key) => {
+            const active = listFilter === key
+            const label = key === 'all' ? 'All' : 'Unread'
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setListFilter(key)}
+                className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
+                  active
+                    ? customerChrome
+                      ? 'bg-gradient-to-b from-[#fff6d4] to-[#c9922e] text-[#3a2508]'
+                      : 'bg-[#8d63ff] text-white'
+                    : customerChrome
+                      ? 'bg-white/5 text-[#e4d8f0]'
+                      : 'bg-white/5 text-[#b8c0dc]'
                 }`}
               >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center ${
-                      n.read ? 'bg-white/5' : 'bg-[#8d63ff]/15'
-                    }`}
-                  >
-                    <Bell className={`w-4 h-4 ${n.read ? 'text-[#6f7896]' : 'text-[#8d63ff]'}`} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h2 className="font-semibold text-white truncate">{n.title}</h2>
-                      {!n.read ? <span className="w-2 h-2 rounded-full bg-[#8d63ff]" /> : null}
-                    </div>
-                    <p className="text-sm text-[#b8c0dc] mt-1 whitespace-pre-wrap">{n.body}</p>
-                    <div className="text-xs text-[#7f8bad] mt-2">{timeAgo(n.created_at)}</div>
-                  </div>
-                  {!n.read ? (
-                    <button
-                      type="button"
-                      onClick={() => void markOne(n.id)}
-                      disabled={busy === n.id}
-                      className="text-[#7f8bad] hover:text-[#8d63ff] p-1 rounded"
-                      aria-label="Mark as read"
-                    >
-                      {busy === n.id ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <CheckCheck className="w-4 h-4" />
-                      )}
-                    </button>
-                  ) : null}
+                {label}
+              </button>
+            )
+          })}
+        </div>
+        {items.length === 0 ? (
+          <div className="px-2 py-16 text-center">
+            <p className={`font-semibold ${customerChrome ? 'text-[#fff6e8]' : 'text-white'}`}>You are caught up</p>
+            <p className={`text-sm mt-2 ${customerChrome ? 'text-[#cbb89a]' : 'text-[#9aa3c2]'}`}>When the team posts or replies, it will show up here.</p>
+            <Link
+              href={homeHref}
+              className={`inline-flex mt-4 rounded-full px-4 py-2 text-sm font-semibold ${
+                customerChrome
+                  ? 'bg-gradient-to-b from-[#fff6d4] to-[#c9922e] text-[#3a2508]'
+                  : 'bg-[#8d63ff] text-white'
+              }`}
+            >
+              Back to home
+            </Link>
+          </div>
+        ) : visibleItems.length === 0 ? (
+          <div className="px-2 py-16 text-center">
+            <p className={`font-semibold ${customerChrome ? 'text-[#fff6e8]' : 'text-white'}`}>No unread notifications</p>
+            <button
+              type="button"
+              onClick={() => setListFilter('all')}
+              className={`mt-4 text-sm font-semibold ${customerChrome ? 'text-[#f0c86a]' : 'text-[#c4b5fd]'}`}
+            >
+              Show all
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {grouped.map((group) => (
+              <section key={group.label}>
+                <h2 className={`px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] ${customerChrome ? 'text-[#e7c373]' : 'text-[#8f9ab8]'}`}>
+                  {group.label}
+                </h2>
+                <div className="divide-y divide-white/[0.08]">
+                  {group.rows.map((n) => {
+                    const kind = notificationKind(n.type)
+                    return (
+                      <div key={n.id} className="flex items-start gap-3 py-3">
+                        <button
+                          type="button"
+                          onClick={() => void openNotification(n)}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[11px] font-semibold uppercase tracking-wide ${customerChrome ? 'text-[#f0c86a]' : 'text-[#c4b5fd]'}`}>
+                              {kind}
+                            </span>
+                            {!n.read ? <span className={`w-1.5 h-1.5 rounded-full ${customerChrome ? 'bg-[#e7b84a]' : 'bg-[#8d63ff]'}`} /> : null}
+                            <span className={`ml-auto text-xs ${customerChrome ? 'text-[#cbb89a]' : 'text-[#7f8bad]'}`}>{timeAgo(n.created_at)}</span>
+                          </div>
+                          <h3 className={`mt-1 ${
+                            n.read
+                              ? customerChrome
+                                ? 'font-medium text-[#e4d8f0]'
+                                : 'font-medium text-[#d5dbed]'
+                              : customerChrome
+                                ? 'font-semibold text-[#fff6e8]'
+                                : 'font-semibold text-white'
+                          }`}>
+                            {n.title}
+                          </h3>
+                          {n.body ? (
+                            <p className={`text-sm mt-0.5 line-clamp-2 whitespace-pre-wrap ${customerChrome ? 'text-[#cbb89a]' : 'text-[#9aa3c2]'}`}>{n.body}</p>
+                          ) : null}
+                        </button>
+                        {!n.read ? (
+                          <button
+                            type="button"
+                            onClick={() => void markOne(n.id)}
+                            disabled={busy === n.id}
+                            className={`p-1 rounded ${customerChrome ? 'text-[#cbb89a] hover:text-[#f0c86a]' : 'text-[#7f8bad] hover:text-[#c4b5fd]'}`}
+                            aria-label="Mark as read"
+                          >
+                            {busy === n.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <CheckCheck className="w-4 h-4" />
+                            )}
+                          </button>
+                        ) : null}
+                      </div>
+                    )
+                  })}
                 </div>
-              </article>
+              </section>
             ))}
           </div>
         )}
@@ -338,6 +443,7 @@ export default function NotificationsPage() {
         <CustomerMobileFooterNav
           unreadNotifications={unreadCount}
           isLight={false}
+          tone="gold"
           onChatClick={() => router.push('/feed?openChat=1')}
         />
       ) : (
@@ -349,24 +455,24 @@ export default function NotificationsPage() {
           <Link
             href={homeHref}
             prefetch={false}
-            className="relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold text-[#8892b0]"
+            className="relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-center text-[9px] font-semibold leading-tight text-[#8892b0]"
           >
             <Home className="w-[22px] h-[22px]" strokeWidth={2} />
             Home
           </Link>
           <Link
             href="/notifications"
-            className="relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold text-[#8d63ff]"
+            className="relative flex flex-1 flex-col items-center gap-0.5 py-1.5 text-center text-[9px] font-semibold leading-tight text-[#8d63ff]"
           >
             <Bell className="w-[22px] h-[22px]" strokeWidth={2} />
             {unreadCount > 0 ? (
               <span className="absolute top-0.5 right-[calc(50%-1.125rem)] h-2 w-2 rounded-full bg-[#ff3b5c] ring-2 ring-[#090e20]" />
             ) : null}
-            Alerts
+            Notifications
           </Link>
           <Link
             href="/profile"
-            className="flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10px] font-semibold text-[#8892b0]"
+            className="flex flex-1 flex-col items-center gap-0.5 py-1.5 text-center text-[9px] font-semibold leading-tight text-[#8892b0]"
           >
             <User className="w-[22px] h-[22px]" strokeWidth={2} />
             Profile

@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
       type: 'support_reply',
       title: 'New reply from the team',
       body: preview,
-      link: '/feed',
+      link: '/feed?openChat=1',
       conversation_id: convo.id,
     })
 

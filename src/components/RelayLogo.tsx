@@ -4,6 +4,8 @@ type RelayLogoProps = {
   theme?: 'dark' | 'light'
   size?: 'sm' | 'md' | 'lg'
   showWordmark?: boolean
+  /** Gold wordmark and mark, matching the lucky-spin lobby. */
+  accent?: 'brand' | 'gold'
   className?: string
 }
 
@@ -25,26 +27,38 @@ const sizeMap = {
   },
 }
 
-export default function RelayLogo({ theme = 'dark', size = 'md', showWordmark = true, className }: RelayLogoProps) {
+export default function RelayLogo({
+  theme = 'dark',
+  size = 'md',
+  showWordmark = true,
+  accent = 'brand',
+  className,
+}: RelayLogoProps) {
   const s = sizeMap[size]
   const isLight = theme === 'light'
+  const gold = accent === 'gold' && !isLight
 
   return (
     <div className={clsx('inline-flex items-center gap-3', className)}>
       <div
         className={clsx(
-          'relative flex items-center justify-center shadow-[0_16px_35px_-20px_rgba(95,99,255,0.9)]',
+          'relative flex items-center justify-center',
+          gold
+            ? 'shadow-[0_16px_35px_-18px_rgba(201,146,46,0.85)]'
+            : 'shadow-[0_16px_35px_-20px_rgba(95,99,255,0.9)]',
           s.wrap
         )}
         style={{
-          background: isLight
-            ? 'linear-gradient(140deg, #7e78ff 0%, #5c8cff 100%)'
-            : 'linear-gradient(140deg, #8d63ff 0%, #4c78ff 100%)',
+          background: gold
+            ? 'linear-gradient(145deg, #fff6d4 0%, #e7b84a 46%, #a87422 100%)'
+            : isLight
+              ? 'linear-gradient(140deg, #7e78ff 0%, #5c8cff 100%)'
+              : 'linear-gradient(140deg, #8d63ff 0%, #4c78ff 100%)',
         }}
       >
         <svg
           viewBox="0 0 24 24"
-          className={clsx(s.wave, 'text-white')}
+          className={clsx(s.wave, gold ? 'text-[#3a2508]' : 'text-white')}
           fill="none"
           xmlns="http://www.w3.org/2000/svg"
           aria-hidden
@@ -75,9 +89,9 @@ export default function RelayLogo({ theme = 'dark', size = 'md', showWordmark = 
       {showWordmark ? (
         <span
           className={clsx(
-            'relay-wordmark font-extrabold tracking-tight leading-none',
+            'relay-wordmark font-extrabold leading-none',
             s.word,
-            isLight ? 'text-slate-900' : 'text-white'
+            gold ? 'relay-gold-type inline-block tracking-[0.04em]' : isLight ? 'tracking-tight text-slate-900' : 'tracking-tight text-white'
           )}
         >
           Relay

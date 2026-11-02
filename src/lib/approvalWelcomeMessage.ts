@@ -151,7 +151,7 @@ export async function sendApprovalWelcomeMessage(
       type: 'support_reply',
       title: 'New reply from the team',
       body: preview,
-      link: '/feed',
+      link: '/feed?openChat=1',
       conversation_id: conversationId,
     })
     if (nErr) console.error('[approval-welcome] customer notification:', nErr.message)

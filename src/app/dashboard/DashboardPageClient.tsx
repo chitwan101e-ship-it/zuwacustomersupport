@@ -66,6 +66,8 @@ import {
 import { FeedPostImage } from '@/components/FeedPostImage'
 import { ExpandablePostText } from '@/components/ExpandablePostText'
 import { LinkifiedText } from '@/components/LinkifiedText'
+import { SpinReceiptCard } from '@/components/SpinReceiptCard'
+import { parseSpinReceipt } from '@/lib/luckySpin'
 import { DesktopNotificationPrompt } from '@/components/DesktopNotificationPrompt'
 import { useDesktopMessageNotifications } from '@/hooks/useDesktopMessageNotifications'
 import {
@@ -73,6 +75,7 @@ import {
   listBusinessMemberProfiles,
   type CustomerProfileSummary,
 } from '@/lib/resolveCustomerRecipient'
+import { notifyApprovedCustomersOfAnnouncement } from '@/lib/notifyAnnouncementCustomers'
 import {
   fetchAllBusinessConversations,
   fetchInboxPreviews,
@@ -934,6 +937,7 @@ export default function DashboardPage() {
   const [postTitle, setPostTitle] = useState('')
   const [postBody, setPostBody] = useState('')
   const [postBusy, setPostBusy] = useState(false)
+  const [postNotice, setPostNotice] = useState<{ tone: 'ok' | 'warn'; text: string } | null>(null)
   const [postImage, setPostImage] = useState<{ file: File; previewUrl: string } | null>(null)
   const postFileInputRef = useRef<HTMLInputElement>(null)
   const replyImageInputRef = useRef<HTMLInputElement>(null)
@@ -1534,8 +1538,11 @@ export default function DashboardPage() {
     })
   }, [])
 
+  const myAnnouncementsLoadGen = useRef(0)
+
   const loadMyAnnouncements = useCallback(
     async (businessId: string) => {
+      const gen = ++myAnnouncementsLoadGen.current
       setMyAnnouncementsLoading(true)
       try {
         const { data: ann, error } = await supabase
@@ -1547,11 +1554,12 @@ export default function DashboardPage() {
           .limit(50)
 
         if (error) throw error
+        if (gen !== myAnnouncementsLoadGen.current) return
         const list = (ann || []) as OwnAnnouncementRow[]
         setMyAnnouncements(list)
         const ids = list.map((a) => a.id)
         if (ids.length === 0) {
-          setMyAnnouncementsMeta({})
+          if (gen === myAnnouncementsLoadGen.current) setMyAnnouncementsMeta({})
           return
         }
 
@@ -1714,14 +1722,16 @@ export default function DashboardPage() {
           meta[id].commentPreviews = meta[id].commentPreviews.slice(0, 3)
           meta[id].commentDetails.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))
         }
+        if (gen !== myAnnouncementsLoadGen.current) return
         setMyAnnouncementsMeta(meta)
       } catch (e) {
+        if (gen !== myAnnouncementsLoadGen.current) return
         const err = e as { message?: string }
         console.warn('[loadMyAnnouncements]', err?.message || e)
         setMyAnnouncements([])
         setMyAnnouncementsMeta({})
       } finally {
-        setMyAnnouncementsLoading(false)
+        if (gen === myAnnouncementsLoadGen.current) setMyAnnouncementsLoading(false)
       }
     },
     [supabase]
@@ -3731,7 +3741,7 @@ export default function DashboardPage() {
         type: 'support_reply',
         title: 'New reply from the team',
         body: preview,
-        link: '/feed',
+        link: '/feed?openChat=1',
         conversation_id: conversationId,
       })
       if (nErr) console.error('fallback customer notification insert:', nErr)
@@ -3951,7 +3961,6 @@ export default function DashboardPage() {
     userIds?: string[]
     labelPresetKeys?: string[]
     subject: string
-    title: string
     body: string
     linkPath: string
     ctaLabel?: string
@@ -3989,8 +3998,9 @@ export default function DashboardPage() {
     if (!rawTitle && !rawBody && !postImage) return
     const title = rawTitle || (rawBody ? rawBody.slice(0, 60) : 'Photo update')
     const body = rawBody || (rawTitle ? '' : 'Shared a photo.')
+    const businessId = profile.business_id
+    setPostNotice(null)
     setPostBusy(true)
-    let notified = 0
     try {
       let imageUrl: string | null = null
       if (postImage) {
@@ -4010,59 +4020,77 @@ export default function DashboardPage() {
       const { data: inserted, error: insErr } = await supabase
         .from('announcements')
         .insert({
-          business_id: profile.business_id,
+          business_id: businessId,
           author_id: profile.id,
           title,
           body,
           image_url: imageUrl,
           pinned: false,
         })
-        .select('id')
+        .select('id, created_at')
         .single()
 
       if (insErr) throw insErr
-      const announcementId = (inserted as { id: string }).id
+      const insertedRow = inserted as { id: string; created_at?: string }
+      const announcementId = insertedRow.id
+      const createdAt = insertedRow.created_at || new Date().toISOString()
 
-      const approvedIds = profile.business_id
-        ? await listBusinessApprovedCustomerIds(supabase, profile.business_id)
-        : []
-      let notificationsOk = true
-      notified = approvedIds.length
-      const preview = body.length > 120 ? `${body.slice(0, 117)}…` : body
-      const rows = approvedIds.map((user_id) => ({
-        user_id,
-        business_id: profile.business_id,
-        type: 'announcement',
-        title: `New post: ${title}`,
-        body: preview,
-        link: `/feed?post=${announcementId}`,
-      }))
-      const chunk = 150
-      for (let i = 0; i < rows.length; i += chunk) {
-        const { error: nErr } = await supabase.from('notifications').insert(rows.slice(i, i + chunk))
-        if (nErr) {
-          console.error(nErr)
-          notificationsOk = false
-          break
-        }
-      }
-
+      // The row is already on the feed. Customer notifications used to run here and
+      // held this button on "Publishing…" until every insert finished.
+      setMyAnnouncements((prev) => [
+        {
+          id: announcementId,
+          title,
+          body,
+          image_url: imageUrl,
+          created_at: createdAt,
+          hidden_at: null,
+        },
+        ...prev.filter((a) => a.id !== announcementId),
+      ])
       setPostTitle('')
       setPostBody('')
       clearPostImage()
-      await loadMyAnnouncements(profile.business_id)
+      setPostNotice({
+        tone: 'ok',
+        text: 'Posted. Customers are being notified in the background.',
+      })
 
-      if (!notificationsOk) {
-        alert(
-          'Announcement published on the feed. In-app notifications could not all be sent — check the console or Supabase notifications policies.'
-        )
-      } else if (notified > 0) {
-        alert(
-          `Announcement posted. ${notified} approved customer(s) got an in-app notification. Use Notify to send emails manually.`
-        )
-      } else {
-        alert('Announcement posted. No approved customers to notify yet.')
-      }
+      const notifyPayload = { businessId, announcementId, title, body }
+      void (async () => {
+        let queued = false
+        try {
+          const res = await fetch('/api/staff/notify-announcement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ announcementId }),
+            keepalive: true,
+          })
+          queued = res.ok
+          if (!res.ok) {
+            const j = (await res.json().catch(() => ({}))) as { error?: string }
+            console.error('[notify-announcement]', j.error || res.status)
+          }
+        } catch (e) {
+          console.error('[notify-announcement]', e)
+        }
+        if (queued) return
+        const result = await notifyApprovedCustomersOfAnnouncement(supabase, {
+          ...notifyPayload,
+          skipRpc: true,
+        }).catch((e) => {
+          console.error('[notify-announcement] fallback', e)
+          return { notified: 0, ok: false as const }
+        })
+        if (!result.ok) {
+          setPostNotice({
+            tone: 'warn',
+            text: 'Posted on the feed. In-app notifications could not all be sent.',
+          })
+        }
+      })()
+
+      void loadMyAnnouncements(businessId)
     } catch (e) {
       console.error(e)
       alert(
@@ -4214,7 +4242,6 @@ export default function DashboardPage() {
       const emailResult = await sendBulkNotificationEmails({
         userIds: approvedIds,
         subject: `${notifySubjectPrefix}: ${title}`,
-        title,
         body,
         linkPath: '/notifications',
         ctaLabel: 'View notification',
@@ -5020,6 +5047,13 @@ export default function DashboardPage() {
               >
                 {postBusy ? 'Publishing…' : 'Publish to feed & notify customers'}
               </button>
+              {postNotice ? (
+                <p
+                  className={`text-[12px] px-1 ${postNotice.tone === 'warn' ? 'text-amber-700' : 'text-emerald-700'}`}
+                >
+                  {postNotice.text}
+                </p>
+              ) : null}
             </div>
 
             <div>
@@ -6078,6 +6112,9 @@ export default function DashboardPage() {
                               ? formatTeamSenderLine(oneEmbed(m.profiles))
                               : null
                             const showText = Boolean(m.body?.trim()) && m.body !== '📷'
+                            const receipt = parseSpinReceipt(m.body)
+                            const officialReceipt = isFromTeam && receipt
+                            const pastedReceipt = !isFromTeam && m.body.trimStart().startsWith('Relay system receipt')
                             const showSeen =
                               m.read === true &&
                               m.read_at &&
@@ -6118,7 +6155,7 @@ export default function DashboardPage() {
                                   data-message-id={m.id}
                                   className={`flex flex-col w-full min-w-0 ${isFromTeam ? 'items-end' : 'items-start'}`}
                                 >
-                                {teamLine ? (
+                                {teamLine && !officialReceipt ? (
                                   <p
                                     className="text-[10px] text-[#7d86a8] px-1 pb-0.5 font-medium truncate max-w-full text-right"
                                     title={teamLine}
@@ -6126,6 +6163,11 @@ export default function DashboardPage() {
                                     {teamLine}
                                   </p>
                                 ) : null}
+                                {officialReceipt && receipt ? (
+                                  <div className="flex w-full justify-end">
+                                    <SpinReceiptCard receipt={receipt} tone="staff" />
+                                  </div>
+                                ) : (
                                 <div className={`flex w-full min-w-0 ${isFromTeam ? 'justify-end' : 'justify-start'}`}>
                                   <div
                                     className={`w-fit max-w-[min(85%,24rem)] shrink-0 rounded-2xl text-sm overflow-hidden ${
@@ -6134,6 +6176,11 @@ export default function DashboardPage() {
                                         : 'bg-slate-100 border border-slate-200 text-slate-800'
                                     }`}
                                   >
+                                    {pastedReceipt ? (
+                                      <p className="px-3 pt-2 text-[11px] font-semibold text-[#9a3412]">
+                                        Typed by the customer. Not a Relay receipt.
+                                      </p>
+                                    ) : null}
                                     {replyParent ? (
                                       <div className={showText || m.image_url ? 'px-2 pt-2' : 'p-2'}>
                                         <MessageReplyQuote
@@ -6173,6 +6220,7 @@ export default function DashboardPage() {
                                     ) : null}
                                   </div>
                                 </div>
+                                )}
                                 <div
                                   className={`mt-1 flex max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] ${
                                     isFromTeam ? 'justify-end' : 'justify-start'
@@ -6964,8 +7012,10 @@ export default function DashboardPage() {
         <StaffTabPanel tab="notify" activeTab={activeTab} mountedTabs={mountedTabs} className="space-y-3 max-w-3xl" render={() => (
           <>
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
-              Sends an <strong className="text-[#c4cbe6]">in-app notification</strong> and <strong className="text-[#c4cbe6]">email</strong> to each recipient (bell / Notifications screen).{' '}
-              This is <strong className="text-[#c4cbe6]">not</strong> SMS, email, or a DM in their support thread — only the notifications list.
+              Sends an <strong className="text-[#c4cbe6]">in-app notification</strong> and an <strong className="text-[#c4cbe6]">email</strong>.{' '}
+              <strong className="text-[#c4cbe6]">Title</strong> is the email subject and the in-app heading.{' '}
+              <strong className="text-[#c4cbe6]">Message</strong> is the only text inside the email.{' '}
+              This is not a text message or a DM in their support thread.
             </p>
             <p className="text-[12px] text-[#8892b0] leading-relaxed">
               <strong className="text-[#c4cbe6]">All</strong>: anyone who has messaged your business or follows you.{' '}

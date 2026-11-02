@@ -62,7 +62,7 @@ export function ExpandablePostText({
           onClick={() => setExpanded((v) => !v)}
           className={clsx(
             'mt-1 text-[15px] font-semibold hover:underline',
-            isLight ? 'text-slate-600' : 'text-[#9ea8cc]'
+            isLight ? 'text-slate-600' : 'text-[#e7c373]'
           )}
         >
           {expanded ? 'See less' : 'See more'}

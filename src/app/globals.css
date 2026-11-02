@@ -167,6 +167,126 @@ textarea {
   height: 0;
 }
 
+/* Customer pages are dark. The default Windows bar is a light track, so theme
+   both the page scrollbar and any inner list (feed, notifications, chat). */
+html:has(.relay-customer-dark) {
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(141, 99, 255, 0.55) #070b16;
+}
+
+html:has(.relay-customer-dark)::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html:has(.relay-customer-dark)::-webkit-scrollbar-track {
+  background: #070b16;
+}
+
+html:has(.relay-customer-dark)::-webkit-scrollbar-thumb {
+  background: rgba(141, 99, 255, 0.45);
+  border: 2px solid #070b16;
+  border-radius: 999px;
+}
+
+html:has(.relay-customer-dark)::-webkit-scrollbar-thumb:hover {
+  background: rgba(196, 181, 253, 0.75);
+}
+
+html:has(.relay-customer-dark)::-webkit-scrollbar-button,
+html:has(.relay-customer-dark)::-webkit-scrollbar-corner {
+  display: none;
+  width: 0;
+  height: 0;
+  background: #070b16;
+}
+
+.relay-customer-dark,
+.relay-customer-dark * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(141, 99, 255, 0.55) transparent;
+}
+
+.relay-customer-dark::-webkit-scrollbar,
+.relay-customer-dark *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.relay-customer-dark::-webkit-scrollbar-track,
+.relay-customer-dark *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.relay-customer-dark::-webkit-scrollbar-thumb,
+.relay-customer-dark *::-webkit-scrollbar-thumb {
+  background: rgba(141, 99, 255, 0.45);
+  border-radius: 999px;
+}
+
+.relay-customer-dark::-webkit-scrollbar-thumb:hover,
+.relay-customer-dark *::-webkit-scrollbar-thumb:hover {
+  background: rgba(196, 181, 253, 0.75);
+}
+
+.relay-customer-dark::-webkit-scrollbar-button,
+.relay-customer-dark *::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* Customer lobby — same plum field and gold type as the lucky spin card. */
+.relay-lobby {
+  background:
+    radial-gradient(ellipse at 88% -8%, rgba(120, 32, 96, 0.5), transparent 46%),
+    radial-gradient(ellipse at -8% 108%, rgba(48, 36, 110, 0.62), transparent 50%),
+    #120e1c;
+  color: #fff8ee;
+}
+
+html:has(.relay-lobby) {
+  scrollbar-color: rgba(231, 184, 74, 0.55) #120e1c;
+}
+
+html:has(.relay-lobby)::-webkit-scrollbar-track,
+html:has(.relay-lobby)::-webkit-scrollbar-button,
+html:has(.relay-lobby)::-webkit-scrollbar-corner {
+  background: #120e1c;
+}
+
+html:has(.relay-lobby)::-webkit-scrollbar-thumb {
+  background: rgba(231, 184, 74, 0.5);
+  border-color: #120e1c;
+}
+
+html:has(.relay-lobby)::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 223, 160, 0.75);
+}
+
+.relay-lobby,
+.relay-lobby * {
+  scrollbar-color: rgba(231, 184, 74, 0.5) transparent;
+}
+
+.relay-lobby::-webkit-scrollbar-thumb,
+.relay-lobby *::-webkit-scrollbar-thumb {
+  background: rgba(231, 184, 74, 0.45);
+}
+
+.relay-lobby::-webkit-scrollbar-thumb:hover,
+.relay-lobby *::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 223, 160, 0.75);
+}
+
+.relay-gold-type {
+  background-image: linear-gradient(180deg, #fff6d4 0%, #f0c86a 52%, #c9922e 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
 .relay-scrollbar-light {
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 transparent;
@@ -223,4 +343,46 @@ textarea {
   display: none;
   width: 0;
   height: 0;
+}
+
+@keyframes relay-spin-hub {
+  0% {
+    box-shadow: 0 0 0 0 rgba(249, 213, 135, 0.55), 0 8px 22px rgba(0, 0, 0, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(249, 213, 135, 0), 0 8px 22px rgba(0, 0, 0, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(249, 213, 135, 0), 0 8px 22px rgba(0, 0, 0, 0.45);
+  }
+}
+
+.relay-spin-hub {
+  animation: relay-spin-hub 1.7s ease-out infinite;
+}
+
+@keyframes relay-spin-launcher {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.relay-spin-launcher {
+  animation: relay-spin-launcher 9s linear infinite;
+}
+
+@keyframes relay-spin-bulb {
+  0%,
+  100% {
+    opacity: 0.28;
+    box-shadow: none;
+  }
+  45% {
+    opacity: 1;
+    box-shadow: 0 0 6px #ffe08a;
+  }
+}
+
+.relay-spin-bulb {
+  animation: relay-spin-bulb 1.5s ease-in-out infinite;
 }

@@ -9,7 +9,7 @@ import { CustomerMobileFooterNav } from '@/components/CustomerMobileFooterNav'
 const DOWNLOAD_GUIDE_URL = 'https://www.juwa777.com/blog-download-juwa-777'
 
 const downloadGuideLinkClass =
-  'font-semibold text-[#8d63ff] underline decoration-[#8d63ff]/50 underline-offset-2 hover:text-[#b8a6ff]'
+  'font-semibold text-[#f0c86a] underline decoration-[#e7b84a]/50 underline-offset-2 hover:text-[#fff1c2]'
 
 function DownloadGuideLink() {
   return (
@@ -72,100 +72,107 @@ export default function RulesPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#050814]">
-        <Loader2 className="h-8 w-8 animate-spin text-[#8d63ff]" />
+      <div className="relay-customer-dark relay-lobby min-h-screen flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-[#e7b84a]" />
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(ellipse_at_top_left,_#0f1840_0%,_#070a18_45%,_#050814_100%)] text-[14px] leading-snug text-white">
-      <header className="flex items-center gap-2 border-b border-white/[0.08] bg-[#0b1020]/40 px-4 pb-2 pt-3 backdrop-blur-sm">
+    <div className="relay-customer-dark relay-lobby min-h-screen text-[14px] leading-snug text-[#fff8ee]">
+      <header className="flex items-center gap-2 border-b border-[#edc06e]/25 bg-[#120e1c]/75 px-4 pb-2 pt-3 backdrop-blur-sm">
         <button
           type="button"
           onClick={() => router.push('/feed')}
           className="rounded-full p-2 hover:bg-white/10"
           aria-label="Back"
         >
-          <ArrowLeft className="h-5 w-5 text-[#b8c0dc]" />
+          <ArrowLeft className="h-5 w-5 text-[#f9d587]" />
         </button>
-        <h1 className="text-lg font-bold tracking-tight text-white">Program rules</h1>
+        <h1 className="relay-gold-type text-lg font-semibold tracking-tight">Program rules</h1>
       </header>
 
       <main className="mx-auto max-w-lg px-4 pb-28 pt-5">
-        <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#8892b0]">Summary</p>
-        <ul className="mt-3 space-y-3 text-[13px] leading-relaxed text-[#c4cbe6]">
+        <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#e7c373]">Summary</p>
+        <ul className="mt-3 space-y-3 text-[13px] leading-relaxed text-[#e4d8f0]">
           <li>
-            <span className="font-semibold text-white">Minimum deposit:</span> $10.
+            <span className="font-semibold text-[#fff6e8]">Minimum deposit:</span> $10.
           </li>
           <li>
-            <span className="font-semibold text-white">Minimum withdrawal:</span> $40.
+            <span className="font-semibold text-[#fff6e8]">Minimum withdrawal:</span> $40.
           </li>
           <li>
-            <span className="font-semibold text-white">Account maximum:</span> $2,000.
+            <span className="font-semibold text-[#fff6e8]">Account maximum:</span> $2,000.
           </li>
           <li>
-            <span className="font-semibold text-white">Daily limit:</span> $500.
+            <span className="font-semibold text-[#fff6e8]">Daily limit:</span> $500.
           </li>
           <li>
-            <span className="font-semibold text-white">Referral bonus:</span> 100%.
+            <span className="font-semibold text-[#fff6e8]">Referral bonus:</span> 100%.
           </li>
         </ul>
 
-        <p className="mt-8 text-[10px] font-bold uppercase tracking-[0.16em] text-[#8892b0]">Promotions</p>
-        <div className="mt-3 rounded-2xl border border-[#8d63ff]/25 bg-[#8d63ff]/10 p-4">
-          <h2 className="text-[15px] font-bold text-white">FREE Play promo</h2>
-          <p className="mt-2 text-[13px] leading-relaxed text-[#c4cbe6]">
-            Announced every <span className="font-semibold text-white">Thursday</span> on Relay — check your feed and
-            messages for the latest details.
+        <p className="mt-8 text-[10px] font-bold uppercase tracking-[0.16em] text-[#e7c373]">Promotions</p>
+        <div className="mt-3 rounded-2xl border border-[#e1b55d]/35 bg-[#1a1428]/95 p-4">
+          <h2 className="text-[15px] font-bold text-[#fff6e8]">Free spin every 48 hours</h2>
+          <p className="mt-2 text-[13px] leading-relaxed text-[#e4d8f0]">
+            The free spin is reserved for <span className="font-semibold text-[#fff6e8]">active players</span>. An
+            active player is someone who has made a deposit and has played with us before. Please contact your agent if
+            you would like to become an active player, or if you have already done so. One free spin every 48 hours.
+            After you spin, your next free spin opens 48 hours later. Credits are awarded in whole credits.
           </p>
-          <p className="mt-3 text-[12px] font-semibold uppercase tracking-wide text-[#aeb7d6]">Rules</p>
-          <ul className="mt-2 space-y-2 text-[13px] leading-relaxed text-[#c4cbe6] list-disc pl-5">
+          <p className="mt-3 text-[12px] font-semibold uppercase tracking-wide text-[#e7c373]">Rules</p>
+          <ul className="mt-2 space-y-2 text-[13px] leading-relaxed text-[#e4d8f0] list-disc pl-5">
             <li>
-              Open to players who have{' '}
-              <span className="font-semibold text-white">played on the platform before</span> (not first-time accounts
-              only).
+              A decimal win is rounded to the nearest whole number.{' '}
+              <span className="font-semibold text-[#fff6e8]">3.3 becomes 3.</span>
             </li>
-            <li>Other terms may apply each week; follow the Thursday announcement for full details.</li>
+            <li>
+              <span className="font-semibold text-[#fff6e8]">3.5 and above</span> rounds up.{' '}
+              <span className="font-semibold text-[#fff6e8]">3.5 becomes 4.</span>
+            </li>
           </ul>
+          <p className="mt-3 border-l-2 border-[#e7b84a]/60 pl-3 text-[12px] leading-relaxed text-[#cbb89a]">
+            These rules can be voided. Please contact an admin for more information.
+          </p>
         </div>
 
-        <p className="mt-8 text-[10px] font-bold uppercase tracking-[0.16em] text-[#8892b0]">Profile photo</p>
-        <div className="mt-3 rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] p-4 text-[13px] leading-relaxed text-[#c4cbe6]">
+        <p className="mt-8 text-[10px] font-bold uppercase tracking-[0.16em] text-[#e7c373]">Profile photo</p>
+        <div className="mt-3 rounded-2xl border border-[#e1b55d]/32 bg-[#1a1428]/95 p-4 text-[13px] leading-relaxed text-[#e4d8f0]">
           <p>
-            Within <span className="font-semibold text-white">5 days of account approval</span>, add a profile photo
-            that clearly shows <span className="font-semibold text-white">you</span> — not logos, memes, pets, or other
+            Within <span className="font-semibold text-[#fff6e8]">5 days of account approval</span>, add a profile photo
+            that clearly shows <span className="font-semibold text-[#fff6e8]">you</span> — not logos, memes, pets, or other
             unrelated images.
           </p>
-          <ul className="mt-3 space-y-2 list-disc pl-5 text-[#aeb7d6]">
+          <ul className="mt-3 space-y-2 list-disc pl-5 text-[#cbb89a]">
             <li>
-              <span className="font-semibold text-white">Have played on the platform?</span> You are not subject to
+              <span className="font-semibold text-[#fff6e8]">Have played on the platform?</span> You are not subject to
               suspension or removal for missing a profile photo.
             </li>
             <li>
-              <span className="font-semibold text-white">Have not played yet?</span> You must upload an acceptable
+              <span className="font-semibold text-[#fff6e8]">Have not played yet?</span> You must upload an acceptable
               profile photo within 5 days of approval. Accounts that do not may be suspended or removed.
             </li>
           </ul>
         </div>
 
-        <p className="mt-5 text-[12px] leading-relaxed text-[#7f8bad] border-l-2 border-[#8d63ff]/35 pl-3.5">
+        <p className="mt-5 text-[12px] leading-relaxed text-[#cbb89a] border-l-2 border-[#e7b84a]/60 pl-3.5">
           Relay may suspend or restrict accounts that break these program rules, abuse the platform, or put other
           members at risk. We exercise this only when we believe it is necessary to keep Relay fair and safe for
           everyone.
         </p>
-        <div className="mt-5 space-y-3 rounded-2xl border border-white/[0.08] bg-[rgba(11,18,40,0.9)] p-4 text-[13px] leading-relaxed text-[#8892b0]">
+        <div className="mt-5 space-y-3 rounded-2xl border border-[#e1b55d]/32 bg-[#1a1428]/95 p-4 text-[13px] leading-relaxed text-[#cbb89a]">
           <p>
             Problem with installation? Check out the <DownloadGuideLink />.
           </p>
           <p>
-            For more information, open <span className="font-semibold text-[#8d63ff]">Chat</span> from the bar below
+            For more information, open <span className="font-semibold text-[#f0c86a]">Chat</span> from the bar below
             and message our team.
           </p>
         </div>
       </main>
 
-      <CustomerMobileFooterNav isLight={false} onChatClick={() => router.push('/feed?openChat=1')} />
+      <CustomerMobileFooterNav isLight={false} tone="gold" onChatClick={() => router.push('/feed?openChat=1')} />
     </div>
   )
 }
